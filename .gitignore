@@ -1,0 +1,23 @@
+# Local secret config; never publish it in the public repository.
+skills/aireiter-image-generation/references/config.json
+
+# Local test/download outputs.
+output/
+.pytest_cache/
+
+# Python caches.
+__pycache__/
+*.py[cod]
+
+# Node dependencies.
+node_modules/
+
+# Office lock files.
+~$*.xlsx
+~$*.xls
+~$*.docx
+~$*.pptx
+
+# Local environment files.
+.env
+.env.*
