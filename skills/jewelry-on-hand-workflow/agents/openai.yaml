@@ -1,0 +1,6 @@
+interface:
+  display_name: "Jewelry On-Hand Workflow"
+  short_description: "编排珠宝上手图生成、参考图 review 与 QC 流程"
+  default_prompt: "Use $jewelry-on-hand-workflow to run the jewelry on-hand image workflow with review and QC gates."
+policy:
+  allow_implicit_invocation: true
