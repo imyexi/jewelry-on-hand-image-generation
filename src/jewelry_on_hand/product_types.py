@@ -19,8 +19,6 @@ _UNCERTAIN_TEXT_MARKERS = (
     "？",
 )
 
-_MIXED_CATEGORY_MARKERS = ("和", "与", "及", "或", "还是", "搭配", "配搭", "组合", "+", "＋")
-
 _UNSUPPORTED_CATEGORY_TERMS = (
     "戒指",
     "耳钉",
@@ -79,8 +77,6 @@ def normalize_product_type(value: str | ProductType | None) -> ProductType:
     if any("a" <= character <= "z" for character in text):
         return _ENGLISH_EXACT_ALIASES.get(text, ProductType.UNKNOWN)
     if any(marker in text for marker in _UNCERTAIN_TEXT_MARKERS):
-        return ProductType.UNKNOWN
-    if any(marker in text for marker in _MIXED_CATEGORY_MARKERS):
         return ProductType.UNKNOWN
     if any(term in text for term in _UNSUPPORTED_CATEGORY_TERMS):
         return ProductType.UNKNOWN
