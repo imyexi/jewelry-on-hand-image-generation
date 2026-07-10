@@ -8,6 +8,7 @@ from jewelry_on_hand.product_types import ProductType, normalize_product_type
     [
         ("手链", ProductType.BRACELET),
         ("手串/手链", ProductType.BRACELET),
+        ("朱砂手链/手串", ProductType.BRACELET),
         ("bracelet", ProductType.BRACELET),
         ("普通项链", ProductType.NECKLACE),
         ("珠链", ProductType.NECKLACE),
@@ -41,12 +42,24 @@ def test_ambiguous_free_text_is_not_silently_guessed():
         "可能是项链",
         "项链或戒指",
         "项链和戒指组合",
+        "项链和耳钉",
+        "项链搭配耳钉",
+        "项链和其他饰品",
+        "耳钉搭配项链",
     ],
 )
 def test_uncertain_or_mixed_category_text_is_unknown(raw):
     assert normalize_product_type(raw) is ProductType.UNKNOWN
 
 
-@pytest.mark.parametrize("raw", ["spring necklace", "knot necklace"])
-def test_english_marker_substrings_do_not_hide_explicit_necklace_alias(raw):
-    assert normalize_product_type(raw) is ProductType.NECKLACE
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "maybe necklace",
+        "necklace with earrings",
+        "spring necklace",
+        "knot necklace",
+    ],
+)
+def test_english_free_text_beyond_complete_alias_is_unknown(raw):
+    assert normalize_product_type(raw) is ProductType.UNKNOWN
