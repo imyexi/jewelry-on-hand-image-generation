@@ -39,6 +39,7 @@ def build_analysis_prompt(product_image: str | Path, dimensions: dict[str, Any] 
 - 尺寸信息只作为比例参考，不能覆盖、改写或替代可见外观判断。
 - 普通项链和带链吊坠的 layer_count 只能为 1 至 3；length_category 只能为 choker、collarbone、upper_chest、long 或 null。
 - 带链吊坠必须填写 has_pendant=true、pendant_count 大于等于 1 和有效 pendant_layer；普通项链必须填写 false、0、null。pendant_layer 不得大于 layer_count。
+- 无链独立吊坠没有链层，必须填写 has_pendant=true、pendant_count 大于等于 1、pendant_layer=null；系统只解析并在加载阶段明确拒绝，禁止自动补链。
 - 多件独立项链组合叠戴必须标记 is_independent_multi_item=true，当前阶段会拒绝生成。
 - 看不清的扣头、背面和遮挡结构不要臆测，分别写入 occluded_parts 和 uncertain_details。
 

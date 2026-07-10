@@ -388,7 +388,17 @@ class ProductAnalysis:
                 "普通项链不得声明主吊坠："
                 "has_pendant=false、pendant_count=0 且 pendant_layer 为空"
             )
-        if not self.has_pendant:
+        if confirmed is ProductType.PENDANT_ONLY:
+            if (
+                not self.has_pendant
+                or self.pendant_count < 1
+                or self.pendant_layer is not None
+            ):
+                raise ValueError(
+                    "无链独立吊坠必须声明 has_pendant=true、"
+                    "pendant_count 大于等于 1 且 pendant_layer 为空"
+                )
+        elif not self.has_pendant:
             if self.pendant_count != 0:
                 raise ValueError("has_pendant=false 时 pendant_count 必须为 0")
             if self.pendant_layer is not None:
@@ -410,6 +420,7 @@ class ProductAnalysis:
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProductAnalysis":
         source = _ensure_mapping(data, "ProductAnalysis")
+        raw_product_type = _required_string(source, "product_type")
         if "color_family" not in source:
             raise ValueError("color_family 必须是字符串列表")
         present_classification_fields = {
@@ -434,6 +445,15 @@ class ProductAnalysis:
                 value = source[field_name]
                 if not isinstance(value, (ProductType, str)) or not value.strip():
                     raise ValueError(f"{field_name} 必须是非空品类字符串")
+            if "source_image_type" not in source:
+                raise ValueError(
+                    "现代分类记录的 source_image_type 必须显式提供，不得使用历史默认"
+                )
+        elif normalize_product_type(raw_product_type) is not ProductType.BRACELET:
+            raise ValueError(
+                "只有可确认的旧手串/手链记录可以使用历史默认；"
+                "其他品类必须提供完整现代分类契约"
+            )
         special_requirements = (
             _string_list(source["special_requirements"], "special_requirements")
             if "special_requirements" in source
@@ -445,7 +465,7 @@ class ProductAnalysis:
             else True
         )
         return cls(
-            product_type=_required_string(source, "product_type"),
+            product_type=raw_product_type,
             wear_position=_required_string(source, "wear_position"),
             visible_appearance=_required_string(source, "visible_appearance"),
             color_family=_string_list(source["color_family"], "color_family"),

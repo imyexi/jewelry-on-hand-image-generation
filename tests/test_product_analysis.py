@@ -33,6 +33,7 @@ def _modern_classification(product_type):
         "classification_confidence": "high",
         "classification_evidence": ["肉眼可见品类结构"],
         "classification_source": "auto_confirmed",
+        "source_image_type": "worn_source",
     }
 
 
@@ -93,6 +94,8 @@ def test_prompt_includes_contract_fields_path_and_dimension_reference(tmp_path):
     assert "普通项链和带链吊坠的默认 display_mode 也是 worn" in prompt
     assert "只有用户在后续人工确认中主动切换" in prompt
     assert "upper_chest" in prompt
+    assert "无链独立吊坠没有链层" in prompt
+    assert "pendant_layer=null" in prompt
     assert "第一版只支持手串/手链" not in prompt
 
 
@@ -105,11 +108,20 @@ def test_schema_uses_spec_default_mode_length_values_and_classification_source()
     assert "upper_chest" in schema
     assert "manual_override" in schema
     assert "manual_confirmed" not in schema
+    assert "无链独立吊坠没有链层，`pendant_layer` 必须为 `null`" in schema
 
 
 def test_rejects_unsupported_product_analysis(tmp_path):
     path = tmp_path / "analysis.json"
-    write_json(path, _analysis_data("戒指") | {"wear_position": "手指", "visible_appearance": "银色戒指"})
+    write_json(
+        path,
+        _analysis_data("戒指")
+        | {
+            **_modern_classification("unknown"),
+            "wear_position": "手指",
+            "visible_appearance": "银色戒指",
+        },
+    )
     with pytest.raises(UnsupportedProductError, match="手串/手链"):
         load_product_analysis(path)
 
@@ -217,6 +229,9 @@ def test_rejects_pendant_only_before_generation(tmp_path):
             "source_image_type": "worn_source",
             "display_mode": "hand_held",
             "layer_count": 1,
+            "has_pendant": True,
+            "pendant_count": 1,
+            "pendant_layer": None,
         },
     )
 

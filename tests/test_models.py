@@ -37,6 +37,7 @@ def _modern_classification(product_type="bracelet"):
         "classification_confidence": "high",
         "classification_evidence": ["肉眼可见品类结构"],
         "classification_source": "auto_confirmed",
+        "source_image_type": "worn_source",
     }
 
 
@@ -743,7 +744,6 @@ def test_necklace_rejects_layer_count_out_of_range(layer_count):
             _analysis_data(
                 product_type="普通项链",
                 **_modern_classification("necklace"),
-                source_image_type="worn_source",
                 layer_count=layer_count,
             )
         )
@@ -755,7 +755,6 @@ def test_pendant_layer_must_not_exceed_layer_count():
             _analysis_data(
                 product_type="带链吊坠",
                 **_modern_classification("pendant_necklace"),
-                source_image_type="worn_source",
                 layer_count=1,
                 has_pendant=True,
                 pendant_count=1,
@@ -770,7 +769,6 @@ def test_necklace_rejects_independent_multi_item_stacking():
             _analysis_data(
                 product_type="普通项链",
                 **_modern_classification("necklace"),
-                source_image_type="worn_source",
                 layer_count=2,
                 is_independent_multi_item=True,
             )
@@ -824,6 +822,23 @@ def test_modern_classification_contract_rejects_each_missing_field(missing_field
     data.pop(missing_field)
 
     with pytest.raises(ValueError, match=f"现代分类契约.*{missing_field}"):
+        ProductAnalysis.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    "product_type",
+    ["普通项链", "带链吊坠", "无链独立吊坠", "戒指", "疑似手链"],
+)
+def test_non_legacy_product_without_modern_classification_is_rejected(product_type):
+    with pytest.raises(ValueError, match="旧手串/手链.*现代分类契约"):
+        ProductAnalysis.from_dict(_analysis_data(product_type=product_type))
+
+
+def test_modern_classification_requires_explicit_source_image_type():
+    data = _analysis_data(**_modern_classification())
+    data.pop("source_image_type")
+
+    with pytest.raises(ValueError, match="现代分类.*source_image_type.*显式"):
         ProductAnalysis.from_dict(data)
 
 
@@ -885,6 +900,23 @@ def test_plain_necklace_rejects_main_pendant_fields():
                 pendant_layer=1,
             )
         )
+
+
+def test_pendant_only_parses_without_chain_layer():
+    analysis = ProductAnalysis.from_dict(
+        _analysis_data(
+            product_type="无链独立吊坠",
+            **_modern_classification("pendant_only"),
+            has_pendant=True,
+            pendant_count=1,
+            pendant_layer=None,
+        )
+    )
+
+    assert analysis.confirmed_product_type is ProductType.PENDANT_ONLY
+    assert analysis.has_pendant is True
+    assert analysis.pendant_count == 1
+    assert analysis.pendant_layer is None
 
 
 @pytest.mark.parametrize("product_type", ["necklace", "pendant_necklace"])
