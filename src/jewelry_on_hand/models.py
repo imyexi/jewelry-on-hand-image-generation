@@ -16,6 +16,18 @@ _DIMENSION_FIELDS = (
     "bead_diameter_mm",
 )
 
+_MODERN_CLASSIFICATION_FIELDS = (
+    "detected_product_type",
+    "confirmed_product_type",
+    "classification_confidence",
+    "classification_evidence",
+    "classification_source",
+)
+
+_NECKLACE_LENGTH_CATEGORIES = frozenset(
+    {"choker", "collarbone", "upper_chest", "long"}
+)
+
 
 def _ensure_mapping(data: dict[str, Any] | None, model_name: str) -> dict[str, Any]:
     if data is None:
@@ -146,6 +158,21 @@ def _optional_float(value: Any, field_name: str) -> float | None:
     if not math.isfinite(number) or number < 0:
         raise ValueError(f"{field_name} 必须是有限非负数")
     return number
+
+
+def _json_bool(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} 必须是 JSON 布尔值")
+    return value
+
+
+def _json_int(value: Any, field_name: str, *, allow_none: bool = False) -> int | None:
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        suffix = "或 null" if allow_none else ""
+        raise ValueError(f"{field_name} 必须是 JSON 整数{suffix}")
+    return value
 
 
 def _normalize_product_type_field(
@@ -335,6 +362,43 @@ class ProductAnalysis:
             _string_sequence(self.uncertain_details, "uncertain_details"),
         )
 
+        if (
+            confirmed in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}
+            and self.length_category is not None
+            and self.length_category not in _NECKLACE_LENGTH_CATEGORIES
+        ):
+            raise ValueError(
+                "length_category 必须是 choker、collarbone、upper_chest、long 或 None"
+            )
+        if confirmed is ProductType.PENDANT_NECKLACE and (
+            not self.has_pendant
+            or self.pendant_count < 1
+            or self.pendant_layer is None
+        ):
+            raise ValueError(
+                "带链吊坠必须声明完整主吊坠结构："
+                "has_pendant=true、pendant_count 大于等于 1 且 pendant_layer 有效"
+            )
+        if confirmed is ProductType.NECKLACE and (
+            self.has_pendant
+            or self.pendant_count != 0
+            or self.pendant_layer is not None
+        ):
+            raise ValueError(
+                "普通项链不得声明主吊坠："
+                "has_pendant=false、pendant_count=0 且 pendant_layer 为空"
+            )
+        if not self.has_pendant:
+            if self.pendant_count != 0:
+                raise ValueError("has_pendant=false 时 pendant_count 必须为 0")
+            if self.pendant_layer is not None:
+                raise ValueError("has_pendant=false 时不得填写 pendant_layer")
+        else:
+            if self.pendant_count < 1:
+                raise ValueError("has_pendant=true 时 pendant_count 必须大于等于 1")
+            if self.pendant_layer is None:
+                raise ValueError("has_pendant=true 时必须填写 pendant_layer")
+
         if confirmed in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}:
             if not 1 <= self.layer_count <= 3:
                 raise ValueError("项链产品只支持 1 至 3 层")
@@ -348,6 +412,28 @@ class ProductAnalysis:
         source = _ensure_mapping(data, "ProductAnalysis")
         if "color_family" not in source:
             raise ValueError("color_family 必须是字符串列表")
+        present_classification_fields = {
+            field_name
+            for field_name in _MODERN_CLASSIFICATION_FIELDS
+            if field_name in source
+        }
+        if present_classification_fields and len(present_classification_fields) != len(
+            _MODERN_CLASSIFICATION_FIELDS
+        ):
+            missing_fields = [
+                field_name
+                for field_name in _MODERN_CLASSIFICATION_FIELDS
+                if field_name not in source
+            ]
+            raise ValueError(
+                "现代分类契约不完整，缺少字段：" + "、".join(missing_fields)
+            )
+        is_modern_classification = bool(present_classification_fields)
+        if is_modern_classification:
+            for field_name in ("detected_product_type", "confirmed_product_type"):
+                value = source[field_name]
+                if not isinstance(value, (ProductType, str)) or not value.strip():
+                    raise ValueError(f"{field_name} 必须是非空品类字符串")
         special_requirements = (
             _string_list(source["special_requirements"], "special_requirements")
             if "special_requirements" in source
@@ -368,21 +454,57 @@ class ProductAnalysis:
             product_dimensions=ProductDimensions.from_dict(source.get("product_dimensions")),
             needs_full_front_display=needs_full_front_display,
             special_requirements=special_requirements,
-            detected_product_type=source.get("detected_product_type"),
-            confirmed_product_type=source.get("confirmed_product_type"),
-            classification_confidence=source.get("classification_confidence", "high"),
-            classification_evidence=_string_list(
-                source.get("classification_evidence", []), "classification_evidence"
+            detected_product_type=(
+                source["detected_product_type"] if is_modern_classification else None
             ),
-            classification_source=source.get("classification_source", "legacy_inferred"),
+            confirmed_product_type=(
+                source["confirmed_product_type"] if is_modern_classification else None
+            ),
+            classification_confidence=(
+                source["classification_confidence"]
+                if is_modern_classification
+                else "high"
+            ),
+            classification_evidence=(
+                _string_list(
+                    source["classification_evidence"], "classification_evidence"
+                )
+                if is_modern_classification
+                else ()
+            ),
+            classification_source=(
+                source["classification_source"]
+                if is_modern_classification
+                else "legacy_inferred"
+            ),
             display_mode=source.get("display_mode", DisplayMode.WORN.value),
             source_image_type=source.get("source_image_type", SourceImageType.WORN_SOURCE.value),
-            layer_count=source.get("layer_count", 1),
+            layer_count=(
+                _json_int(source["layer_count"], "layer_count")
+                if "layer_count" in source
+                else 1
+            ),
             length_category=source.get("length_category"),
             chain_or_strand_type=source.get("chain_or_strand_type"),
-            has_pendant=source.get("has_pendant", False),
-            pendant_count=source.get("pendant_count", 0),
-            pendant_layer=source.get("pendant_layer"),
+            has_pendant=(
+                _json_bool(source["has_pendant"], "has_pendant")
+                if "has_pendant" in source
+                else False
+            ),
+            pendant_count=(
+                _json_int(source["pendant_count"], "pendant_count")
+                if "pendant_count" in source
+                else 0
+            ),
+            pendant_layer=(
+                _json_int(
+                    source["pendant_layer"],
+                    "pendant_layer",
+                    allow_none=True,
+                )
+                if "pendant_layer" in source
+                else None
+            ),
             pendant_position=source.get("pendant_position"),
             pendant_orientation=source.get("pendant_orientation"),
             connection_structure=source.get("connection_structure"),
@@ -391,7 +513,14 @@ class ProductAnalysis:
             uncertain_details=_string_list(
                 source.get("uncertain_details", []), "uncertain_details"
             ),
-            is_independent_multi_item=source.get("is_independent_multi_item", False),
+            is_independent_multi_item=(
+                _json_bool(
+                    source["is_independent_multi_item"],
+                    "is_independent_multi_item",
+                )
+                if "is_independent_multi_item" in source
+                else False
+            ),
         )
 
     @property

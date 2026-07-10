@@ -31,14 +31,16 @@ def build_analysis_prompt(product_image: str | Path, dimensions: dict[str, Any] 
 - 第一阶段只接受真人佩戴原图；source_image_type 必须如实描述输入图，白底、平铺、纯手持或未知来源会在加载阶段被拒绝。
 - product_type 保留肉眼可见的中文品类描述；detected_product_type 和 confirmed_product_type 使用 bracelet、necklace、pendant_necklace、pendant_only、unknown 之一。
 - 分类明确时 confirmed_product_type 与 detected_product_type 一致；证据不足时使用 unknown，并在 classification_evidence 和 uncertain_details 记录原因。
-- display_mode 是后续生成展示模式，不等于 source_image_type。手串/手链只允许 worn；普通项链和带链吊坠允许 worn 或 hand_held。
+- display_mode 是后续生成展示模式，不等于 source_image_type。手串/手链只允许 worn；普通项链和带链吊坠的默认 display_mode 也是 worn，只有用户在后续人工确认中主动切换，才可改为 hand_held。
 - visible_appearance 必须只描述肉眼可见外观，包括形状、颜色、排列、透明度、光泽、配件和可见纹理。
 - 必须特别写出局部关键结构，例如随形、跑环、双尖、回纹、貔貅、桶珠、雕刻、吊坠、流苏、链坠。
 - 只描述肉眼可见外观，不要根据常识或商品名补充图片中看不到的信息。
 - 不要猜测材质名，例如不要写水晶、玛瑙、玉石、翡翠、银、金、珍珠等无法仅凭图片确定的材质。
 - 尺寸信息只作为比例参考，不能覆盖、改写或替代可见外观判断。
-- 普通项链和带链吊坠的 layer_count 只能为 1 至 3；多件独立项链组合叠戴必须标记 is_independent_multi_item=true，当前阶段会拒绝生成。
-- pendant_layer 不得大于 layer_count。看不清的扣头、背面和遮挡结构不要臆测，分别写入 occluded_parts 和 uncertain_details。
+- 普通项链和带链吊坠的 layer_count 只能为 1 至 3；length_category 只能为 choker、collarbone、upper_chest、long 或 null。
+- 带链吊坠必须填写 has_pendant=true、pendant_count 大于等于 1 和有效 pendant_layer；普通项链必须填写 false、0、null。pendant_layer 不得大于 layer_count。
+- 多件独立项链组合叠戴必须标记 is_independent_multi_item=true，当前阶段会拒绝生成。
+- 看不清的扣头、背面和遮挡结构不要臆测，分别写入 occluded_parts 和 uncertain_details。
 
 尺寸信息（仅比例参考）：
 {dimension_note}

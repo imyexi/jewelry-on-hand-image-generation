@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from jewelry_on_hand.models import ProductAnalysis
@@ -21,6 +23,16 @@ def _analysis_data(product_type):
         "product_dimensions": {},
         "needs_full_front_display": True,
         "special_requirements": [],
+    }
+
+
+def _modern_classification(product_type):
+    return {
+        "detected_product_type": product_type,
+        "confirmed_product_type": product_type,
+        "classification_confidence": "high",
+        "classification_evidence": ["肉眼可见品类结构"],
+        "classification_source": "auto_confirmed",
     }
 
 
@@ -78,7 +90,21 @@ def test_prompt_includes_contract_fields_path_and_dimension_reference(tmp_path):
     assert "尺寸信息只作为比例参考" in prompt
     assert "手串/手链、普通项链和带链吊坠" in prompt
     assert "第一阶段只接受真人佩戴原图" in prompt
+    assert "普通项链和带链吊坠的默认 display_mode 也是 worn" in prompt
+    assert "只有用户在后续人工确认中主动切换" in prompt
+    assert "upper_chest" in prompt
     assert "第一版只支持手串/手链" not in prompt
+
+
+def test_schema_uses_spec_default_mode_length_values_and_classification_source():
+    schema_path = Path(__file__).parents[1] / "reference" / "product-analysis-schema.md"
+    schema = schema_path.read_text(encoding="utf-8")
+
+    assert "默认 `worn`" in schema
+    assert "只有用户在后续人工确认中主动切换" in schema
+    assert "upper_chest" in schema
+    assert "manual_override" in schema
+    assert "manual_confirmed" not in schema
 
 
 def test_rejects_unsupported_product_analysis(tmp_path):
@@ -148,9 +174,9 @@ def test_accepts_necklace_analysis_with_worn_source(tmp_path):
         path,
         _analysis_data("普通项链")
         | {
+            **_modern_classification("necklace"),
             "wear_position": "颈部和锁骨",
             "visible_appearance": "单层珠链",
-            "confirmed_product_type": "necklace",
             "source_image_type": "worn_source",
             "display_mode": "worn",
             "layer_count": 1,
@@ -168,8 +194,8 @@ def test_rejects_necklace_flat_lay_source(tmp_path):
         path,
         _analysis_data("普通项链")
         | {
+            **_modern_classification("necklace"),
             "wear_position": "白底平铺",
-            "confirmed_product_type": "necklace",
             "source_image_type": "flat_lay_source",
             "display_mode": "worn",
             "layer_count": 1,
@@ -186,8 +212,8 @@ def test_rejects_pendant_only_before_generation(tmp_path):
         path,
         _analysis_data("无链独立吊坠")
         | {
+            **_modern_classification("pendant_only"),
             "wear_position": "颈部",
-            "confirmed_product_type": "pendant_only",
             "source_image_type": "worn_source",
             "display_mode": "hand_held",
             "layer_count": 1,

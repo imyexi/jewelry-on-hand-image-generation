@@ -12,7 +12,7 @@
 - 可识别但不可生成：无链独立吊坠。系统必须明确拒绝，且禁止自动补链。
 - 不可生成：无法识别或其他未支持品类。
 - 第一阶段输入图只接受 `worn_source`。`hand_held_source`、`flat_lay_source` 和 `unknown_source` 必须如实记录，但加载阶段会拒绝。
-- `display_mode` 描述后续生成展示模式，不等同于 `source_image_type`。普通项链和带链吊坠可以由真人佩戴原图生成手持展示图。
+- `display_mode` 描述后续生成展示模式，不等同于 `source_image_type`。手串/手链固定为 `worn`；普通项链和带链吊坠默认 `worn`，只有用户在后续人工确认中主动切换，才可改为 `hand_held`。本阶段只记录该确认结果，不负责实现后续 CLI 交互。
 - 每次分析都必须生成 `analysis/product_fidelity_constraints.json`；没有局部关键识别点时也要显式记录 `must_keep: []` 和 `review_status: not_applicable`。
 
 ## 当前完整结构
@@ -27,7 +27,7 @@
   "classification_confidence": "high",
   "classification_evidence": ["第二层正面中央存在与链条连接的主吊坠"],
   "classification_source": "auto_confirmed",
-  "display_mode": "hand_held",
+  "display_mode": "worn",
   "source_image_type": "worn_source",
   "wear_position": "颈部和锁骨",
   "visible_appearance": "两层圆珠链，第二层正面中央连接一枚水滴形透明吊坠",
@@ -68,8 +68,8 @@
 | `confirmed_product_type` | 标准品类字符串 | 系统保守确认或人工纠正后的结果；后续流程以此字段为准。 |
 | `classification_confidence` | 非空字符串 | 分类置信度，例如 `high`、`medium`、`low`。 |
 | `classification_evidence` | 字符串列表 | 支持分类的肉眼可见证据，不写材质推断。 |
-| `classification_source` | 非空字符串 | 分类来源，例如 `auto_confirmed`、`manual_confirmed`、`legacy_inferred`。 |
-| `display_mode` | 枚举字符串 | 后续生成展示模式：`worn` 或 `hand_held`。 |
+| `classification_source` | 非空字符串 | 分类来源，例如 `auto_confirmed`、`manual_override`、`legacy_inferred`。 |
+| `display_mode` | 枚举字符串 | 后续生成展示模式：手串/手链固定为 `worn`；项链默认 `worn`，经用户后续人工确认才可为 `hand_held`。 |
 | `source_image_type` | 枚举字符串 | 输入图类型：`worn_source`、`hand_held_source`、`flat_lay_source` 或 `unknown_source`。 |
 | `wear_position` | 非空字符串 | 肉眼可见佩戴位置，例如手腕、颈部、锁骨或胸前。 |
 | `visible_appearance` | 非空字符串 | 整体可见外观、排列、透明度、光泽、配件和可见纹理。 |
@@ -80,7 +80,7 @@
 | `needs_full_front_display` | 布尔值 | 后续结果是否需要完整露出正面主体。 |
 | `special_requirements` | 字符串列表 | 整体展示要求，不替代局部保真约束。 |
 | `layer_count` | 正整数 | 单件产品自身层数；普通项链和带链吊坠仅支持 1 至 3 层。 |
-| `length_category` | 字符串或 `null` | 长度类别，例如 `choker`、`collarbone`、`long`；无法确认时为 `null`。 |
+| `length_category` | 闭集字符串或 `null` | 普通项链和带链吊坠只能为 `choker`、`collarbone`、`upper_chest`、`long`；无法确认时为 `null`。 |
 | `chain_or_strand_type` | 字符串或 `null` | 肉眼可见链条或串线类型，例如 `metal_chain`、`beaded`。 |
 | `has_pendant` | 布尔值 | 是否肉眼可见吊坠。 |
 | `pendant_count` | 非负整数 | 肉眼可见吊坠数量。 |
@@ -103,25 +103,29 @@
 | `confirmed_product_type` | 可用 `display_mode` | 第一阶段可用 `source_image_type` | 层数 | 结果 |
 | --- | --- | --- | --- | --- |
 | `bracelet` | `worn` | `worn_source` | 1 层 | 支持 |
-| `necklace` | `worn`、`hand_held` | `worn_source` | 1 至 3 层 | 支持 |
-| `pendant_necklace` | `worn`、`hand_held` | `worn_source` | 1 至 3 层 | 支持 |
+| `necklace` | 默认 `worn`；人工确认后可为 `hand_held` | `worn_source` | 1 至 3 层 | 支持 |
+| `pendant_necklace` | 默认 `worn`；人工确认后可为 `hand_held` | `worn_source` | 1 至 3 层 | 支持 |
 | `pendant_only` | 无 | 无 | 不进入生成 | 明确拒绝，禁止自动补链 |
 | `unknown` | 无 | 无 | 不进入生成 | 必须先人工纠正 |
 
-对于前三个支持品类，`flat_lay_source`、`hand_held_source` 和 `unknown_source` 均不满足第一阶段输入边界。普通项链或带链吊坠即使选择 `hand_held` 输出模式，输入仍必须是 `worn_source`。
+对于前三个支持品类，`flat_lay_source`、`hand_held_source` 和 `unknown_source` 均不满足第一阶段输入边界。普通项链或带链吊坠只有用户在后续人工确认中主动切换，输出模式才可为 `hand_held`；即使已经切换，输入仍必须是 `worn_source`。
 
 ## 结构校验规则
 
-- `layer_count` 必须为大于等于 1 的整数；普通项链和带链吊坠不得超过 3 层，手串/手链只支持 1 层。
-- `pendant_count` 必须为大于等于 0 的整数，不接受布尔值或带小数的数值。
-- `pendant_layer` 如果存在，必须为正整数且不得大于 `layer_count`。
+- JSON 中显式提供的 `layer_count`、`pendant_count`、`pendant_layer` 必须分别为整数、整数、整数或 `null`，不得使用字符串、布尔值或浮点数；字段缺失时才使用历史结构默认值。
+- JSON 中显式提供的 `has_pendant`、`is_independent_multi_item` 必须为布尔值，不接受 `"true"`、`"false"` 等字符串；旧字段的既有兼容解析不受影响。
+- `layer_count` 必须大于等于 1；普通项链和带链吊坠不得超过 3 层，手串/手链只支持 1 层。
+- `length_category` 对普通项链和带链吊坠只允许 `choker`、`collarbone`、`upper_chest`、`long` 或 `null`。
+- `has_pendant=false` 时 `pendant_count` 必须为 0 且 `pendant_layer` 必须为空；`has_pendant=true` 时 `pendant_count` 必须大于等于 1 且必须填写 `pendant_layer`。
+- 带链吊坠必须声明完整主吊坠，即 `has_pendant=true`、`pendant_count` 大于等于 1 且 `pendant_layer` 有效；普通项链不得声明主吊坠，三项必须分别为 `false`、`0`、`null`。
+- `pendant_layer` 必须为正整数且不得大于 `layer_count`。
 - 普通项链和带链吊坠的 `is_independent_multi_item` 必须为 `false`；多件独立项链组合叠戴当前不进入生成。
 - 列表字段只能包含字符串；布尔、整数、枚举和可选字符串字段必须符合上表类型。
 - `confirmed_product_type` 可以与 `detected_product_type` 不同，用于保存人工纠正；后续支持判断以 `confirmed_product_type` 为准。
 
 ## 历史手串 JSON 兼容
 
-历史手串 JSON 可能只有原有基础字段，没有任何分类、模式或结构字段。加载器保留原始 `product_type` 字符串，并按下列默认值补齐，不要求迁移旧文件：
+历史手串 JSON 可能只有原有基础字段，没有任何现代分类、模式或结构字段。只有 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 五个现代分类字段全部缺失时，记录才按历史分类契约读取。加载器保留原始 `product_type` 字符串，并按下列默认值整体补齐，不要求迁移旧文件：
 
 | 缺失字段 | 兼容默认值 |
 | --- | --- |
@@ -140,7 +144,7 @@
 | `occluded_parts`、`uncertain_details` | `[]` |
 | `is_independent_multi_item` | `false` |
 
-只有字段缺失或值为 `null` 时才使用品类回退逻辑；显式提供布尔值、列表等非法品类字段类型会抛出中文错误，不会被静默当作历史默认值。
+只要五个现代分类字段出现任意一个，记录就必须完整提供全部五个字段，且每个字段类型和值有效；缺少任一字段都会抛出“现代分类契约不完整”的中文错误。现代记录不会自动补造 `high`、空证据或 `legacy_inferred`，显式 `null` 也不触发历史回退。
 
 ## 外观描述与保真约束分工
 

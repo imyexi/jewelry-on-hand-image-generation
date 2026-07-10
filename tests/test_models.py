@@ -30,6 +30,16 @@ def _analysis_data(**overrides):
     return data
 
 
+def _modern_classification(product_type="bracelet"):
+    return {
+        "detected_product_type": product_type,
+        "confirmed_product_type": product_type,
+        "classification_confidence": "high",
+        "classification_evidence": ["肉眼可见品类结构"],
+        "classification_source": "auto_confirmed",
+    }
+
+
 def _constraints_data(**overrides):
     data = {
         "schema_version": 1,
@@ -673,6 +683,7 @@ def test_legacy_bracelet_json_gets_normalized_defaults():
     assert analysis.display_mode is DisplayMode.WORN
     assert analysis.source_image_type is SourceImageType.WORN_SOURCE
     assert analysis.layer_count == 1
+    assert analysis.length_category is None
 
 
 def test_necklace_analysis_preserves_structure():
@@ -731,7 +742,7 @@ def test_necklace_rejects_layer_count_out_of_range(layer_count):
         ProductAnalysis.from_dict(
             _analysis_data(
                 product_type="普通项链",
-                confirmed_product_type="necklace",
+                **_modern_classification("necklace"),
                 source_image_type="worn_source",
                 layer_count=layer_count,
             )
@@ -743,7 +754,7 @@ def test_pendant_layer_must_not_exceed_layer_count():
         ProductAnalysis.from_dict(
             _analysis_data(
                 product_type="带链吊坠",
-                confirmed_product_type="pendant_necklace",
+                **_modern_classification("pendant_necklace"),
                 source_image_type="worn_source",
                 layer_count=1,
                 has_pendant=True,
@@ -758,7 +769,7 @@ def test_necklace_rejects_independent_multi_item_stacking():
         ProductAnalysis.from_dict(
             _analysis_data(
                 product_type="普通项链",
-                confirmed_product_type="necklace",
+                **_modern_classification("necklace"),
                 source_image_type="worn_source",
                 layer_count=2,
                 is_independent_multi_item=True,
@@ -776,8 +787,10 @@ def test_necklace_rejects_independent_multi_item_stacking():
 def test_product_analysis_rejects_invalid_product_type_field_types(
     field_name, invalid_value
 ):
+    classification = _modern_classification()
+    classification[field_name] = invalid_value
     with pytest.raises(ValueError, match=field_name):
-        ProductAnalysis.from_dict(_analysis_data(**{field_name: invalid_value}))
+        ProductAnalysis.from_dict(_analysis_data(**classification))
 
 
 def test_product_analysis_rejects_fractional_pendant_count():
@@ -794,3 +807,179 @@ def test_product_analysis_rejects_infinite_integer_fields_with_chinese_error(
 ):
     with pytest.raises(ValueError, match=f"{field_name}.*整数"):
         ProductAnalysis.from_dict(_analysis_data(**{field_name: math.inf}))
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "detected_product_type",
+        "confirmed_product_type",
+        "classification_confidence",
+        "classification_evidence",
+        "classification_source",
+    ],
+)
+def test_modern_classification_contract_rejects_each_missing_field(missing_field):
+    data = _analysis_data(**_modern_classification())
+    data.pop(missing_field)
+
+    with pytest.raises(ValueError, match=f"现代分类契约.*{missing_field}"):
+        ProductAnalysis.from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("pendant_fields", "error_pattern"),
+    [
+        (
+            {"has_pendant": False, "pendant_count": 1, "pendant_layer": None},
+            "has_pendant=false.*pendant_count",
+        ),
+        (
+            {"has_pendant": False, "pendant_count": 0, "pendant_layer": 1},
+            "has_pendant=false.*pendant_layer",
+        ),
+        (
+            {"has_pendant": True, "pendant_count": 0, "pendant_layer": 1},
+            "has_pendant=true.*pendant_count",
+        ),
+        (
+            {"has_pendant": True, "pendant_count": 1, "pendant_layer": None},
+            "has_pendant=true.*pendant_layer",
+        ),
+    ],
+)
+def test_pendant_structure_requires_consistent_presence_fields(
+    pendant_fields, error_pattern
+):
+    with pytest.raises(ValueError, match=error_pattern):
+        ProductAnalysis.from_dict(_analysis_data(**pendant_fields))
+
+
+@pytest.mark.parametrize(
+    "pendant_fields",
+    [
+        {"has_pendant": False, "pendant_count": 0, "pendant_layer": None},
+        {"has_pendant": True, "pendant_count": 0, "pendant_layer": 1},
+        {"has_pendant": True, "pendant_count": 1, "pendant_layer": None},
+    ],
+)
+def test_pendant_necklace_requires_complete_main_pendant(pendant_fields):
+    with pytest.raises(ValueError, match="带链吊坠.*主吊坠"):
+        ProductAnalysis.from_dict(
+            _analysis_data(
+                product_type="带链吊坠",
+                **_modern_classification("pendant_necklace"),
+                **pendant_fields,
+            )
+        )
+
+
+def test_plain_necklace_rejects_main_pendant_fields():
+    with pytest.raises(ValueError, match="普通项链.*主吊坠"):
+        ProductAnalysis.from_dict(
+            _analysis_data(
+                product_type="普通项链",
+                **_modern_classification("necklace"),
+                has_pendant=True,
+                pendant_count=1,
+                pendant_layer=1,
+            )
+        )
+
+
+@pytest.mark.parametrize("product_type", ["necklace", "pendant_necklace"])
+@pytest.mark.parametrize(
+    "length_category",
+    ["choker", "collarbone", "upper_chest", "long"],
+)
+def test_necklace_types_accept_closed_length_categories(
+    product_type, length_category
+):
+    pendant_fields = (
+        {"has_pendant": True, "pendant_count": 1, "pendant_layer": 1}
+        if product_type == "pendant_necklace"
+        else {}
+    )
+
+    analysis = ProductAnalysis.from_dict(
+        _analysis_data(
+            product_type=("普通项链" if product_type == "necklace" else "带链吊坠"),
+            **_modern_classification(product_type),
+            length_category=length_category,
+            **pendant_fields,
+        )
+    )
+
+    assert analysis.length_category == length_category
+
+
+@pytest.mark.parametrize("product_type", ["necklace", "pendant_necklace"])
+def test_necklace_types_reject_unknown_length_category(product_type):
+    pendant_fields = (
+        {"has_pendant": True, "pendant_count": 1, "pendant_layer": 1}
+        if product_type == "pendant_necklace"
+        else {}
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="length_category.*choker.*collarbone.*upper_chest.*long",
+    ):
+        ProductAnalysis.from_dict(
+            _analysis_data(
+                product_type=(
+                    "普通项链" if product_type == "necklace" else "带链吊坠"
+                ),
+                **_modern_classification(product_type),
+                length_category="princess",
+                **pendant_fields,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "companion_fields"),
+    [
+        ("layer_count", "1", {}),
+        ("layer_count", True, {}),
+        (
+            "pendant_count",
+            "1",
+            {"has_pendant": True, "pendant_layer": 1},
+        ),
+        (
+            "pendant_count",
+            True,
+            {"has_pendant": True, "pendant_layer": 1},
+        ),
+        (
+            "pendant_layer",
+            "1",
+            {"has_pendant": True, "pendant_count": 1},
+        ),
+        (
+            "pendant_layer",
+            True,
+            {"has_pendant": True, "pendant_count": 1},
+        ),
+    ],
+)
+def test_new_integer_fields_require_json_integers(
+    field_name, invalid_value, companion_fields
+):
+    with pytest.raises(ValueError, match=f"{field_name}.*JSON 整数"):
+        ProductAnalysis.from_dict(
+            _analysis_data(
+                **companion_fields,
+                **{field_name: invalid_value},
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["has_pendant", "is_independent_multi_item"],
+)
+def test_new_boolean_fields_reject_string_json_values(field_name):
+    with pytest.raises(ValueError, match=f"{field_name}.*JSON 布尔值"):
+        ProductAnalysis.from_dict(_analysis_data(**{field_name: "false"}))
