@@ -52,14 +52,36 @@ def test_prompt_includes_contract_fields_path_and_dimension_reference(tmp_path):
         "dimension_source",
         "needs_full_front_display",
         "special_requirements",
+        "detected_product_type",
+        "confirmed_product_type",
+        "classification_confidence",
+        "classification_evidence",
+        "classification_source",
+        "display_mode",
+        "source_image_type",
+        "layer_count",
+        "length_category",
+        "chain_or_strand_type",
+        "has_pendant",
+        "pendant_count",
+        "pendant_layer",
+        "pendant_position",
+        "pendant_orientation",
+        "connection_structure",
+        "symmetry",
+        "occluded_parts",
+        "uncertain_details",
+        "is_independent_multi_item",
     ):
         assert field_name in prompt
     assert "只输出 JSON" in prompt
     assert "尺寸信息只作为比例参考" in prompt
-    assert "第一版只支持手串/手链" in prompt
+    assert "手串/手链、普通项链和带链吊坠" in prompt
+    assert "第一阶段只接受真人佩戴原图" in prompt
+    assert "第一版只支持手串/手链" not in prompt
 
 
-def test_rejects_non_bracelet_analysis(tmp_path):
+def test_rejects_unsupported_product_analysis(tmp_path):
     path = tmp_path / "analysis.json"
     write_json(path, _analysis_data("戒指") | {"wear_position": "手指", "visible_appearance": "银色戒指"})
     with pytest.raises(UnsupportedProductError, match="手串/手链"):
@@ -118,3 +140,59 @@ def test_build_default_fidelity_constraints_marks_not_applicable_without_keyword
     assert constraints.must_keep == ()
     assert constraints.review_status == "not_applicable"
     assert constraints.needs_user_review is False
+
+
+def test_accepts_necklace_analysis_with_worn_source(tmp_path):
+    path = tmp_path / "analysis.json"
+    write_json(
+        path,
+        _analysis_data("普通项链")
+        | {
+            "wear_position": "颈部和锁骨",
+            "visible_appearance": "单层珠链",
+            "confirmed_product_type": "necklace",
+            "source_image_type": "worn_source",
+            "display_mode": "worn",
+            "layer_count": 1,
+        },
+    )
+
+    analysis = load_product_analysis(path)
+
+    assert analysis.normalized_product_type.value == "necklace"
+
+
+def test_rejects_necklace_flat_lay_source(tmp_path):
+    path = tmp_path / "analysis.json"
+    write_json(
+        path,
+        _analysis_data("普通项链")
+        | {
+            "wear_position": "白底平铺",
+            "confirmed_product_type": "necklace",
+            "source_image_type": "flat_lay_source",
+            "display_mode": "worn",
+            "layer_count": 1,
+        },
+    )
+
+    with pytest.raises(UnsupportedProductError, match="真人佩戴原图"):
+        load_product_analysis(path)
+
+
+def test_rejects_pendant_only_before_generation(tmp_path):
+    path = tmp_path / "analysis.json"
+    write_json(
+        path,
+        _analysis_data("无链独立吊坠")
+        | {
+            "wear_position": "颈部",
+            "confirmed_product_type": "pendant_only",
+            "source_image_type": "worn_source",
+            "display_mode": "hand_held",
+            "layer_count": 1,
+        },
+    )
+
+    with pytest.raises(UnsupportedProductError, match="无链独立吊坠"):
+        load_product_analysis(path)

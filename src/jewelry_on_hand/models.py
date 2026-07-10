@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
+from jewelry_on_hand.product_types import ProductType, normalize_product_type
+
 
 _DIMENSION_FIELDS = (
     "length_mm",
@@ -102,7 +105,7 @@ def _required_int(value: Any, field_name: str) -> int:
         raise ValueError(f"{field_name} 必须是整数")
     try:
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{field_name} 必须是整数") from exc
     if isinstance(value, float) and not value.is_integer():
         raise ValueError(f"{field_name} 必须是整数")
@@ -120,7 +123,7 @@ def _optional_int(value: Any, field_name: str) -> int | None:
         raise ValueError(f"{field_name} 必须是整数或 None")
     try:
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{field_name} 必须是整数或 None") from exc
     if isinstance(value, float) and not value.is_integer():
         raise ValueError(f"{field_name} 必须是整数或 None")
@@ -143,6 +146,18 @@ def _optional_float(value: Any, field_name: str) -> float | None:
     if not math.isfinite(number) or number < 0:
         raise ValueError(f"{field_name} 必须是有限非负数")
     return number
+
+
+def _normalize_product_type_field(
+    value: ProductType | str | None,
+    fallback: ProductType | str,
+    field_name: str,
+) -> ProductType:
+    if value is None:
+        return normalize_product_type(fallback)
+    if not isinstance(value, (ProductType, str)):
+        raise ValueError(f"{field_name} 必须是 ProductType、字符串或 None")
+    return normalize_product_type(value)
 
 
 @dataclass(frozen=True)
@@ -191,6 +206,26 @@ class ProductAnalysis:
     product_dimensions: ProductDimensions
     needs_full_front_display: bool
     special_requirements: tuple[str, ...] = field(default_factory=tuple)
+    detected_product_type: ProductType | str | None = None
+    confirmed_product_type: ProductType | str | None = None
+    classification_confidence: str = "high"
+    classification_evidence: tuple[str, ...] = field(default_factory=tuple)
+    classification_source: str = "legacy_inferred"
+    display_mode: DisplayMode | str = DisplayMode.WORN
+    source_image_type: SourceImageType | str = SourceImageType.WORN_SOURCE
+    layer_count: int = 1
+    length_category: str | None = None
+    chain_or_strand_type: str | None = None
+    has_pendant: bool = False
+    pendant_count: int = 0
+    pendant_layer: int | None = None
+    pendant_position: str | None = None
+    pendant_orientation: str | None = None
+    connection_structure: str | None = None
+    symmetry: str | None = None
+    occluded_parts: tuple[str, ...] = field(default_factory=tuple)
+    uncertain_details: tuple[str, ...] = field(default_factory=tuple)
+    is_independent_multi_item: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -223,6 +258,91 @@ class ProductAnalysis:
         if not isinstance(self.product_dimensions, ProductDimensions):
             raise ValueError("product_dimensions 必须是 ProductDimensions")
 
+        detected = _normalize_product_type_field(
+            self.detected_product_type,
+            self.product_type,
+            "detected_product_type",
+        )
+        confirmed = _normalize_product_type_field(
+            self.confirmed_product_type,
+            detected,
+            "confirmed_product_type",
+        )
+        object.__setattr__(self, "detected_product_type", detected)
+        object.__setattr__(self, "confirmed_product_type", confirmed)
+        object.__setattr__(
+            self,
+            "classification_evidence",
+            _string_sequence(self.classification_evidence, "classification_evidence"),
+        )
+        for field_name in ("classification_confidence", "classification_source"):
+            object.__setattr__(
+                self,
+                field_name,
+                _required_string_value(getattr(self, field_name), field_name),
+            )
+        try:
+            object.__setattr__(self, "display_mode", DisplayMode(self.display_mode))
+        except ValueError as exc:
+            raise ValueError("display_mode 必须是 worn/hand_held") from exc
+        try:
+            object.__setattr__(self, "source_image_type", SourceImageType(self.source_image_type))
+        except ValueError as exc:
+            raise ValueError(
+                "source_image_type 必须是 worn_source/hand_held_source/flat_lay_source/unknown_source"
+            ) from exc
+
+        object.__setattr__(self, "layer_count", _required_int(self.layer_count, "layer_count"))
+        object.__setattr__(self, "has_pendant", _parse_bool(self.has_pendant, "has_pendant"))
+        object.__setattr__(
+            self,
+            "is_independent_multi_item",
+            _parse_bool(self.is_independent_multi_item, "is_independent_multi_item"),
+        )
+        if isinstance(self.pendant_count, bool):
+            raise ValueError("pendant_count 必须是大于等于 0 的整数")
+        try:
+            pendant_count = int(self.pendant_count)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("pendant_count 必须是大于等于 0 的整数") from exc
+        if isinstance(self.pendant_count, float) and not self.pendant_count.is_integer():
+            raise ValueError("pendant_count 必须是大于等于 0 的整数")
+        if pendant_count < 0:
+            raise ValueError("pendant_count 必须大于等于 0")
+        object.__setattr__(self, "pendant_count", pendant_count)
+        object.__setattr__(self, "pendant_layer", _optional_int(self.pendant_layer, "pendant_layer"))
+        for field_name in (
+            "length_category",
+            "chain_or_strand_type",
+            "pendant_position",
+            "pendant_orientation",
+            "connection_structure",
+            "symmetry",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _optional_non_empty_string(getattr(self, field_name), field_name),
+            )
+        object.__setattr__(
+            self,
+            "occluded_parts",
+            _string_sequence(self.occluded_parts, "occluded_parts"),
+        )
+        object.__setattr__(
+            self,
+            "uncertain_details",
+            _string_sequence(self.uncertain_details, "uncertain_details"),
+        )
+
+        if confirmed in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}:
+            if not 1 <= self.layer_count <= 3:
+                raise ValueError("项链产品只支持 1 至 3 层")
+            if self.is_independent_multi_item:
+                raise ValueError("当前版本不支持多件独立项链组合叠戴")
+        if self.pendant_layer is not None and self.pendant_layer > self.layer_count:
+            raise ValueError("pendant_layer 不能大于 layer_count")
+
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProductAnalysis":
         source = _ensure_mapping(data, "ProductAnalysis")
@@ -248,10 +368,42 @@ class ProductAnalysis:
             product_dimensions=ProductDimensions.from_dict(source.get("product_dimensions")),
             needs_full_front_display=needs_full_front_display,
             special_requirements=special_requirements,
+            detected_product_type=source.get("detected_product_type"),
+            confirmed_product_type=source.get("confirmed_product_type"),
+            classification_confidence=source.get("classification_confidence", "high"),
+            classification_evidence=_string_list(
+                source.get("classification_evidence", []), "classification_evidence"
+            ),
+            classification_source=source.get("classification_source", "legacy_inferred"),
+            display_mode=source.get("display_mode", DisplayMode.WORN.value),
+            source_image_type=source.get("source_image_type", SourceImageType.WORN_SOURCE.value),
+            layer_count=source.get("layer_count", 1),
+            length_category=source.get("length_category"),
+            chain_or_strand_type=source.get("chain_or_strand_type"),
+            has_pendant=source.get("has_pendant", False),
+            pendant_count=source.get("pendant_count", 0),
+            pendant_layer=source.get("pendant_layer"),
+            pendant_position=source.get("pendant_position"),
+            pendant_orientation=source.get("pendant_orientation"),
+            connection_structure=source.get("connection_structure"),
+            symmetry=source.get("symmetry"),
+            occluded_parts=_string_list(source.get("occluded_parts", []), "occluded_parts"),
+            uncertain_details=_string_list(
+                source.get("uncertain_details", []), "uncertain_details"
+            ),
+            is_independent_multi_item=source.get("is_independent_multi_item", False),
         )
 
+    @property
+    def normalized_product_type(self) -> ProductType:
+        return self.confirmed_product_type
+
     def is_supported_product(self) -> bool:
-        return "手链" in self.product_type or "手串" in self.product_type
+        return self.normalized_product_type in {
+            ProductType.BRACELET,
+            ProductType.NECKLACE,
+            ProductType.PENDANT_NECKLACE,
+        }
 
 
 FidelityReviewStatus = Literal["pending", "confirmed", "corrected", "not_applicable"]

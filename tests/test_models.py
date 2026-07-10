@@ -1,7 +1,9 @@
+import math
 from pathlib import Path
 
 import pytest
 
+from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
 from jewelry_on_hand.models import (
     ProductFidelityConstraints,
     ProductAnalysis,
@@ -11,6 +13,7 @@ from jewelry_on_hand.models import (
     ReviewDecision,
     ScoredReference,
 )
+from jewelry_on_hand.product_types import ProductType
 
 
 def _analysis_data(**overrides):
@@ -655,3 +658,139 @@ def test_qc_result_accepts_fidelity_checks_for_rerun_and_copies_items():
     checks[0]["result"] = "pass"
 
     assert result.fidelity_checks[0].result == "fail"
+
+
+def test_legacy_bracelet_json_gets_normalized_defaults():
+    analysis = ProductAnalysis.from_dict(_analysis_data())
+
+    assert analysis.product_type == "朱砂手链/手串"
+    assert analysis.normalized_product_type is ProductType.BRACELET
+    assert analysis.detected_product_type is ProductType.BRACELET
+    assert analysis.confirmed_product_type is ProductType.BRACELET
+    assert analysis.classification_confidence == "high"
+    assert analysis.classification_evidence == ()
+    assert analysis.classification_source == "legacy_inferred"
+    assert analysis.display_mode is DisplayMode.WORN
+    assert analysis.source_image_type is SourceImageType.WORN_SOURCE
+    assert analysis.layer_count == 1
+
+
+def test_necklace_analysis_preserves_structure():
+    analysis = ProductAnalysis.from_dict(
+        _analysis_data(
+            product_type="带链吊坠",
+            wear_position="颈部和锁骨",
+            visible_appearance="双层珠链，第二层中央有吊坠",
+            detected_product_type="pendant_necklace",
+            confirmed_product_type="pendant_necklace",
+            classification_confidence="high",
+            classification_evidence=["中央存在主吊坠"],
+            classification_source="auto_confirmed",
+            display_mode="hand_held",
+            source_image_type="worn_source",
+            layer_count=2,
+            length_category="collarbone",
+            chain_or_strand_type="beaded",
+            has_pendant=True,
+            pendant_count=1,
+            pendant_layer=2,
+            pendant_position="front_center",
+            pendant_orientation="front_facing",
+            connection_structure="metal_bail",
+            symmetry="approximately_symmetric",
+            occluded_parts=["后颈扣头"],
+            uncertain_details=["扣头具体结构"],
+        )
+    )
+
+    assert analysis.normalized_product_type is ProductType.PENDANT_NECKLACE
+    assert analysis.detected_product_type is ProductType.PENDANT_NECKLACE
+    assert analysis.confirmed_product_type is ProductType.PENDANT_NECKLACE
+    assert analysis.classification_confidence == "high"
+    assert analysis.classification_evidence == ("中央存在主吊坠",)
+    assert analysis.classification_source == "auto_confirmed"
+    assert analysis.display_mode is DisplayMode.HAND_HELD
+    assert analysis.source_image_type is SourceImageType.WORN_SOURCE
+    assert analysis.layer_count == 2
+    assert analysis.length_category == "collarbone"
+    assert analysis.chain_or_strand_type == "beaded"
+    assert analysis.has_pendant is True
+    assert analysis.pendant_count == 1
+    assert analysis.pendant_layer == 2
+    assert analysis.pendant_position == "front_center"
+    assert analysis.pendant_orientation == "front_facing"
+    assert analysis.connection_structure == "metal_bail"
+    assert analysis.symmetry == "approximately_symmetric"
+    assert analysis.occluded_parts == ("后颈扣头",)
+    assert analysis.uncertain_details == ("扣头具体结构",)
+
+
+@pytest.mark.parametrize("layer_count", [0, 4])
+def test_necklace_rejects_layer_count_out_of_range(layer_count):
+    with pytest.raises(ValueError, match="layer_count|1 至 3 层"):
+        ProductAnalysis.from_dict(
+            _analysis_data(
+                product_type="普通项链",
+                confirmed_product_type="necklace",
+                source_image_type="worn_source",
+                layer_count=layer_count,
+            )
+        )
+
+
+def test_pendant_layer_must_not_exceed_layer_count():
+    with pytest.raises(ValueError, match="pendant_layer"):
+        ProductAnalysis.from_dict(
+            _analysis_data(
+                product_type="带链吊坠",
+                confirmed_product_type="pendant_necklace",
+                source_image_type="worn_source",
+                layer_count=1,
+                has_pendant=True,
+                pendant_count=1,
+                pendant_layer=2,
+            )
+        )
+
+
+def test_necklace_rejects_independent_multi_item_stacking():
+    with pytest.raises(ValueError, match="多件独立项链"):
+        ProductAnalysis.from_dict(
+            _analysis_data(
+                product_type="普通项链",
+                confirmed_product_type="necklace",
+                source_image_type="worn_source",
+                layer_count=2,
+                is_independent_multi_item=True,
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("detected_product_type", False),
+        ("confirmed_product_type", ["necklace"]),
+    ],
+)
+def test_product_analysis_rejects_invalid_product_type_field_types(
+    field_name, invalid_value
+):
+    with pytest.raises(ValueError, match=field_name):
+        ProductAnalysis.from_dict(_analysis_data(**{field_name: invalid_value}))
+
+
+def test_product_analysis_rejects_fractional_pendant_count():
+    with pytest.raises(ValueError, match="pendant_count.*整数"):
+        ProductAnalysis.from_dict(_analysis_data(pendant_count=1.5))
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["layer_count", "pendant_count", "pendant_layer"],
+)
+def test_product_analysis_rejects_infinite_integer_fields_with_chinese_error(
+    field_name,
+):
+    with pytest.raises(ValueError, match=f"{field_name}.*整数"):
+        ProductAnalysis.from_dict(_analysis_data(**{field_name: math.inf}))
