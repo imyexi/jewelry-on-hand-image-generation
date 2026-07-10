@@ -6,6 +6,9 @@ from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.product_types import ProductType
 
 
+SHARED_BASIC_QC_ITEMS = ("禁止推断不可见扣头或背面结构",)
+
+
 @dataclass(frozen=True)
 class CategoryPolicy:
     product_type: ProductType

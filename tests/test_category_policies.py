@@ -29,6 +29,20 @@ def test_unknown_has_no_policy():
         get_category_policy(ProductType.UNKNOWN)
 
 
+def test_non_enum_product_type_has_no_policy():
+    with pytest.raises(ValueError, match="产品品类.*ProductType"):
+        get_category_policy("necklace")
+
+
+@pytest.mark.parametrize("layer_count", [1, 2, 3])
+def test_necklace_policy_accepts_one_to_three_layers(layer_count):
+    policy = get_category_policy(ProductType.NECKLACE)
+    policy.validate_generation(
+        layer_count=layer_count,
+        is_independent_multi_item=False,
+    )
+
+
 def test_necklace_policy_rejects_more_than_three_layers():
     policy = get_category_policy(ProductType.NECKLACE)
     with pytest.raises(ValueError, match="1 至 3 层"):
@@ -37,6 +51,12 @@ def test_necklace_policy_rejects_more_than_three_layers():
 
 def test_necklace_policy_rejects_independent_multi_item_stacking():
     policy = get_category_policy(ProductType.NECKLACE)
+    with pytest.raises(ValueError, match="多件独立项链"):
+        policy.validate_generation(layer_count=2, is_independent_multi_item=True)
+
+
+def test_pendant_necklace_policy_rejects_independent_multi_item_stacking():
+    policy = get_category_policy(ProductType.PENDANT_NECKLACE)
     with pytest.raises(ValueError, match="多件独立项链"):
         policy.validate_generation(layer_count=2, is_independent_multi_item=True)
 
@@ -56,6 +76,25 @@ def test_policy_exposes_category_name_and_basic_qc_items(product_type):
     assert policy.category_name == product_type.display_name
     assert policy.basic_qc_items
     assert all(isinstance(item, str) and item for item in policy.basic_qc_items)
+
+
+@pytest.mark.parametrize(
+    "product_type",
+    [
+        ProductType.BRACELET,
+        ProductType.NECKLACE,
+        ProductType.PENDANT_NECKLACE,
+        ProductType.PENDANT_ONLY,
+    ],
+)
+def test_policy_forbids_inferring_unseen_clasp_or_back_structure(product_type):
+    policy = get_category_policy(product_type)
+    assert "禁止推断不可见扣头或背面结构" in policy.basic_qc_items
+
+
+def test_pendant_only_policy_keeps_the_no_auto_chain_constraint():
+    policy = get_category_policy(ProductType.PENDANT_ONLY)
+    assert "禁止自动补链" in policy.basic_qc_items
 
 
 def test_bracelet_policy_enforces_its_single_layer_limit():

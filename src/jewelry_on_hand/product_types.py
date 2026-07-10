@@ -1,6 +1,39 @@
 from __future__ import annotations
 
+import re
 from enum import Enum
+
+
+_UNCERTAIN_TEXT_MARKERS = (
+    "不是",
+    "并非",
+    "不属于",
+    "疑似",
+    "可能",
+    "也许",
+    "或许",
+    "不确定",
+    "待确认",
+    "无法确认",
+    "吗",
+    "?",
+    "？",
+    "或",
+    "还是",
+)
+
+_UNSUPPORTED_CATEGORY_TERMS = (
+    "戒指",
+    "耳环",
+    "耳饰",
+    "耳坠",
+    "胸针",
+    "脚链",
+    "发饰",
+)
+
+_UNCERTAIN_ENGLISH_PATTERN = re.compile(r"\b(?:not|or)\b")
+_UNSUPPORTED_ENGLISH_CATEGORY_PATTERN = re.compile(r"\b(?:ring|earring|brooch)\b")
 
 
 class ProductType(str, Enum):
@@ -34,6 +67,14 @@ def normalize_product_type(value: str | ProductType | None) -> ProductType:
     exact_values = {item.value: item for item in ProductType}
     if text in exact_values:
         return exact_values[text]
+    if any(marker in text for marker in _UNCERTAIN_TEXT_MARKERS) or (
+        _UNCERTAIN_ENGLISH_PATTERN.search(text)
+    ):
+        return ProductType.UNKNOWN
+    if any(term in text for term in _UNSUPPORTED_CATEGORY_TERMS) or (
+        _UNSUPPORTED_ENGLISH_CATEGORY_PATTERN.search(text)
+    ):
+        return ProductType.UNKNOWN
 
     matches: set[ProductType] = set()
     remaining = text

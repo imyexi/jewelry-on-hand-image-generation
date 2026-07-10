@@ -17,6 +17,8 @@ _POLICIES = {
 
 
 def get_category_policy(product_type: ProductType) -> CategoryPolicy:
+    if not isinstance(product_type, ProductType):
+        raise ValueError("产品品类必须使用 ProductType 枚举")
     if product_type is ProductType.UNKNOWN:
         raise ValueError("产品品类无法识别，必须先人工纠正")
     return _POLICIES[product_type]

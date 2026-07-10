@@ -13,6 +13,22 @@ def test_necklace_defaults_to_worn():
     assert default_display_mode(ProductType.NECKLACE) is DisplayMode.WORN
 
 
+@pytest.mark.parametrize(
+    ("product_type", "message"),
+    [
+        (ProductType.PENDANT_ONLY, "无链独立吊坠.*默认展示模式"),
+        (ProductType.UNKNOWN, "无法识别.*默认展示模式"),
+        ("necklace", "产品品类.*ProductType"),
+    ],
+)
+def test_default_display_mode_rejects_unsupported_or_non_enum_product_type(
+    product_type,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        default_display_mode(product_type)
+
+
 @pytest.mark.parametrize("product_type", [ProductType.NECKLACE, ProductType.PENDANT_NECKLACE])
 @pytest.mark.parametrize("display_mode", [DisplayMode.WORN, DisplayMode.HAND_HELD])
 def test_complete_necklace_supports_worn_source_in_both_modes(product_type, display_mode):
@@ -40,7 +56,6 @@ def test_unknown_product_is_rejected():
 @pytest.mark.parametrize(
     "source_type",
     [
-        SourceImageType.FLAT_LAY_SOURCE,
         SourceImageType.HAND_HELD_SOURCE,
         SourceImageType.UNKNOWN_SOURCE,
     ],
@@ -48,6 +63,16 @@ def test_unknown_product_is_rejected():
 def test_necklace_only_accepts_worn_source_in_first_phase(source_type):
     with pytest.raises(ValueError, match="真人佩戴原图"):
         validate_product_mode(ProductType.NECKLACE, DisplayMode.WORN, source_type)
+
+
+def test_flat_lay_source_covers_white_background_and_flat_lay_inputs():
+    assert SourceImageType.FLAT_LAY_SOURCE.value == "flat_lay_source"
+    with pytest.raises(ValueError, match="白底或平铺"):
+        validate_product_mode(
+            ProductType.NECKLACE,
+            DisplayMode.WORN,
+            SourceImageType.FLAT_LAY_SOURCE,
+        )
 
 
 def test_bracelet_worn_source_remains_supported():

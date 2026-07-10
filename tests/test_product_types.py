@@ -30,3 +30,23 @@ def test_empty_product_type_is_unknown():
 
 def test_ambiguous_free_text_is_not_silently_guessed():
     assert normalize_product_type("手链或项链") is ProductType.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "不是项链",
+        "这是项链吗？",
+        "疑似项链",
+        "可能是项链",
+        "项链或戒指",
+        "项链和戒指组合",
+    ],
+)
+def test_uncertain_or_mixed_category_text_is_unknown(raw):
+    assert normalize_product_type(raw) is ProductType.UNKNOWN
+
+
+@pytest.mark.parametrize("raw", ["spring necklace", "knot necklace"])
+def test_english_marker_substrings_do_not_hide_explicit_necklace_alias(raw):
+    assert normalize_product_type(raw) is ProductType.NECKLACE
