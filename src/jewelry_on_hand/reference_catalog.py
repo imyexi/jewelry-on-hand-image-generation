@@ -44,6 +44,25 @@ REQUIRED_VALUE_COLUMNS = (
     "判断置信度",
 )
 
+GENERIC_COLUMN_ALIASES = {
+    "applicable_product_types": ("适用产品类型", "适用品类"),
+    "applicable_display_modes": ("适用展示模式",),
+    "framing": ("人物取景范围", "取景范围"),
+    "visible_body_regions": ("可见身体区域",),
+    "product_visibility": ("产品预计展示面积", "预计展示面积"),
+    "neck_visibility": ("颈部可见度",),
+    "collarbone_visibility": ("锁骨可见度",),
+    "chest_visibility": ("胸前可见度",),
+    "hand_visibility": ("手部可见度",),
+    "collar_type": ("衣领类型",),
+    "clothing_occlusion_risk": ("衣物遮挡风险",),
+    "hair_occlusion_risk": ("头发遮挡风险",),
+    "pose_keywords": ("姿势关键词",),
+    "mirror_relation": ("镜面关系",),
+    "existing_jewelry": ("原有首饰类型", "原有首饰"),
+    "crop_risk": ("裁切风险",),
+}
+
 
 def load_reference_rows(workbook_path: str | Path) -> list[ReferenceRow]:
     workbook = load_workbook(workbook_path, data_only=True, read_only=True)
@@ -99,6 +118,22 @@ def _load_rows_from_workbook(workbook: Any) -> list[ReferenceRow]:
                 notes=row_data["notes"],
                 confidence=row_data["confidence"],
                 file_exists=absolute_path.is_file(),
+                applicable_product_types=row_data["applicable_product_types"],
+                applicable_display_modes=row_data["applicable_display_modes"],
+                framing=row_data["framing"],
+                visible_body_regions=row_data["visible_body_regions"],
+                product_visibility=row_data["product_visibility"],
+                neck_visibility=row_data["neck_visibility"],
+                collarbone_visibility=row_data["collarbone_visibility"],
+                chest_visibility=row_data["chest_visibility"],
+                hand_visibility=row_data["hand_visibility"],
+                collar_type=row_data["collar_type"],
+                clothing_occlusion_risk=row_data["clothing_occlusion_risk"],
+                hair_occlusion_risk=row_data["hair_occlusion_risk"],
+                pose_keywords=row_data["pose_keywords"],
+                mirror_relation=row_data["mirror_relation"],
+                existing_jewelry=row_data["existing_jewelry"],
+                crop_risk=row_data["crop_risk"],
             )
         )
     return reference_rows
@@ -112,7 +147,7 @@ def _row_data(values: tuple[Any, ...], column_index: dict[str, int], row_number:
     if not isinstance(absolute_path_value, (str, Path)):
         raise _cell_error(row_number, "绝对路径", "必须是路径字符串")
 
-    return {
+    row_data = {
         "index": _required_cell(values, column_index, row_number, "序号"),
         "file_name": _required_cell(values, column_index, row_number, "文件名"),
         "relative_path": _required_cell(values, column_index, row_number, "相对路径"),
@@ -132,6 +167,15 @@ def _row_data(values: tuple[Any, ...], column_index: dict[str, int], row_number:
         "notes": _optional_text_cell(values, column_index, "备注"),
         "confidence": _required_cell(values, column_index, row_number, "判断置信度"),
     }
+    row_data.update(
+        {
+            field_name: _optional_aliased_text_cell(
+                values, column_index, row_number, aliases
+            )
+            for field_name, aliases in GENERIC_COLUMN_ALIASES.items()
+        }
+    )
+    return row_data
 
 
 def _required_cell(
@@ -162,6 +206,24 @@ def _optional_text_cell(values: tuple[Any, ...], column_index: dict[str, int], c
     if not isinstance(value, str):
         raise _cell_error(0, column_name, "必须是字符串")
     return value
+
+
+def _optional_aliased_text_cell(
+    values: tuple[Any, ...],
+    column_index: dict[str, int],
+    row_number: int,
+    column_names: tuple[str, ...],
+) -> str:
+    for column_name in column_names:
+        if column_name not in column_index:
+            continue
+        value = _cell_value(values, column_index[column_name])
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if not isinstance(value, str):
+            raise _cell_error(row_number, column_name, "必须是字符串")
+        return value.strip()
+    return ""
 
 
 def _cell_value(values: tuple[Any, ...], index: int) -> Any:

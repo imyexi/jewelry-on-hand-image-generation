@@ -714,6 +714,15 @@ def _ensure_constraint_list(value: Any) -> list[Any]:
     return value
 
 
+def _reference_field_value(source: dict[str, Any], *field_names: str) -> Any:
+    for field_name in field_names:
+        value = source.get(field_name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        return value
+    return ""
+
+
 @dataclass(frozen=True)
 class ReferenceRow:
     index: int
@@ -733,6 +742,22 @@ class ReferenceRow:
     notes: str
     confidence: str
     file_exists: bool
+    applicable_product_types: str = ""
+    applicable_display_modes: str = ""
+    framing: str = ""
+    visible_body_regions: str = ""
+    product_visibility: str = ""
+    neck_visibility: str = ""
+    collarbone_visibility: str = ""
+    chest_visibility: str = ""
+    hand_visibility: str = ""
+    collar_type: str = ""
+    clothing_occlusion_risk: str = ""
+    hair_occlusion_risk: str = ""
+    pose_keywords: str = ""
+    mirror_relation: str = ""
+    existing_jewelry: str = ""
+    crop_risk: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "index", _required_int(self.index, "index"))
@@ -755,6 +780,22 @@ class ReferenceRow:
             "recommended_usage",
             "notes",
             "confidence",
+            "applicable_product_types",
+            "applicable_display_modes",
+            "framing",
+            "visible_body_regions",
+            "product_visibility",
+            "neck_visibility",
+            "collarbone_visibility",
+            "chest_visibility",
+            "hand_visibility",
+            "collar_type",
+            "clothing_occlusion_risk",
+            "hair_occlusion_risk",
+            "pose_keywords",
+            "mirror_relation",
+            "existing_jewelry",
+            "crop_risk",
         ):
             value = getattr(self, field_name)
             if not isinstance(value, str):
@@ -789,6 +830,56 @@ class ReferenceRow:
             notes=source.get("notes", source.get("备注", "")),
             confidence=source.get("confidence", source.get("判断置信度", "")),
             file_exists=source.get("file_exists", source.get("文件存在", False)),
+            applicable_product_types=_reference_field_value(
+                source,
+                "applicable_product_types",
+                "适用产品类型",
+                "适用品类",
+            ),
+            applicable_display_modes=_reference_field_value(
+                source, "applicable_display_modes", "适用展示模式"
+            ),
+            framing=_reference_field_value(
+                source, "framing", "人物取景范围", "取景范围"
+            ),
+            visible_body_regions=_reference_field_value(
+                source, "visible_body_regions", "可见身体区域"
+            ),
+            product_visibility=_reference_field_value(
+                source,
+                "product_visibility",
+                "产品预计展示面积",
+                "预计展示面积",
+            ),
+            neck_visibility=_reference_field_value(
+                source, "neck_visibility", "颈部可见度"
+            ),
+            collarbone_visibility=_reference_field_value(
+                source, "collarbone_visibility", "锁骨可见度"
+            ),
+            chest_visibility=_reference_field_value(
+                source, "chest_visibility", "胸前可见度"
+            ),
+            hand_visibility=_reference_field_value(
+                source, "hand_visibility", "手部可见度"
+            ),
+            collar_type=_reference_field_value(source, "collar_type", "衣领类型"),
+            clothing_occlusion_risk=_reference_field_value(
+                source, "clothing_occlusion_risk", "衣物遮挡风险"
+            ),
+            hair_occlusion_risk=_reference_field_value(
+                source, "hair_occlusion_risk", "头发遮挡风险"
+            ),
+            pose_keywords=_reference_field_value(
+                source, "pose_keywords", "姿势关键词"
+            ),
+            mirror_relation=_reference_field_value(
+                source, "mirror_relation", "镜面关系"
+            ),
+            existing_jewelry=_reference_field_value(
+                source, "existing_jewelry", "原有首饰类型", "原有首饰"
+            ),
+            crop_risk=_reference_field_value(source, "crop_risk", "裁切风险"),
         )
 
     def combined_text(self) -> str:
@@ -802,11 +893,27 @@ class ReferenceRow:
             self.recommended_usage,
             self.notes,
             self.confidence,
+            self.applicable_product_types,
+            self.applicable_display_modes,
+            self.framing,
+            self.visible_body_regions,
+            self.product_visibility,
+            self.neck_visibility,
+            self.collarbone_visibility,
+            self.chest_visibility,
+            self.hand_visibility,
+            self.collar_type,
+            self.clothing_occlusion_risk,
+            self.hair_occlusion_risk,
+            self.pose_keywords,
+            self.mirror_relation,
+            self.existing_jewelry,
+            self.crop_risk,
         )
         return " ".join(str(part) for part in parts if part)
 
     def metadata_dict(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "index": self.index,
             "序号": self.index,
             "file_name": self.file_name,
@@ -827,6 +934,62 @@ class ReferenceRow:
             "备注": self.notes,
             "判断置信度": self.confidence,
         }
+        generic_values = (
+            self.applicable_product_types,
+            self.applicable_display_modes,
+            self.framing,
+            self.visible_body_regions,
+            self.product_visibility,
+            self.neck_visibility,
+            self.collarbone_visibility,
+            self.chest_visibility,
+            self.hand_visibility,
+            self.collar_type,
+            self.clothing_occlusion_risk,
+            self.hair_occlusion_risk,
+            self.pose_keywords,
+            self.mirror_relation,
+            self.existing_jewelry,
+            self.crop_risk,
+        )
+        if any(generic_values):
+            metadata.update(
+                {
+                    "applicable_product_types": self.applicable_product_types,
+                    "适用产品类型": self.applicable_product_types,
+                    "applicable_display_modes": self.applicable_display_modes,
+                    "适用展示模式": self.applicable_display_modes,
+                    "framing": self.framing,
+                    "人物取景范围": self.framing,
+                    "visible_body_regions": self.visible_body_regions,
+                    "可见身体区域": self.visible_body_regions,
+                    "product_visibility": self.product_visibility,
+                    "产品预计展示面积": self.product_visibility,
+                    "neck_visibility": self.neck_visibility,
+                    "颈部可见度": self.neck_visibility,
+                    "collarbone_visibility": self.collarbone_visibility,
+                    "锁骨可见度": self.collarbone_visibility,
+                    "chest_visibility": self.chest_visibility,
+                    "胸前可见度": self.chest_visibility,
+                    "hand_visibility": self.hand_visibility,
+                    "手部可见度": self.hand_visibility,
+                    "collar_type": self.collar_type,
+                    "衣领类型": self.collar_type,
+                    "clothing_occlusion_risk": self.clothing_occlusion_risk,
+                    "衣物遮挡风险": self.clothing_occlusion_risk,
+                    "hair_occlusion_risk": self.hair_occlusion_risk,
+                    "头发遮挡风险": self.hair_occlusion_risk,
+                    "pose_keywords": self.pose_keywords,
+                    "姿势关键词": self.pose_keywords,
+                    "mirror_relation": self.mirror_relation,
+                    "镜面关系": self.mirror_relation,
+                    "existing_jewelry": self.existing_jewelry,
+                    "原有首饰类型": self.existing_jewelry,
+                    "crop_risk": self.crop_risk,
+                    "裁切风险": self.crop_risk,
+                }
+            )
+        return metadata
 
 
 @dataclass(frozen=True)
