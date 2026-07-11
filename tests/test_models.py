@@ -5,6 +5,7 @@ import pytest
 
 from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
 from jewelry_on_hand.models import (
+    FidelityCheck,
     ProductConfirmationSnapshot,
     ProductFidelityConstraints,
     ProductAnalysis,
@@ -746,6 +747,47 @@ def test_qc_result_accepts_fidelity_checks_for_rerun_and_copies_items():
     checks[0]["result"] = "pass"
 
     assert result.fidelity_checks[0].result == "fail"
+
+
+@pytest.mark.parametrize("notes", [None, "", "肉眼复核通过"])
+def test_fidelity_check_from_dict_accepts_only_optional_string_notes(notes):
+    payload = {
+        "name": "主吊坠",
+        "question": "主吊坠是否保持原连接？",
+        "result": "pass",
+    }
+    if notes is not None:
+        payload["notes"] = notes
+
+    check = FidelityCheck.from_dict(payload)
+
+    assert check.notes == (notes or "")
+
+
+def test_fidelity_check_from_dict_normalizes_explicit_null_notes_to_empty_string():
+    check = FidelityCheck.from_dict(
+        {
+            "name": "主吊坠",
+            "question": "主吊坠是否保持原连接？",
+            "result": "pass",
+            "notes": None,
+        }
+    )
+
+    assert check.notes == ""
+
+
+@pytest.mark.parametrize("invalid", [["数组"], {"对象": True}, True, 1])
+def test_fidelity_check_from_dict_rejects_non_string_notes_with_chinese_error(invalid):
+    with pytest.raises(ValueError, match="fidelity_checks.notes 必须是字符串或 null"):
+        FidelityCheck.from_dict(
+            {
+                "name": "主吊坠",
+                "question": "主吊坠是否保持原连接？",
+                "result": "pass",
+                "notes": invalid,
+            }
+        )
 
 
 @pytest.mark.parametrize(

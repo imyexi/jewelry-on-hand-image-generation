@@ -60,13 +60,13 @@ bracelet 的内部图 1 是手部/手腕参考；项链的内部图 1 按 `worn`
 
 ## Legacy 边界
 
-旧手串自由文本、旧分析 JSON/run、缺现代确认快照的历史手串和无 canonical 约束的旧 `qc.json` 继续兼容。兼容只适用于可保守识别的历史 bracelet：只要记录显式出现非法来源、`hand_held` 模式或不完整现代字段，就不能借 legacy 默认值绕过 gate。普通项链、带链吊坠、无链独立吊坠和 `unknown` 不使用旧手串回退。
+旧手串自由文本、旧分析 JSON/run、缺现代确认快照的历史手串和无 canonical 约束的旧 `qc.json` 继续兼容。五个现代分类字段 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。普通项链、带链吊坠、无链独立吊坠和 `unknown` 不使用旧手串回退。
 
 ## 模型与验证状态
 
 默认模型为 `gpt_image_2`；同一 run 内已有超过 1 次非 `pass` QC 后，下一次才切换 `nano_banana_v2`。每个非空 `generation/NN/` 必须先有 `qc.json`，不得跳过未质检目录。
 
-生成依赖 `skills/aireiter-image-generation/scripts/aireiter_image_helper.py` 和本机 API 配置。本轮文档与自动化测试只证明本地契约和命令链路；普通项链、带链吊坠的真实第三方模型 proof 属于 Task 11，未完成前不得声称已做真实模型验收。
+生成依赖 `skills/aireiter-image-generation/scripts/aireiter_image_helper.py` 和本机 API 配置。本轮文档与自动化测试只证明本地契约和命令链路。真实第三方模型 proof 属于 Task 11，尚未完成。未取得真实调用和产物证据前，不得声称普通项链或带链吊坠已完成真实模型验收。
 
 ## 仓库约定
 

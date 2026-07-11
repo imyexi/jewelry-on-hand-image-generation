@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import runpy
@@ -10,6 +11,9 @@ from pathlib import Path
 import pytest
 
 from jewelry_on_hand.qc import write_qc_result
+from jewelry_on_hand.cli import _build_parser
+from jewelry_on_hand.models import ProductAnalysis, ProductFidelityConstraints
+from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +26,23 @@ MANUAL_WORKFLOW = PROJECT_ROOT / "reference" / "manual-workflow.md"
 FIDELITY_SCHEMA = PROJECT_ROOT / "reference" / "product-fidelity-constraints-schema.md"
 PORTABLE_WORKFLOW = WORKFLOW_SKILL / "references" / "workflow.md"
 TROUBLESHOOTING = WORKFLOW_SKILL / "references" / "troubleshooting.md"
+CURRENT_DOCUMENTS = (
+    PROJECT_GUIDE,
+    MANUAL_WORKFLOW,
+    WORKFLOW_SKILL / "SKILL.md",
+    PORTABLE_WORKFLOW,
+    FIDELITY_SCHEMA,
+)
+MODERN_ATOMIC_CONTRACT = (
+    "五个现代分类字段 `detected_product_type`、`confirmed_product_type`、"
+    "`classification_confidence`、`classification_evidence`、`classification_source` "
+    "是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。"
+)
+LEGACY_EXPLICIT_CONTRACT = (
+    "历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、"
+    "`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。"
+)
+TASK11_PROOF_CONTRACT = "真实第三方模型 proof 属于 Task 11，尚未完成。"
 
 
 def _document_text(path: Path) -> str:
@@ -71,6 +92,110 @@ def test_operator_workflows_lock_cli_stages_reference_sources_and_canonical_gate
     assert "非标准" in text and "拒绝" in text
     assert "完整产品确认快照" in text
     assert "fidelity_confirmed" in text
+
+
+@pytest.mark.parametrize("document", [MANUAL_WORKFLOW, PORTABLE_WORKFLOW])
+def test_operator_workflows_use_the_same_four_stage_order(document: Path) -> None:
+    text = _document_text(document)
+    positions = [text.index(f"`{command}`") for command in (
+        "prepare-review", "record-decision", "generate", "qc"
+    )]
+
+    assert positions == sorted(positions)
+
+
+def test_documented_cli_flags_exist_on_the_real_subcommand_parsers() -> None:
+    parser = _build_parser()
+    subparsers = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    expected = {
+        "prepare-review": {"--product-image", "--analysis-json", "--classification"},
+        "record-decision": {
+            "--run-root", "--action", "--fidelity-confirmed", "--fidelity-constraints-path"
+        },
+        "generate": {"--run-root", "--helper-script"},
+        "qc": {"--generation-dir", "--status", "--fidelity-checks-json", "--critical-failures"},
+    }
+
+    for command, flags in expected.items():
+        real_flags = {
+            option
+            for action in subparsers.choices[command]._actions
+            for option in action.option_strings
+        }
+        assert flags <= real_flags
+        for document in (MANUAL_WORKFLOW, PORTABLE_WORKFLOW):
+            text = _document_text(document)
+            assert flags <= {flag for flag in flags if flag in text}
+
+
+@pytest.mark.parametrize("document", CURRENT_DOCUMENTS)
+def test_current_documents_share_exact_legacy_and_task11_contracts(document: Path) -> None:
+    text = _document_text(document)
+
+    assert MODERN_ATOMIC_CONTRACT in text
+    assert LEGACY_EXPLICIT_CONTRACT in text
+    assert TASK11_PROOF_CONTRACT in text
+
+
+def test_current_documents_never_describe_the_whole_system_as_bracelet_only() -> None:
+    forbidden = ("系统只支持手串", "系统仅支持手串", "全系统只支持手腕", "全系统仅支持手腕")
+
+    for document in CURRENT_DOCUMENTS + (TROUBLESHOOTING,):
+        text = _document_text(document)
+        assert not any(fragment in text for fragment in forbidden), document
+
+
+def test_reachable_source_files_have_no_question_mark_mojibake() -> None:
+    source_root = PROJECT_ROOT / "src" / "jewelry_on_hand"
+
+    for path in source_root.rglob("*.py"):
+        assert "???" not in path.read_text(encoding="utf-8"), path
+
+
+def test_fidelity_schema_json_examples_parse_and_keep_auto_manual_sources_separate() -> None:
+    text = _document_text(FIDELITY_SCHEMA)
+    examples = [
+        json.loads(block.split("```", 1)[0])
+        for block in text.split("```json\n")[1:]
+    ]
+
+    assert len(examples) == 2
+    parsed = [ProductFidelityConstraints.from_dict(example) for example in examples]
+    automatic, corrected = parsed
+    assert automatic.review_status == "pending"
+    assert corrected.review_status == "corrected"
+    assert automatic.detected_keywords == corrected.detected_keywords == ("吊坠",)
+    assert "连接环" not in automatic.must_keep[0].relationship
+    assert all("第二层" not in item for item in automatic.must_not_change)
+    assert "连接环" in corrected.must_keep[0].relationship
+    assert any("层" in item for item in corrected.must_not_change)
+
+
+def test_automatic_fidelity_extraction_does_not_fabricate_ring_or_layer_constraints() -> None:
+    data = _modern_analysis()
+    data.update(
+        {
+            "visible_appearance": "双层项链，正面中心有水滴形吊坠，可见连接环连接第二层链条",
+            "special_requirements": [],
+            "needs_full_front_display": True,
+            "layer_count": 2,
+            "has_pendant": True,
+            "pendant_count": 1,
+            "pendant_layer": 2,
+            "confirmed_product_type": "pendant_necklace",
+            "detected_product_type": "pendant_necklace",
+        }
+    )
+    automatic = build_product_fidelity_constraints(ProductAnalysis.from_dict(data))
+
+    assert automatic.detected_keywords == ("吊坠",)
+    assert [item.normalized_keyword for item in automatic.must_keep] == ["吊坠"]
+    assert "连接环" not in automatic.must_keep[0].relationship
+    assert all("第二层" not in item for item in automatic.must_not_change)
 
 
 @pytest.mark.parametrize(

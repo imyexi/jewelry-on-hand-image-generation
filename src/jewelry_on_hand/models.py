@@ -1461,11 +1461,14 @@ class FidelityCheck:
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "FidelityCheck":
         source = _ensure_mapping(data, "FidelityCheck")
+        notes = source.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            raise ValueError("fidelity_checks.notes 必须是字符串或 null")
         return cls(
             name=_required_string(source, "name"),
             question=_required_string(source, "question"),
             result=_required_string(source, "result"),  # type: ignore[arg-type]
-            notes="" if source.get("notes") is None else str(source.get("notes")),
+            notes="" if notes is None else notes,
         )
 
     def to_dict(self) -> dict[str, str]:

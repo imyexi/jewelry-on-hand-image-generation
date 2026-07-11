@@ -96,9 +96,9 @@ jewelry-on-hand record-decision `
 
 ## Legacy 记录为什么仍被拒绝
 
-历史手串自由文本、旧 JSON/run、缺现代快照的 bracelet 和无 canonical 约束的旧 QC 可以兼容，但只有全部现代分类字段缺失且原始文本能保守识别为 bracelet 时才走回退。
+历史手串自由文本、旧 JSON/run、缺现代快照的 bracelet 和无 canonical 约束的旧 QC 可以兼容。五个现代分类字段 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。
 
-显式非法来源、`hand_held`、非单层、任一不完整现代字段都不能借 legacy 绕过。普通项链、带链吊坠、`pendant_only` 和 `unknown` 也不使用旧手串默认值。标准 run 只要能定位 canonical 约束，就必须执行现代 `must_keep` 校验。
+历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。普通项链、带链吊坠、`pendant_only` 和 `unknown` 也不使用旧手串默认值。标准 run 只要能定位 canonical 约束，就必须执行现代 `must_keep` 校验。
 
 ## Prompt 编码损坏
 
@@ -114,4 +114,4 @@ jewelry-on-hand record-decision `
 
 ## AIReiter 轮询失败与验收边界
 
-先读取 `submit.json` 中的 `out_task_id` 并继续查询；不能确认提交失败时不要重复提交。当前本地自动化测试验证的是命令和产物契约，真实第三方模型 proof 属于 Task 11；没有真实调用证据时不得声称普通项链或带链吊坠已经完成真实模型验收。
+先读取 `submit.json` 中的 `out_task_id` 并继续查询；不能确认提交失败时不要重复提交。当前本地自动化测试验证的是命令和产物契约。真实第三方模型 proof 属于 Task 11，尚未完成。没有真实调用证据时不得声称普通项链或带链吊坠已经完成真实模型验收。

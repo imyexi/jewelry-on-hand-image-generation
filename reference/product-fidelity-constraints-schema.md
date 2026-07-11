@@ -24,23 +24,59 @@ analysis/product_fidelity_constraints.json
 
 `generate` 不把 `fidelity_constraints_path` 当作运行时任意路径。历史决策如果仍记录非标准路径，会被明确拒绝并要求重新执行 `record-decision`；直接编辑决策或把外部文件留在原地不能绕过 canonical gate。
 
-## JSON 结构
+## `prepare-review` 自动产物
 
-下面示例描述双层带链吊坠的关键结构：
+下面示例是产品描述包含“吊坠”和肉眼可见连接环时，当前 `build_product_fidelity_constraints` 实际生成的 canonical 候选。自动词典只命中标准词 `吊坠`；它不会把词典外的“连接环”写入 `detected_keywords`，也不会自动补造吊坠所属层或层间关系：
 
 ```json
 {
   "schema_version": 1,
   "source": {
-    "product_id": "PN-001",
     "product_image": "input/product-on-hand.jpg",
     "product_analysis": "analysis/product_analysis.json"
   },
-  "detected_keywords": ["吊坠", "连接环"],
+  "detected_keywords": ["吊坠"],
+  "must_keep": [
+    {
+      "name": "吊坠",
+      "source_text": "双层项链，正面中心有水滴形吊坠，可见连接环连接第二层链条",
+      "normalized_keyword": "吊坠",
+      "location": "正面中心",
+      "visual_shape": "垂坠结构及连接点",
+      "relationship": "保持垂坠方向、连接点和长度关系",
+      "forbid": ["删除垂坠", "并入手串", "变成第二件首饰"],
+      "qc_question": "吊坠、流苏或链坠的垂坠方向、连接点和长度关系是否保留"
+    }
+  ],
+  "must_not_change": [
+    "珠子排列顺序",
+    "主珠和配件位置关系",
+    "产品整体颜色、透明度、纹理和反光"
+  ],
+  "needs_user_review": true,
+  "detail_crop_recommended": true,
+  "review_status": "pending"
+}
+```
+
+自动产物中的 `source_text` 可以原样保留产品分析里肉眼可见的“连接环”和“第二层”描述，但自动程序不会把这些文本升级为独立命中来源或精确层级约束。人工不得伪造或扩充 `detected_keywords`；该字段只记录实际自动词典命中。
+
+## 人工修订或导入后的产物
+
+用户在 review 中确认吊坠确属第二层且连接环肉眼可见后，可以修订 `must_keep` 和 `must_not_change`，再通过 `record-decision --fidelity-constraints-path` 导入。修订后的 `detected_keywords` 仍保持自动命中结果，不把人工结论伪装成自动来源：
+
+```json
+{
+  "schema_version": 1,
+  "source": {
+    "product_image": "input/product-on-hand.jpg",
+    "product_analysis": "analysis/product_analysis.json"
+  },
+  "detected_keywords": ["吊坠"],
   "must_keep": [
     {
       "name": "第二层水滴吊坠",
-      "source_text": "第二层正面中央的水滴形吊坠",
+      "source_text": "双层项链，正面中心有水滴形吊坠，可见连接环连接第二层链条",
       "normalized_keyword": "吊坠",
       "location": "第二层正面中央",
       "visual_shape": "透明水滴形，尖端向下",
@@ -56,7 +92,7 @@ analysis/product_fidelity_constraints.json
   ],
   "needs_user_review": true,
   "detail_crop_recommended": true,
-  "review_status": "pending"
+  "review_status": "corrected"
 }
 ```
 
@@ -139,7 +175,7 @@ analysis/product_fidelity_constraints.json
 
 ## Legacy 边界
 
-缺少 canonical 约束的历史手串 QC 可以继续按旧字段检查；这不要求批量迁移旧记录。历史手串自由文本、旧分析 JSON/run 和缺现代快照的 bracelet 仍兼容，但显式非法来源、`hand_held`、非单层或不完整现代字段不能借 legacy 绕过。
+缺少 canonical 约束的历史手串 QC 可以继续按旧字段检查；这不要求批量迁移旧记录。历史手串自由文本、旧分析 JSON/run 和缺现代快照的 bracelet 仍兼容。五个现代分类字段 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。
 
 普通项链、带链吊坠、`pendant_only` 和 `unknown` 不适用旧手串默认值。新 run 一旦能从标准路径找到 canonical 文件，就必须执行现代精确覆盖校验。
 
@@ -154,3 +190,7 @@ input/detail-crops/
 ```
 
 裁切图用于人工 review 与 QC，不改变模型两张内部图的提交顺序，也不能用于推断原图不可见结构。
+
+## 验收边界
+
+本文示例和自动化测试验证的是本地 Schema、模型解析和命令契约。真实第三方模型 proof 属于 Task 11，尚未完成。
