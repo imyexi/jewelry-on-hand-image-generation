@@ -10,11 +10,16 @@ from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.display_modes import validate_product_mode
 from jewelry_on_hand.models import ProductAnalysis, ProductConfirmationSnapshot, ReviewDecision
 from jewelry_on_hand.product_types import ProductType
-from jewelry_on_hand.product_fidelity import require_confirmed_constraints
+from jewelry_on_hand.product_fidelity import (
+    load_product_fidelity_constraints,
+    require_confirmed_constraints,
+)
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
 DECISION_FILE_NAME = "review_decision.json"
+CANONICAL_CONSTRAINTS_RELATIVE_PATH = "analysis/product_fidelity_constraints.json"
+_GENERATION_ACTIONS = {"generate_rank_1", "generate_selected", "generate_multiple"}
 
 
 class ReviewGateError(RuntimeError):
@@ -54,36 +59,72 @@ def write_analysis_and_review_decision(
             raise
         raise ReviewGateError(f"无法提交产品分析与 Review 决策：{exc}") from exc
 
-    analysis_path = paths.analysis_dir / "product_analysis.json"
     decision_path = paths.review_dir / DECISION_FILE_NAME
-    previous = {
-        analysis_path: analysis_path.read_bytes() if analysis_path.is_file() else None,
-        decision_path: decision_path.read_bytes() if decision_path.is_file() else None,
-    }
-    staged_paths: list[Path] = []
+    _commit_json_transaction(
+        [
+            (paths.analysis_dir / "product_analysis.json", analysis_data),
+            (decision_path, _decision_to_dict(decision)),
+        ]
+    )
+    return decision_path
+
+
+def write_review_bundle(
+    paths: RunPaths,
+    decision_data: dict[str, Any],
+    *,
+    analysis_data: dict[str, Any] | None = None,
+) -> Path:
+    """原子提交可选 analysis、decision 与规范保真约束。"""
     try:
-        staged_analysis = _stage_json(analysis_path, analysis_data)
-        staged_paths.append(staged_analysis)
-        staged_decision = _stage_json(decision_path, _decision_to_dict(decision))
-        staged_paths.append(staged_decision)
-        os.replace(staged_analysis, analysis_path)
-        os.replace(staged_decision, decision_path)
-    except Exception as exc:
-        rollback_errors: list[str] = []
-        for target_path, old_bytes in previous.items():
-            try:
-                _restore_previous_file(target_path, old_bytes)
-            except OSError as rollback_exc:
-                rollback_errors.append(f"{target_path}: {rollback_exc}")
-        if rollback_errors:
-            details = "；".join(rollback_errors)
-            raise ReviewGateError(
-                f"双文件提交失败，且回滚未完整：{exc}；回滚异常：{details}"
-            ) from exc
-        raise ReviewGateError(f"双文件提交失败，已回滚：{exc}") from exc
-    finally:
-        for staged_path in staged_paths:
-            staged_path.unlink(missing_ok=True)
+        normalized_decision_data = dict(decision_data)
+        action = normalized_decision_data.get("action")
+        constraints_payload: dict[str, Any] | None = None
+        if action in _GENERATION_ACTIONS:
+            import_source = _constraints_import_source(normalized_decision_data)
+            normalized_decision_data["fidelity_constraints_path"] = (
+                CANONICAL_CONSTRAINTS_RELATIVE_PATH
+            )
+        else:
+            import_source = None
+
+        if analysis_data is None:
+            analysis = _load_optional_analysis(paths)
+        else:
+            analysis = ProductAnalysis.from_dict(analysis_data)
+            validate_confirmed_analysis(analysis)
+        decision = ReviewDecision.from_dict(normalized_decision_data)
+        if analysis is not None:
+            validate_decision_against_analysis(decision, analysis)
+        elif _is_generation_with_snapshot(decision):
+            raise ReviewGateError("确认快照存在但缺少最终产品分析，无法校验一致性")
+
+        if decision.action in _GENERATION_ACTIONS and decision.fidelity_confirmed:
+            constraints_path = _resolve_constraints_path(paths, import_source)
+            if not constraints_path.is_file():
+                raise ReviewGateError(f"缺少产品保真约束导入源：{constraints_path}")
+            constraints = load_product_fidelity_constraints(constraints_path)
+            constraints_payload = constraints.to_dict()
+            if constraints.review_status == "pending":
+                constraints_payload["review_status"] = "confirmed"
+    except (OSError, TypeError, ValueError, ReviewGateError) as exc:
+        if isinstance(exc, ReviewGateError):
+            raise
+        raise ReviewGateError(f"无法提交 Review 事务：产品保真约束或决策无效；{exc}") from exc
+
+    decision_path = paths.review_dir / DECISION_FILE_NAME
+    entries: list[tuple[Path, Any]] = []
+    if analysis_data is not None:
+        entries.append((paths.analysis_dir / "product_analysis.json", analysis_data))
+    entries.append((decision_path, _decision_to_dict(decision)))
+    if constraints_payload is not None:
+        entries.append(
+            (
+                paths.root / CANONICAL_CONSTRAINTS_RELATIVE_PATH,
+                constraints_payload,
+            )
+        )
+    _commit_json_transaction(entries)
     return decision_path
 
 
@@ -104,6 +145,11 @@ def require_generation_decision(paths: RunPaths) -> ReviewDecision:
         )
     if not decision.fidelity_confirmed:
         raise ReviewGateError(f"{decision_path} 缺少 fidelity_confirmed: true")
+    if decision.fidelity_constraints_path != CANONICAL_CONSTRAINTS_RELATIVE_PATH:
+        raise ReviewGateError(
+            f"{decision_path} 使用非标准产品保真约束路径 "
+            f"{decision.fidelity_constraints_path!r}；请重新执行 record-decision"
+        )
     try:
         analysis = _load_optional_analysis(paths)
         if analysis is not None:
@@ -112,7 +158,7 @@ def require_generation_decision(paths: RunPaths) -> ReviewDecision:
             raise ReviewGateError("确认快照存在但缺少最终产品分析，无法校验一致性")
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewGateError(f"无效的最终产品分析或确认快照：{exc}") from exc
-    constraints_path = _resolve_constraints_path(paths, decision.fidelity_constraints_path)
+    constraints_path = paths.root / CANONICAL_CONSTRAINTS_RELATIVE_PATH
     if not constraints_path.is_file():
         raise ReviewGateError(f"缺少产品保真约束文件：{constraints_path}")
     try:
@@ -202,9 +248,57 @@ def _load_optional_analysis(paths: RunPaths) -> ProductAnalysis | None:
 
 def _is_generation_with_snapshot(decision: ReviewDecision) -> bool:
     return (
-        decision.action in {"generate_rank_1", "generate_selected", "generate_multiple"}
+        decision.action in _GENERATION_ACTIONS
         and decision.confirmation_snapshot is not None
     )
+
+
+def _constraints_import_source(decision_data: dict[str, Any]) -> str:
+    raw_path = decision_data.get(
+        "fidelity_constraints_path",
+        CANONICAL_CONSTRAINTS_RELATIVE_PATH,
+    )
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("fidelity_constraints_path 必须是非空路径字符串")
+    return raw_path.strip()
+
+
+def _commit_json_transaction(entries: list[tuple[Path, Any]]) -> None:
+    targets = [target for target, _payload in entries]
+    if len(set(targets)) != len(targets):
+        raise ReviewGateError("原子提交目标路径不能重复")
+    previous = {
+        target: target.read_bytes() if target.is_file() else None
+        for target in targets
+    }
+    staged_entries: list[tuple[Path, Path]] = []
+    replaced_targets: list[Path] = []
+    label = {1: "文件", 2: "双文件", 3: "三文件"}.get(
+        len(entries),
+        f"{len(entries)} 文件",
+    )
+    try:
+        for target, payload in entries:
+            staged_entries.append((_stage_json(target, payload), target))
+        for staged_path, target in staged_entries:
+            os.replace(staged_path, target)
+            replaced_targets.append(target)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for target in reversed(replaced_targets):
+            try:
+                _restore_previous_file(target, previous[target])
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target}: {rollback_exc}")
+        if rollback_errors:
+            details = "；".join(rollback_errors)
+            raise ReviewGateError(
+                f"{label}提交失败，且回滚未完整：{exc}；回滚异常：{details}"
+            ) from exc
+        raise ReviewGateError(f"{label}提交失败，已回滚：{exc}") from exc
+    finally:
+        for staged_path, _target in staged_entries:
+            staged_path.unlink(missing_ok=True)
 
 
 def _stage_json(target_path: Path, data: Any) -> Path:
@@ -254,10 +348,12 @@ def _resolve_constraints_path(paths: RunPaths, raw_path: str) -> Path:
 
 
 __all__ = [
+    "CANONICAL_CONSTRAINTS_RELATIVE_PATH",
     "ReviewGateError",
     "require_generation_decision",
     "validate_confirmed_analysis",
     "validate_decision_against_analysis",
     "write_analysis_and_review_decision",
+    "write_review_bundle",
     "write_review_decision",
 ]
