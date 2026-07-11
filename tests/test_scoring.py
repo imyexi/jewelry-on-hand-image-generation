@@ -415,6 +415,107 @@ def test_select_top_references_uses_model_rank_without_bypass():
     assert [item.rank for item in candidates] == [1, 2, 3, 4]
 
 
+def ring_product():
+    return ProductAnalysis.from_dict(
+        {
+            "product_type": "戒指",
+            "detected_product_type": "ring",
+            "confirmed_product_type": "ring",
+            "classification_confidence": "high",
+            "classification_evidence": ["单枚戒指佩戴在左手无名指根部"],
+            "classification_source": "model",
+            "wear_position": "左手无名指根部",
+            "visible_appearance": "单枚银色素圈戒",
+            "color_family": ["银色"],
+            "style_mood": "清透自然",
+            "composition": "手部近景",
+            "product_dimensions": {},
+            "needs_full_front_display": True,
+            "special_requirements": [],
+            "source_image_type": "worn_source",
+            "display_mode": "worn",
+            "layer_count": 1,
+            "ring_count": 1,
+            "hand_side": "left",
+            "finger_position": "ring",
+            "ring_wear_style": "finger_base",
+        }
+    )
+
+
+def ring_row(index, **overrides):
+    data = {
+        "index": index,
+        "file_name": f"ring-{index}.jpg",
+        "relative_path": f"ring-{index}.jpg",
+        "absolute_path": Path(f"C:/tmp/ring-{index}.jpg"),
+        "width": 1000,
+        "height": 1200,
+        "size_mb": 1,
+        "purpose_category": "戒指上手/手部近景参考",
+        "bracelet_applicability": "",
+        "default_strategy": "常规可优先使用",
+        "style_category": "清透自然光",
+        "scene_keywords": "手背 手指近景",
+        "jewelry_type": "戒指",
+        "recommended_usage": "戒指真人佩戴展示",
+        "notes": "手指完整，无裁切",
+        "confidence": "高",
+        "file_exists": True,
+        "applicable_product_types": "ring",
+        "applicable_display_modes": "worn",
+        "visible_body_regions": "左手全部手指",
+        "product_visibility": "高",
+        "hand_visibility": "高",
+        "existing_jewelry": "戒指",
+        "crop_risk": "低",
+        "hand_side": "left",
+        "visible_fingers": "thumb,index,middle,ring,little",
+        "hand_orientation": "back",
+        "ring_face_visibility": "高",
+        "finger_separation": "高",
+        "finger_occlusion_risk": "低",
+    }
+    data.update(overrides)
+    return ReferenceRow(**data)
+
+
+def test_ring_selects_three_eligible_references_and_ignores_original_rings():
+    selected, candidates = select_top_references(
+        ring_product(),
+        [ring_row(401), ring_row(402), ring_row(403), ring_row(404)],
+    )
+
+    assert len(selected) == 3
+    assert len(candidates) == 4
+    assert all("参考图中的戒指" in item.ignored_reference_jewelry for item in selected)
+
+
+def test_ring_hard_filter_removes_ineligible_reference():
+    rejected = ring_row(405, visible_fingers="thumb,index,middle")
+    valid = [ring_row(406), ring_row(407), ring_row(408)]
+
+    selected, candidates = select_top_references(ring_product(), [rejected, *valid])
+    rejected_score = score_reference(ring_product(), rejected)
+
+    assert {item.row.index for item in selected} == {406, 407, 408}
+    assert {item.row.index for item in candidates} == {406, 407, 408}
+    assert any("目标手指" in risk for risk in rejected_score.risk)
+
+
+def test_ring_requires_three_eligible_references():
+    with pytest.raises(ValueError, match="戒指.*至少 3 张.*当前 2 张"):
+        select_top_references(ring_product(), [ring_row(409), ring_row(410)])
+
+
+def test_ring_same_hand_side_scores_higher_without_replacing_confirmed_side():
+    same_side = score_reference(ring_product(), ring_row(411, hand_side="left"))
+    other_side = score_reference(ring_product(), ring_row(412, hand_side="right"))
+
+    assert same_side.score > other_side.score
+    assert not any("不匹配" in risk for risk in other_side.risk)
+
+
 def necklace_product(display_mode="worn", length_category="collarbone", layer_count=1):
     return ProductAnalysis.from_dict({
         "product_type": "普通项链",

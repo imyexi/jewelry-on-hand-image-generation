@@ -11,6 +11,7 @@ from jewelry_on_hand.category_policies.base import (
     parse_confidence_level,
 )
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
+from jewelry_on_hand.product_types import ProductType
 
 
 POSE_PURPOSE_POINTS = 20
@@ -44,9 +45,15 @@ SAME_HOLDING_METHOD_PENALTY = 10
 def select_top_references(
     product: ProductAnalysis, rows: Iterable[ReferenceRow]
 ) -> tuple[list[ScoredReference], list[ScoredReference]]:
+    existing_rows = [row for row in rows if row.file_exists]
     filtered_rows = _filter_reference_rows(
-        product, [row for row in rows if row.file_exists]
+        product, existing_rows
     )
+    if product.confirmed_product_type is ProductType.RING and len(filtered_rows) < 3:
+        raise ValueError(
+            "戒指参考图至少 3 张合格候选，"
+            f"当前 {len(filtered_rows)} 张（存在文件 {len(existing_rows)} 张）"
+        )
     scored = [score_reference(product, row) for row in filtered_rows]
     ordered = sorted(scored, key=lambda item: (-item.score, item.row.index))
     candidates = _rerank(ordered)

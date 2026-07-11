@@ -99,6 +99,43 @@ def necklace_reference(**overrides):
     return ReferenceRow(**data)
 
 
+def ring_reference(**overrides):
+    data = {
+        "index": 21,
+        "file_name": "ring.jpg",
+        "relative_path": "ring.jpg",
+        "absolute_path": Path("C:/tmp/ring.jpg"),
+        "width": 1000,
+        "height": 1200,
+        "size_mb": 1,
+        "purpose_category": "戒指上手/手部近景参考",
+        "bracelet_applicability": "",
+        "default_strategy": "常规可优先使用",
+        "style_category": "自然光手部特写",
+        "scene_keywords": "手背 手指近景",
+        "jewelry_type": "戒指",
+        "recommended_usage": "戒指真人佩戴展示",
+        "notes": "手指完整，无裁切",
+        "confidence": "高",
+        "file_exists": True,
+        "applicable_product_types": "ring",
+        "applicable_display_modes": "worn",
+        "visible_body_regions": "左手全部手指",
+        "product_visibility": "高",
+        "hand_visibility": "高",
+        "existing_jewelry": "戒指",
+        "crop_risk": "低",
+        "hand_side": "left",
+        "visible_fingers": "thumb,index,middle,ring,little",
+        "hand_orientation": "back",
+        "ring_face_visibility": "高",
+        "finger_separation": "高",
+        "finger_occlusion_risk": "低",
+    }
+    data.update(overrides)
+    return ReferenceRow(**data)
+
+
 def test_bracelet_policy_preserves_existing_category():
     policy = get_category_policy(ProductType.BRACELET)
     assert policy.product_type is ProductType.BRACELET
@@ -138,6 +175,39 @@ def test_ring_policy_provides_prompt_and_qc_contract():
     assert "画面中只有一枚目标戒指" in items
     assert "戒指位于确认后的左右手和目标手指根部" in items
     assert "戒圈自然环绕手指" in " ".join(items)
+
+
+def test_ring_policy_exposes_eligible_reference_adaptation():
+    adaptation = get_category_policy(ProductType.RING).evaluate_reference(
+        ring_product(),
+        ring_reference(),
+    )
+
+    assert adaptation.eligible
+    assert adaptation.score_adjustment > 0
+    assert "参考图中的戒指" in adaptation.ignored_reference_jewelry
+
+
+@pytest.mark.parametrize(
+    ("overrides", "risk_text"),
+    [
+        ({"applicable_product_types": ""}, "适用品类"),
+        ({"applicable_display_modes": ""}, "展示模式"),
+        ({"visible_fingers": "thumb,index,middle"}, "目标手指"),
+        ({"ring_face_visibility": "低"}, "戒面"),
+        ({"finger_separation": "低"}, "分离度"),
+        ({"finger_occlusion_risk": "高"}, "遮挡"),
+        ({"crop_risk": "高"}, "裁切"),
+    ],
+)
+def test_ring_policy_reports_hard_filter_risks(overrides, risk_text):
+    adaptation = get_category_policy(ProductType.RING).evaluate_reference(
+        ring_product(),
+        ring_reference(**overrides),
+    )
+
+    assert not adaptation.eligible
+    assert any(risk_text in risk for risk in adaptation.risks)
 
 
 def test_pendant_only_policy_explains_current_block():
