@@ -80,6 +80,7 @@ ReferenceEvaluator = Callable[["ProductAnalysis", "ReferenceRow"], ReferenceAdap
 
 @dataclass(frozen=True)
 class PromptFragments:
+    image_one_role: str
     category_fidelity: str
     display_mode: str
     occlusion_physics: str

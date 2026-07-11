@@ -19,10 +19,12 @@ _NON_TARGET_TERMS = ("戒指", "耳饰", "耳环", "项链", "吊坠", "颈链")
 
 BRACELET_PRODUCT_ISOLATION_SENTENCE = "内部图2只提取珠子、隔圈、金属件、颜色、透明度、纹理、反光和排列；禁止继承内部图2里的皮肤、手腕、手臂、掌纹、指甲、肤色、手臂粗细、背景。"
 BRACELET_WRIST_SOURCE_SENTENCE = "手腕宽度、手臂轮廓、皮肤连续性和肤色必须以内部图1为准；不要把内部图2中的手串+手腕局部作为整体贴到内部图1。"
+BRACELET_IMAGE_ONE_ROLE = "内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。"
 
 
 def _build_bracelet_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
     return PromptFragments(
+        image_one_role=BRACELET_IMAGE_ONE_ROLE,
         category_fidelity=(
             "手串/手链的珠子、主珠、配珠、隔圈、金属件、排列顺序、颜色、"
             "透明度、纹理、反光和可见比例必须与内部图2一致。"

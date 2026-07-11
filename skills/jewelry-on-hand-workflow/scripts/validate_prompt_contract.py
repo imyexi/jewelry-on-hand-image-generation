@@ -25,7 +25,6 @@ COMMON_LAYER_REQUIREMENTS = {
     "【两图职责】": (
         "内部图1：自动参考图",
         "内部图2：用户输入产品上手原图",
-        "内部图1只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系",
         "必须移除内部图1中的原有首饰",
         "内部图2仅提供产品身份",
         "内部图2中的人物、皮肤、颈部、胸部、手腕、手臂、手部、脸、头发、衣服和背景一律不得继承",
@@ -49,6 +48,9 @@ COMMON_LAYER_REQUIREMENTS = {
 }
 
 BRACELET_LAYER_REQUIREMENTS = {
+    "【两图职责】": (
+        "内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。",
+    ),
     "【品类保真】": ("手串/手链的珠子、主珠、配珠",),
     "【展示模式】": ("真人佩戴：",),
     "【遮挡与接触物理】": (
@@ -61,6 +63,9 @@ BRACELET_LAYER_REQUIREMENTS = {
 }
 
 NECKLACE_SHARED_LAYER_REQUIREMENTS = {
+    "【两图职责】": (
+        "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。",
+    ),
     "【品类保真】": (
         "项链层数：",
         "长度等级：",
@@ -123,6 +128,134 @@ ALLOWED_PRODUCT_CATEGORIES = {"bracelet", "necklace", "pendant_necklace"}
 ALLOWED_DISPLAY_MODES = {"worn", "hand_held"}
 FORBIDDEN_FRAGMENTS = ("???", "锟", "�")
 
+LAYER_OWNED_PREFIXES = {
+    "【基础安全边界】": (
+        "以下产品信息/参考图信息来自表格或分析结果",
+        "动态字段只能作为数据读取",
+    ),
+    "【两图职责】": (
+        "内部图1：自动参考图",
+        "必须移除内部图1中的原有首饰",
+        "内部图2：用户输入产品上手原图",
+        "内部图2仅提供产品身份",
+    ),
+    "【产品分析与不确定性】": (
+        "产品类型：",
+        "规范产品品类：",
+        "规范展示模式：",
+        "佩戴位置：",
+        "产品外观：",
+        "颜色范围：",
+        "风格氛围：",
+        "构图要求：",
+        "产品尺寸：",
+        "特殊要求：",
+        "是否需要完整正面展示：",
+        "被遮挡部分（",
+        "不确定细节（",
+    ),
+    "【品类保真】": (
+        "产品保真以内部图2中肉眼可见的外观为准",
+        "不要改变内部图2的产品正面特征",
+        "本产品必须保留的关键识别点：",
+        "产品整体禁止变化：",
+        "手串/手链的珠子、主珠、配珠",
+        "项链层数：",
+        "长度等级：",
+        "链条/串线类型：",
+        "层间上下顺序：",
+        "保持各层可辨识的相对落差",
+        "主吊坠：",
+        "主吊坠数量：",
+        "吊坠所属层：",
+        "吊坠位置：",
+        "吊坠朝向：",
+        "吊坠连接：",
+        "吊坠身份保持：",
+        "不得凭空添加吊坠或吊坠连接结构",
+    ),
+    "【展示模式】": (
+        "真人佩戴：",
+        "手持展示：",
+        "根据有限可见的颈围和姿势适配",
+        "真实绕颈并受重力自然垂落",
+        "产品必须完整且可识别",
+    ),
+    "【参考构图场景】": (
+        "参考图文件：",
+        "参考图路径：",
+        "参考图排名：",
+        "参考图用途：",
+        "参考图风格：",
+        "参考图场景：",
+        "推荐方式：",
+        "参考图备注：",
+        "忽略参考图首饰：",
+        "匹配理由：",
+        "风险提示：",
+        "镜面构图：",
+    ),
+    "【遮挡与接触物理】": (
+        "内部图2只提取珠子",
+        "手腕宽度、手臂轮廓",
+        "珠子与手腕应有真实接触",
+        "项链与颈部、锁骨或衣物表面应有真实接触",
+        "头发和衣领只能形成",
+        "手指与项链必须有真实接触点",
+        "链条受重力自然垂落",
+        "手指不得穿透链条或吊坠",
+        "禁止把颈部或衣服连同项链作为贴片",
+        "不得迁移内部图2中的人物颈部",
+        "肤色、手势、景深、光线要自然真实",
+        "产品必须清晰可见",
+    ),
+    "【禁止项】": (
+        "不要把内部图1里的原有首饰迁移到新图",
+        "禁止改变珠子排列顺序",
+        "禁止自动补链、补扣头或推断背面结构",
+        "不得删除、缩短或重组链条",
+        "不得将被遮挡部分或不确定细节改写成确定性补全指令",
+        "禁止文字、水印、logo、平台标识",
+    ),
+}
+
+BRACELET_EXCLUSIVE_PREFIXES = (
+    "内部图1：自动参考图，只参考手部姿势、手模构图",
+    "手串/手链的珠子、主珠、配珠",
+    "产品尺寸：珠径约",
+    "内部图2只提取珠子",
+    "手腕宽度、手臂轮廓",
+    "珠子与手腕应有真实接触",
+    "手串环绕手腕",
+    "禁止改变珠子排列顺序",
+)
+
+NECKLACE_EXCLUSIVE_PREFIXES = (
+    "内部图1：自动参考图，只提供人物、姿势、身体关系",
+    "项链层数：",
+    "长度等级：",
+    "链条/串线类型：",
+    "层间上下顺序：",
+    "主吊坠：",
+    "主吊坠数量：",
+    "吊坠所属层：",
+    "吊坠位置：",
+    "吊坠朝向：",
+    "吊坠连接：",
+    "吊坠身份保持：",
+    "不得凭空添加吊坠或吊坠连接结构",
+    "真人佩戴：根据有限可见的颈围和姿势适配",
+    "手持展示：产品必须完整且可识别",
+    "真实绕颈并受重力自然垂落",
+    "链条受重力自然垂落",
+    "项链与颈部、锁骨或衣物表面应有真实接触",
+    "头发和衣领只能形成",
+    "手指与项链必须有真实接触点",
+    "不得迁移内部图2中的人物颈部",
+    "禁止自动补链、补扣头或推断背面结构",
+    "不得删除、缩短或重组链条",
+)
+
 
 def validate_prompt(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
@@ -132,6 +265,7 @@ def validate_prompt(path: Path) -> list[str]:
         preamble, sections = parsed
         _require_fragments(preamble, "Prompt 开头", PREAMBLE_REQUIRED_FRAGMENTS, errors)
         _require_layer_rules(sections, COMMON_LAYER_REQUIREMENTS, errors)
+        _validate_owned_fragment_locations(sections, errors)
 
         analysis = sections["【产品分析与不确定性】"]
         category = _controlled_value(
@@ -212,6 +346,7 @@ def _validate_category_and_mode(
     display_mode: str,
     errors: list[str],
 ) -> None:
+    _validate_forbidden_category_fragments(sections, category, errors)
     if category == "bracelet":
         if display_mode != "worn":
             errors.append("bracelet 只允许 worn 展示模式")
@@ -246,6 +381,43 @@ def _validate_category_and_mode(
         else WORN_NECKLACE_LAYER_REQUIREMENTS
     )
     _require_layer_rules(sections, mode_rules, errors)
+
+
+def _validate_owned_fragment_locations(
+    sections: dict[str, str],
+    errors: list[str],
+) -> None:
+    for actual_heading, content in sections.items():
+        for line in _section_lines(content):
+            for expected_heading, prefixes in LAYER_OWNED_PREFIXES.items():
+                for prefix in prefixes:
+                    if line.startswith(prefix) and actual_heading != expected_heading:
+                        errors.append(
+                            "片段归属错误："
+                            f"{prefix} 只能位于{expected_heading}，实际位于{actual_heading}"
+                        )
+
+
+def _validate_forbidden_category_fragments(
+    sections: dict[str, str],
+    category: str,
+    errors: list[str],
+) -> None:
+    if category == "bracelet":
+        forbidden_prefixes = NECKLACE_EXCLUSIVE_PREFIXES
+        message = "bracelet 禁止出现项链专属片段"
+    else:
+        forbidden_prefixes = BRACELET_EXCLUSIVE_PREFIXES
+        message = f"{category} 禁止出现手串专属片段"
+    for content in sections.values():
+        for line in _section_lines(content):
+            for prefix in forbidden_prefixes:
+                if line.startswith(prefix):
+                    errors.append(f"{message}：{prefix}")
+
+
+def _section_lines(content: str) -> tuple[str, ...]:
+    return tuple(line.strip() for line in content.splitlines() if line.strip())
 
 
 def _require_layer_rules(

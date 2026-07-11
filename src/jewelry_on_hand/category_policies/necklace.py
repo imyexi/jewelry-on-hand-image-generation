@@ -25,6 +25,7 @@ _LENGTH_CATEGORY_NAMES = {
     "upper_chest": "上胸链",
     "long": "长链",
 }
+NECKLACE_IMAGE_ONE_ROLE = "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。"
 
 
 def _build_necklace_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
@@ -51,11 +52,11 @@ def _build_necklace_prompt_fragments(product: ProductAnalysis) -> PromptFragment
         structure_lines.append("主吊坠：无；不得凭空添加吊坠或吊坠连接结构。")
 
     return PromptFragments(
+        image_one_role=NECKLACE_IMAGE_ONE_ROLE,
         category_fidelity="\n".join(structure_lines),
         display_mode=_necklace_display_mode_fragment(product),
         occlusion_physics=_necklace_occlusion_fragment(product),
         prohibitions=(
-            "移除内部图1中的原有首饰，只保留其构图、人物和场景职责。\n"
             "禁止自动补链、补扣头或推断背面结构；不得删除、缩短或重组链条。\n"
             "不得将被遮挡部分或不确定细节改写成确定性补全指令。"
         ),

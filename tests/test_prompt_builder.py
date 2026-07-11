@@ -12,7 +12,11 @@ from jewelry_on_hand.models import (
     ScoredReference,
 )
 from jewelry_on_hand.product_types import ProductType
-from jewelry_on_hand.prompt_builder import build_prompt
+from jewelry_on_hand.prompt_builder import (
+    PRODUCT_ISOLATION_SENTENCE,
+    WRIST_SOURCE_SENTENCE,
+    build_prompt,
+)
 
 
 EXACT_FIDELITY_SENTENCE = "产品保真以内部图2中肉眼可见的外观为准，不要根据材质名称自行改款、换色、重设计或美化成其他款式。"
@@ -528,11 +532,12 @@ def test_build_generation_prompt_is_public_and_matches_compatibility_entrypoint(
     assert build_generation_prompt(product, reference) == build_prompt(product, reference)
 
 
-def test_worn_prompt_applies_common_two_image_identity_isolation():
+def test_necklace_prompt_uses_wide_image_one_role_and_common_identity_isolation():
     prompt = build_prompt(_necklace_product(), _scored(_row()))
     two_image_layer = prompt.split("【两图职责】", 1)[1].split("【产品分析与不确定性】", 1)[0]
 
-    assert "内部图1只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系" in two_image_layer
+    assert "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。" in two_image_layer
+    assert "内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。" not in two_image_layer
     assert "必须移除内部图1中的原有首饰" in two_image_layer
     assert "内部图2仅提供产品身份" in two_image_layer
     for body_part in (
@@ -550,6 +555,17 @@ def test_worn_prompt_applies_common_two_image_identity_isolation():
     ):
         assert body_part in two_image_layer
     assert "一律不得继承" in two_image_layer
+
+
+def test_bracelet_prompt_keeps_narrow_image_one_role_without_wide_role():
+    prompt = build_prompt(_product(), _scored(_row()))
+    two_image_layer = prompt.split("【两图职责】", 1)[1].split("【产品分析与不确定性】", 1)[0]
+
+    assert "内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。" in two_image_layer
+    assert "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。" not in two_image_layer
+    assert "内部图1只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系" not in two_image_layer
+    assert "必须移除内部图1中的原有首饰" in two_image_layer
+    assert "内部图2仅提供产品身份" in two_image_layer
 
 
 def test_pendant_necklace_forbids_all_pendant_identity_changes():
@@ -602,18 +618,26 @@ def test_validator_rejects_empty_section(tmp_path):
     assert any("【展示模式】内容不能为空" in error for error in errors)
 
 
-def test_validator_rejects_required_fragment_in_wrong_layer(tmp_path):
+def test_validator_rejects_required_fragment_copied_into_wrong_layer(tmp_path):
     prompt = build_prompt(_necklace_product(), _scored(_row())).replace(
-        f"{EXACT_FIDELITY_SENTENCE}\n",
-        "",
-    ).replace(
         "【禁止项】",
         f"【禁止项】\n{EXACT_FIDELITY_SENTENCE}",
     )
 
     errors = _prompt_contract_errors(tmp_path, prompt)
 
-    assert any("【品类保真】缺少必需片段" in error for error in errors)
+    assert any("片段归属错误" in error and "产品保真以内部图2" in error for error in errors)
+
+
+def test_validator_rejects_category_prefix_copied_into_prohibition_layer(tmp_path):
+    prompt = build_prompt(_necklace_product(), _scored(_row())).replace(
+        "【禁止项】",
+        "【禁止项】\n项链层数：1 层。",
+    )
+
+    errors = _prompt_contract_errors(tmp_path, prompt)
+
+    assert any("片段归属错误" in error and "项链层数：" in error for error in errors)
 
 
 def test_validator_rejects_all_content_piled_into_last_section(tmp_path):
@@ -693,3 +717,65 @@ def test_validator_rejects_no_pendant_marker_for_pendant_necklace(tmp_path):
     errors = _prompt_contract_errors(tmp_path, prompt)
 
     assert any("带链吊坠不得声明主吊坠为无" in error for error in errors)
+
+
+def test_validator_rejects_full_necklace_contract_mixed_into_bracelet(tmp_path):
+    prompt = build_prompt(_product(), _scored(_row()))
+    additions = {
+        "【品类保真】": (
+            "项链层数：1 层。",
+            "长度等级：锁骨链（collarbone）。",
+            "链条/串线类型：细链。",
+            "层间上下顺序：第 1 层位于最上方且最短，层号递增时依次向下；保持各层可辨识的相对落差。",
+            "主吊坠：无；不得凭空添加吊坠或吊坠连接结构。",
+        ),
+        "【遮挡与接触物理】": (
+            "项链与颈部、锁骨或衣物表面应有真实接触、遮挡关系和自然阴影。",
+        ),
+        "【禁止项】": (
+            "禁止自动补链、补扣头或推断背面结构；不得删除、缩短或重组链条。",
+        ),
+    }
+    for heading, lines in additions.items():
+        prompt = prompt.replace(heading, f"{heading}\n" + "\n".join(lines))
+
+    errors = _prompt_contract_errors(tmp_path, prompt)
+
+    assert any("bracelet 禁止出现项链专属片段" in error for error in errors)
+
+
+def test_validator_rejects_bracelet_contract_mixed_into_necklace(tmp_path):
+    prompt = build_prompt(_necklace_product(), _scored(_row()))
+    additions = {
+        "【品类保真】": (
+            "手串/手链的珠子、主珠、配珠、隔圈、金属件和排列顺序必须与内部图2一致。",
+        ),
+        "【遮挡与接触物理】": (
+            PRODUCT_ISOLATION_SENTENCE,
+            WRIST_SOURCE_SENTENCE,
+            "珠子与手腕应有真实接触和合理阴影。",
+        ),
+        "【禁止项】": (
+            "禁止改变珠子排列顺序、主珠和配件位置关系。",
+        ),
+    }
+    for heading, lines in additions.items():
+        prompt = prompt.replace(heading, f"{heading}\n" + "\n".join(lines))
+
+    errors = _prompt_contract_errors(tmp_path, prompt)
+
+    assert any("necklace 禁止出现手串专属片段" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "product",
+    (
+        _product(),
+        _necklace_product(),
+        _necklace_product(ProductType.PENDANT_NECKLACE),
+    ),
+)
+def test_validator_accepts_clean_category_specific_image_roles(tmp_path, product):
+    prompt = build_prompt(product, _scored(_row()))
+
+    assert _prompt_contract_errors(tmp_path, prompt) == []
