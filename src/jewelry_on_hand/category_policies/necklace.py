@@ -3,6 +3,7 @@ import re
 from jewelry_on_hand.category_policies.base import (
     CategoryPolicy,
     ControlledLevel,
+    PromptFragments,
     ReferenceAdaptation,
     SHARED_BASIC_QC_ITEMS,
     contains_affirmed_any,
@@ -18,6 +19,77 @@ from jewelry_on_hand.product_types import ProductType
 
 
 _NECKLACE_TYPES = {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}
+_LENGTH_CATEGORY_NAMES = {
+    "choker": "贴颈链",
+    "collarbone": "锁骨链",
+    "upper_chest": "上胸链",
+    "long": "长链",
+}
+
+
+def _build_necklace_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
+    structure_lines = [
+        f"项链层数：{product.layer_count} 层。",
+        f"长度等级：{_length_category_text(product.length_category)}。",
+        f"链条/串线类型：{product.chain_or_strand_type or '未确定'}。",
+        "层间上下顺序：第 1 层位于最上方且最短，层号递增时依次向下；"
+        "保持各层可辨识的相对落差，不得交换、合并或重组层间上下顺序。",
+    ]
+    if product.has_pendant:
+        structure_lines.extend(
+            (
+                f"主吊坠数量：{product.pendant_count}。",
+                f"吊坠所属层：第 {product.pendant_layer} 层。",
+                f"吊坠位置：{product.pendant_position or '未确定'}。",
+                f"吊坠朝向：{product.pendant_orientation or '未确定'}。",
+                f"吊坠连接：{product.connection_structure or '未确定'}。",
+            )
+        )
+    else:
+        structure_lines.append("主吊坠：无；不得凭空添加吊坠或吊坠连接结构。")
+
+    return PromptFragments(
+        category_fidelity="\n".join(structure_lines),
+        display_mode=_necklace_display_mode_fragment(product),
+        occlusion_physics=_necklace_occlusion_fragment(product),
+        prohibitions=(
+            "移除内部图1中的原有首饰，只保留其构图、人物和场景职责。\n"
+            "禁止自动补链、补扣头或推断背面结构；不得删除、缩短或重组链条。\n"
+            "不得将被遮挡部分或不确定细节改写成确定性补全指令。"
+        ),
+    )
+
+
+def _length_category_text(value: str | None) -> str:
+    if value is None:
+        return "未确定"
+    return f"{_LENGTH_CATEGORY_NAMES[value]}（{value}）"
+
+
+def _necklace_display_mode_fragment(product: ProductAnalysis) -> str:
+    if product.display_mode is DisplayMode.HAND_HELD:
+        return (
+            "手持展示：产品必须完整且可识别，链条在手部真实持握下完整进入画面，"
+            "不得以佩戴或贴图方式替代手持关系。"
+        )
+    return (
+        "真人佩戴：根据有限可见的颈围和姿势适配，不改变人物体态；项链必须"
+        "真实绕颈并受重力自然垂落，长度等级、各层落点及相对落差与内部图2一致。"
+    )
+
+
+def _necklace_occlusion_fragment(product: ProductAnalysis) -> str:
+    if product.display_mode is DisplayMode.HAND_HELD:
+        return (
+            "手指与项链必须有真实接触点，链条受重力自然垂落；手指不得穿透链条"
+            "或吊坠，接触处不得悬浮或粘连。\n"
+            "不得迁移内部图2中的人物颈部、衣服或皮肤；只提取项链本体的可见结构。"
+        )
+    return (
+        "项链与颈部、锁骨或衣物表面应有真实接触、遮挡关系和自然阴影；"
+        "禁止把颈部或衣服连同项链作为贴片，不得让链条穿透皮肤或衣物。\n"
+        "头发和衣领只能形成符合参考图姿势的有限自然遮挡，不得遮掉产品主要结构。"
+    )
 
 
 def _evaluate_necklace_reference(
@@ -330,6 +402,7 @@ NECKLACE_POLICY = CategoryPolicy(
         "链条与身体或手部关系自然",
     ),
     reference_evaluator=_evaluate_necklace_reference,
+    prompt_fragment_builder=_build_necklace_prompt_fragments,
 )
 
 PENDANT_NECKLACE_POLICY = CategoryPolicy(
@@ -343,4 +416,5 @@ PENDANT_NECKLACE_POLICY = CategoryPolicy(
         "吊坠形态、连接关系和所在层正确",
     ),
     reference_evaluator=_evaluate_necklace_reference,
+    prompt_fragment_builder=_build_necklace_prompt_fragments,
 )

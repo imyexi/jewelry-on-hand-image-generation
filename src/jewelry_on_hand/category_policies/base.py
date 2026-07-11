@@ -78,6 +78,17 @@ class ReferenceAdaptation:
 ReferenceEvaluator = Callable[["ProductAnalysis", "ReferenceRow"], ReferenceAdaptation]
 
 
+@dataclass(frozen=True)
+class PromptFragments:
+    category_fidelity: str
+    display_mode: str
+    occlusion_physics: str
+    prohibitions: str
+
+
+PromptFragmentBuilder = Callable[["ProductAnalysis"], PromptFragments]
+
+
 def contains_any(text: str, terms: Iterable[str]) -> bool:
     lowered = text.lower()
     return any(term.lower() in lowered for term in terms)
@@ -286,6 +297,7 @@ class CategoryPolicy:
     max_layer_count: int
     basic_qc_items: tuple[str, ...]
     reference_evaluator: ReferenceEvaluator | None = None
+    prompt_fragment_builder: PromptFragmentBuilder | None = None
 
     @property
     def category_name(self) -> str:
@@ -317,3 +329,8 @@ class CategoryPolicy:
                 risks=(f"{self.category_name}当前没有可用的参考图适配规则",),
             )
         return self.reference_evaluator(product, row)
+
+    def build_prompt_fragments(self, product: "ProductAnalysis") -> PromptFragments:
+        if self.prompt_fragment_builder is None:
+            raise ValueError(f"{self.category_name}尚未配置生成 Prompt 策略")
+        return self.prompt_fragment_builder(product)
