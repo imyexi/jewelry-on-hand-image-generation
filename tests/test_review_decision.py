@@ -3,7 +3,9 @@ import pytest
 from jewelry_on_hand.review_decision import (
     ReviewGateError,
     require_generation_decision,
+    validate_confirmed_analysis,
     validate_decision_against_analysis,
+    write_analysis_and_review_decision,
     write_review_decision,
 )
 from jewelry_on_hand.models import ProductAnalysis, ReviewDecision
@@ -366,3 +368,69 @@ def test_historical_bracelet_without_snapshot_still_checks_mode_compatibility(tm
 
     with pytest.raises(ReviewGateError, match="手串/手链与手持展示模式不兼容"):
         require_generation_decision(paths)
+
+
+def test_confirmed_analysis_validation_does_not_depend_on_decision_action():
+    analysis = ProductAnalysis.from_dict(
+        _necklace_analysis_data(source_image_type="flat_lay_source")
+    )
+
+    with pytest.raises(ReviewGateError, match="第一阶段只接受真人佩戴原图"):
+        validate_confirmed_analysis(analysis)
+
+
+def test_pair_write_updates_analysis_and_decision_together(tmp_path):
+    paths = RunPaths.create(tmp_path, "run-1")
+    analysis_data = _necklace_analysis_data()
+    decision_data = {
+        "action": "rerank",
+        "confirmation_snapshot": _confirmation_snapshot(),
+    }
+
+    decision_path = write_analysis_and_review_decision(
+        paths,
+        analysis_data,
+        decision_data,
+    )
+
+    assert read_json(paths.analysis_dir / "product_analysis.json") == analysis_data
+    assert decision_path == paths.review_dir / "review_decision.json"
+    assert read_json(decision_path)["confirmation_snapshot"] == _confirmation_snapshot()
+
+
+def test_pair_write_rolls_back_both_files_when_second_replace_fails(tmp_path, monkeypatch):
+    import os
+
+    paths = RunPaths.create(tmp_path, "run-1")
+    analysis_path = paths.analysis_dir / "product_analysis.json"
+    decision_path = paths.review_dir / "review_decision.json"
+    old_analysis = b'{"old_analysis": true}\n'
+    old_decision = b'{"old_decision": true}\n'
+    analysis_path.write_bytes(old_analysis)
+    decision_path.write_bytes(old_decision)
+    original_replace = os.replace
+    replace_count = 0
+
+    def fail_second_replace(source, target):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 2:
+            raise OSError("模拟第二次替换失败")
+        return original_replace(source, target)
+
+    monkeypatch.setattr("jewelry_on_hand.review_decision.os.replace", fail_second_replace)
+
+    with pytest.raises(ReviewGateError, match="双文件提交失败.*模拟第二次替换失败"):
+        write_analysis_and_review_decision(
+            paths,
+            _necklace_analysis_data(),
+            {
+                "action": "rerank",
+                "confirmation_snapshot": _confirmation_snapshot(),
+            },
+        )
+
+    assert analysis_path.read_bytes() == old_analysis
+    assert decision_path.read_bytes() == old_decision
+    assert not list(paths.analysis_dir.glob("*.tmp"))
+    assert not list(paths.review_dir.glob("*.tmp"))

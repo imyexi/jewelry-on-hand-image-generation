@@ -11,7 +11,7 @@
 | `action` | 字符串 | 必填；取值见“动作规则”。 |
 | `selected_ranks` | 整数数组 | 只允许 `1..3`，不得重复；写入时规范化。 |
 | `manual_reference` | 字符串或缺省 | `manual_reference` 动作必填；该动作不能直接生成。 |
-| `fidelity_confirmed` | 布尔值 | 生成类动作必须为 `true`。 |
+| `fidelity_confirmed` | JSON 布尔值 | 生成类动作必须为真正的 JSON `true`；字符串 `"true"`、`"yes"`、`"1"` 和数字 `1` 均非法。 |
 | `fidelity_constraints_path` | 字符串 | 默认 `analysis/product_fidelity_constraints.json`；相对路径以 run 根目录为基准。 |
 | `fidelity_notes` | 字符串或缺省 | 仅作说明；关键识别点仍须写入保真约束文件。 |
 | `confirmation_snapshot` | 对象或缺省 | 类型安全的产品确认快照；项链生成类动作必填。 |
@@ -54,6 +54,7 @@
 - 任一 CLI 人工纠正发生后，`classification_source` 写为 `manual_override`。
 - 纠正参数按字段合并；未提供的参数不覆盖当前分析。
 - 合并结果必须重新通过 `ProductAnalysis`、品类与展示模式兼容矩阵、输入图来源和品类策略校验，校验成功后才同时写回 analysis 和决策快照。
+- 上述确认后 analysis 校验与 decision action 无关；即使 action 是 `rerank` 或 `manual_reference`，只要提供了人工纠正参数，也不得写入 `unknown`、无链独立吊坠、非法输入来源、非法展示模式、非法层数或不支持的结构。
 
 `record-decision` 可使用以下纠正参数：
 
@@ -85,6 +86,10 @@
 7. 快照每个字段与最终 `analysis/product_analysis.json` 一致；任何字段不一致都拒绝。
 
 `validate_decision_against_analysis(decision, analysis)` 提供同一套可调用的严格校验，生成入口可在提交外部任务前再次调用。
+
+`validate_confirmed_analysis(analysis)` 提供与 action 无关的确认后 analysis 校验。CLI 只要收到任一人工纠正参数，必须在写文件前调用该接口；没有纠正参数的历史非生成动作保持原行为。
+
+人工纠正成功落盘时，analysis 与 decision 使用同一双文件提交过程：先在各自目标目录完整写入并同步临时 JSON，再以 `os.replace` 替换正式文件。若任一次写入或第二次替换失败，系统会用原文件字节原子恢复已经替换的文件；原文件不存在时移除新文件，并清理临时文件。CLI 返回明确中文错误和非零状态，不保留半更新状态。
 
 ## 5. 兼容规则
 

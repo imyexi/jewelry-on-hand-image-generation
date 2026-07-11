@@ -1306,8 +1306,10 @@ class ReviewDecision:
             "generate_selected",
             "generate_multiple",
         }
-        fidelity_confirmed = _optional_bool(
-            source.get("fidelity_confirmed"), "fidelity_confirmed"
+        fidelity_confirmed = (
+            _json_bool(source["fidelity_confirmed"], "fidelity_confirmed")
+            if "fidelity_confirmed" in source
+            else False
         )
         if is_generation_action and not fidelity_confirmed:
             raise ValueError("fidelity_confirmed 必须为 true")

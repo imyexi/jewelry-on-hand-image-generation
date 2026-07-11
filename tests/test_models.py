@@ -581,6 +581,17 @@ def test_review_decision_generation_actions_require_fidelity_confirmed_true():
     assert decision.fidelity_constraints_path == "analysis/product_fidelity_constraints.json"
 
 
+@pytest.mark.parametrize("invalid", ["true", "yes", "1", 1])
+def test_review_decision_from_dict_requires_json_boolean_fidelity_confirmation(invalid):
+    with pytest.raises(ValueError, match="fidelity_confirmed.*JSON 布尔值"):
+        ReviewDecision.from_dict(
+            {
+                "action": "generate_rank_1",
+                "fidelity_confirmed": invalid,
+            }
+        )
+
+
 def test_review_decision_direct_construction_copies_selected_ranks_to_frozen_list():
     ranks = [1]
     decision = ReviewDecision(
