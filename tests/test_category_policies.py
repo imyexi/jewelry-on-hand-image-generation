@@ -163,6 +163,44 @@ def test_pendant_only_policy_keeps_the_no_auto_chain_constraint():
     assert "禁止自动补链" in policy.basic_qc_items
 
 
+@pytest.mark.parametrize(
+    ("product_type", "display_mode"),
+    [
+        (ProductType.BRACELET, DisplayMode.WORN),
+        (ProductType.NECKLACE, DisplayMode.WORN),
+        (ProductType.NECKLACE, DisplayMode.HAND_HELD),
+        (ProductType.PENDANT_NECKLACE, DisplayMode.WORN),
+        (ProductType.PENDANT_NECKLACE, DisplayMode.HAND_HELD),
+    ],
+)
+def test_policy_provides_qc_items_for_each_supported_mode(
+    product_type,
+    display_mode,
+):
+    policy = get_category_policy(product_type)
+
+    items = policy.qc_items_for_mode(display_mode)
+
+    assert items
+    assert all(isinstance(item, str) and item for item in items)
+    assert set(policy.basic_qc_items).issubset(items)
+
+
+def test_necklace_worn_policy_explicitly_checks_auto_and_invented_chain():
+    policy = get_category_policy(ProductType.NECKLACE)
+
+    items = policy.qc_items_for_mode(DisplayMode.WORN)
+
+    assert "没有自动补链、凭空补链或补充不存在的连接结构" in items
+
+
+def test_pendant_only_policy_has_no_supported_qc_mode():
+    policy = get_category_policy(ProductType.PENDANT_ONLY)
+
+    with pytest.raises(ValueError, match="不支持.*QC"):
+        policy.qc_items_for_mode(DisplayMode.WORN)
+
+
 def test_bracelet_policy_enforces_its_single_layer_limit():
     policy = get_category_policy(ProductType.BRACELET)
     with pytest.raises(ValueError, match="手串/手链.*1 层"):

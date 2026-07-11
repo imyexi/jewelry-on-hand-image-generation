@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from jewelry_on_hand.qc import write_qc_result
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_SKILL = PROJECT_ROOT / "skills" / "jewelry-on-hand-workflow"
@@ -277,6 +279,223 @@ def test_qc_validator_reports_broken_json_in_chinese(tmp_path):
 
     assert len(errors) == 1
     assert "不是有效 JSON" in errors[0]
+
+
+@pytest.mark.parametrize(
+    ("fidelity_checks", "message"),
+    [
+        ([], "数量"),
+        (
+            [
+                {
+                    "name": "主吊坠",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "pass",
+                    "notes": "",
+                },
+                {
+                    "name": "主吊坠",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "pass",
+                    "notes": "",
+                },
+            ],
+            "唯一",
+        ),
+        (
+            [
+                {
+                    "name": "错误名称",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "pass",
+                    "notes": "",
+                }
+            ],
+            "name",
+        ),
+        (
+            [
+                {
+                    "name": "主吊坠",
+                    "question": "错误问题",
+                    "result": "pass",
+                    "notes": "",
+                }
+            ],
+            "question",
+        ),
+        (
+            [
+                {
+                    "name": "主吊坠",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "unknown",
+                    "notes": "",
+                }
+            ],
+            "result",
+        ),
+    ],
+)
+def test_qc_validator_requires_complete_unique_must_keep_coverage(
+    tmp_path,
+    fidelity_checks,
+    message,
+):
+    run_root = tmp_path / "run"
+    qc_path = run_root / "generation" / "01" / "qc.json"
+    (run_root / "analysis").mkdir(parents=True)
+    qc_path.parent.mkdir(parents=True)
+    _write_json(
+        run_root / "analysis" / "product_fidelity_constraints.json",
+        _portable_constraints_with_must_keep(),
+    )
+    _write_json(
+        qc_path,
+        {
+            "status": "rerun",
+            "passed": ["没有迁移产品图中的人物局部"],
+            "failed": ["需要复核"],
+            "notes": "",
+            "fidelity_checks": fidelity_checks,
+        },
+    )
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert any(message in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("second_name", "second_question"),
+    [
+        ("主吊坠", "主吊坠是否保持所属层？"),
+        ("吊坠连接环", "主吊坠是否保持原连接？"),
+    ],
+)
+def test_qc_validator_allows_unique_name_question_pairs(
+    tmp_path,
+    second_name,
+    second_question,
+):
+    run_root = tmp_path / "run"
+    qc_path = run_root / "generation" / "01" / "qc.json"
+    constraints = _portable_constraints_with_must_keep()
+    second = dict(constraints["must_keep"][0])
+    second["name"] = second_name
+    second["qc_question"] = second_question
+    constraints["must_keep"].append(second)
+    (run_root / "analysis").mkdir(parents=True)
+    qc_path.parent.mkdir(parents=True)
+    _write_json(
+        run_root / "analysis" / "product_fidelity_constraints.json",
+        constraints,
+    )
+    _write_json(
+        qc_path,
+        {
+            "status": "pass",
+            "passed": ["没有迁移产品图中的人物局部，迁移检查通过"],
+            "failed": [],
+            "notes": "",
+            "fidelity_checks": [
+                {
+                    "name": "主吊坠",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "pass",
+                    "notes": "",
+                },
+                {
+                    "name": second_name,
+                    "question": second_question,
+                    "result": "pass",
+                    "notes": "",
+                },
+            ],
+        },
+    )
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert errors == []
+
+
+def test_qc_writer_output_passes_portable_validator_for_standard_run(tmp_path):
+    run_root = tmp_path / "run"
+    generation_dir = run_root / "generation" / "01"
+    constraints_path = run_root / "analysis" / "product_fidelity_constraints.json"
+    constraints_path.parent.mkdir(parents=True)
+    _write_json(constraints_path, _portable_constraints_with_must_keep())
+
+    qc_path = write_qc_result(
+        generation_dir,
+        "pass",
+        ["没有迁移产品图中的人物局部，迁移检查通过"],
+        [],
+        "所有检查通过",
+        fidelity_checks=[
+            {
+                "name": "主吊坠",
+                "question": "主吊坠是否保持原连接？",
+                "result": "pass",
+                "notes": "保持原连接",
+            }
+        ],
+    )
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert errors == []
+
+
+def test_qc_validator_accepts_representative_legacy_bracelet_record(tmp_path):
+    qc_path = tmp_path / "legacy" / "qc.json"
+    qc_path.parent.mkdir(parents=True)
+    _write_json(
+        qc_path,
+        {
+            "status": "pass",
+            "passed": [
+                "原图手腕检查通过",
+                "原图手臂检查通过",
+                "皮肤块迁移检查通过",
+            ],
+            "failed": [],
+            "notes": "未发现粗手腕、局部手臂或皮肤块迁移",
+        },
+    )
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert errors == []
+
+
+def _portable_constraints_with_must_keep():
+    return {
+        "schema_version": 1,
+        "source": {
+            "product_id": "PN-001",
+            "product_image": "input/product-on-hand.jpg",
+            "product_analysis": "analysis/product_analysis.json",
+        },
+        "detected_keywords": ["主吊坠"],
+        "must_keep": [
+            {
+                "name": "主吊坠",
+                "source_text": "第二层中央主吊坠",
+                "normalized_keyword": "主吊坠",
+                "location": "第二层中央",
+                "visual_shape": "水滴形",
+                "relationship": "连接第二层链条",
+                "forbid": ["不得换层"],
+                "qc_question": "主吊坠是否保持原连接？",
+            }
+        ],
+        "must_not_change": ["层间关系"],
+        "needs_user_review": False,
+        "detail_crop_recommended": False,
+        "review_status": "confirmed",
+    }
 
 
 def _inspect_run(run_root: Path) -> list[str]:

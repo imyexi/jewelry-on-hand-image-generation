@@ -4,7 +4,7 @@ from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import MustKeepConstraint
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.qc import build_qc_checklist, write_qc_result
-from jewelry_on_hand.run_paths import read_json
+from jewelry_on_hand.run_paths import read_json, write_json
 
 
 def test_write_qc_result_writes_required_fields_to_qc_json(tmp_path):
@@ -28,15 +28,26 @@ def test_write_qc_result_writes_required_fields_to_qc_json(tmp_path):
 
 
 def test_write_qc_result_normalizes_string_number_and_none_inputs(tmp_path):
-    path = write_qc_result(tmp_path, "pass", "\u65e0\u6c34\u5370", [404], None)
+    path = write_qc_result(tmp_path, "rerun", "\u65e0\u6c34\u5370", [404], None)
 
     assert read_json(path) == {
-        "status": "pass",
+        "status": "rerun",
         "passed": ["\u65e0\u6c34\u5370"],
         "failed": ["404"],
         "notes": "",
         "fidelity_checks": [],
     }
+
+
+def test_write_qc_result_rejects_pass_with_any_failed_item(tmp_path):
+    with pytest.raises(ValueError, match="failed 必须为空"):
+        write_qc_result(
+            tmp_path,
+            "pass",
+            ["产品整体正确"],
+            ["产品长度偏差"],
+            "",
+        )
 
 
 def test_write_qc_result_normalizes_regular_iterables_item_by_item(tmp_path):
@@ -151,10 +162,12 @@ def test_build_qc_checklist_includes_policy_worn_necklace_and_must_keep_items():
     )
 
     assert "项链层数、顺序和相对落差正确" in items
+    assert "产品颜色、材质、透明度、纹理、反光和比例与产品图一致" in items
     assert "层数、上下顺序、长度等级和层间落差与产品图一致" in items
     assert "吊坠所属层、位置、朝向和连接关系与产品图一致" in items
     assert "链条没有穿肤、穿衣、穿发、悬空或陷入身体" in items
     assert "多层链没有错误交叉、合并或复制" in items
+    assert "没有自动补链、凭空补链或补充不存在的连接结构" in items
     assert "没有迁移产品图中的颈部、胸部、衣服、头发或皮肤块" in items
     assert must_keep.qc_question in items
 
@@ -209,3 +222,155 @@ def test_write_qc_result_persists_critical_failures_for_reject(tmp_path):
     )
 
     assert read_json(path)["critical_failures"] == ["auto_chain_added"]
+
+
+@pytest.mark.parametrize(
+    ("fidelity_checks", "message"),
+    [
+        ([], "数量"),
+        (
+            [
+                {
+                    "name": "主吊坠",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "pass",
+                    "notes": "",
+                },
+                {
+                    "name": "主吊坠",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "pass",
+                    "notes": "",
+                },
+            ],
+            "唯一",
+        ),
+        (
+            [
+                {
+                    "name": "错误名称",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "pass",
+                    "notes": "",
+                }
+            ],
+            "name",
+        ),
+        (
+            [
+                {
+                    "name": "主吊坠",
+                    "question": "错误问题",
+                    "result": "pass",
+                    "notes": "",
+                }
+            ],
+            "question",
+        ),
+        (
+            [
+                {
+                    "name": "主吊坠",
+                    "question": "主吊坠是否保持原连接？",
+                    "result": "unknown",
+                    "notes": "",
+                }
+            ],
+            "result",
+        ),
+    ],
+)
+def test_write_qc_result_requires_complete_unique_must_keep_coverage(
+    tmp_path,
+    fidelity_checks,
+    message,
+):
+    generation_dir = tmp_path / "run" / "generation" / "01"
+    constraints_path = tmp_path / "run" / "analysis" / "product_fidelity_constraints.json"
+    write_json(constraints_path, _constraints_with_must_keep())
+
+    with pytest.raises(ValueError, match=message):
+        write_qc_result(
+            generation_dir,
+            "rerun",
+            ["构图正确"],
+            ["需要复核"],
+            "",
+            fidelity_checks=fidelity_checks,
+        )
+
+    assert not (generation_dir / "qc.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("second_name", "second_question"),
+    [
+        ("主吊坠", "主吊坠是否保持所属层？"),
+        ("吊坠连接环", "主吊坠是否保持原连接？"),
+    ],
+)
+def test_write_qc_result_allows_unique_name_question_pairs(
+    tmp_path,
+    second_name,
+    second_question,
+):
+    generation_dir = tmp_path / "run" / "generation" / "01"
+    constraints_path = tmp_path / "run" / "analysis" / "product_fidelity_constraints.json"
+    constraints = _constraints_with_must_keep()
+    second = dict(constraints["must_keep"][0])
+    second["name"] = second_name
+    second["qc_question"] = second_question
+    constraints["must_keep"].append(second)
+    write_json(constraints_path, constraints)
+
+    path = write_qc_result(
+        generation_dir,
+        "pass",
+        ["没有迁移产品图中的人物局部，迁移检查通过"],
+        [],
+        "",
+        fidelity_checks=[
+            {
+                "name": "主吊坠",
+                "question": "主吊坠是否保持原连接？",
+                "result": "pass",
+                "notes": "",
+            },
+            {
+                "name": second_name,
+                "question": second_question,
+                "result": "pass",
+                "notes": "",
+            },
+        ],
+    )
+
+    assert path.is_file()
+
+
+def _constraints_with_must_keep():
+    return {
+        "schema_version": 1,
+        "source": {
+            "product_id": "PN-001",
+            "product_image": "input/product-on-hand.jpg",
+            "product_analysis": "analysis/product_analysis.json",
+        },
+        "detected_keywords": ["主吊坠"],
+        "must_keep": [
+            {
+                "name": "主吊坠",
+                "source_text": "第二层中央主吊坠",
+                "normalized_keyword": "主吊坠",
+                "location": "第二层中央",
+                "visual_shape": "水滴形",
+                "relationship": "连接第二层链条",
+                "forbid": ["不得换层"],
+                "qc_question": "主吊坠是否保持原连接？",
+            }
+        ],
+        "must_not_change": ["层间关系"],
+        "needs_user_review": False,
+        "detail_crop_recommended": False,
+        "review_status": "confirmed",
+    }

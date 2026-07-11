@@ -1388,28 +1388,6 @@ _QC_REJECT_FAILURES = {
     "severe_intersection",
 }
 
-_QC_PASS_BLOCKING_FAILURE_TERMS = (
-    "must_keep",
-    "关键识别点失败",
-    "层数错误",
-    "层数不一致",
-    "长度等级错误",
-    "长度等级不一致",
-    "吊坠换层",
-    "产品图人物局部迁移",
-    "人物贴片",
-    "品类错误",
-    "品类不一致",
-    "核心结构缺失",
-    "核心配件缺失",
-    "多层关系重组",
-    "层间关系重组",
-    "自动补链",
-    "凭空补链",
-    "严重穿模",
-    "严重穿透",
-)
-
 _QC_REJECT_FAILURE_TERMS = (
     "品类错误",
     "品类不一致",
@@ -1440,15 +1418,14 @@ class QcResult:
         object.__setattr__(self, "failed", _string_sequence(self.failed, "failed"))
         if not isinstance(self.notes, str):
             raise ValueError("notes 必须是字符串")
+        if self.status == "pass" and self.failed:
+            raise ValueError("status 为 pass 时 failed 必须为空")
         failure_text = " ".join(self.failed)
         checks = _parse_fidelity_checks(self.fidelity_checks)
         if self.status == "pass" and any(check.result != "pass" for check in checks):
             raise ValueError("must_keep 关键识别点失败时不得标记为 pass")
         critical_failures = _parse_qc_critical_failures(self.critical_failures)
-        if self.status == "pass" and (
-            critical_failures
-            or _contains_any_text(failure_text, _QC_PASS_BLOCKING_FAILURE_TERMS)
-        ):
+        if self.status == "pass" and critical_failures:
             raise ValueError("存在关键 QC 失败时不得标记为 pass")
         if self.status != "reject" and (
             any(failure in _QC_REJECT_FAILURES for failure in critical_failures)

@@ -696,12 +696,22 @@ def test_qc_result_validates_runtime_contract_and_copies_lists():
 
     passed = ["手部自然"]
     failed = ["光线不足"]
-    result = QcResult(status="pass", passed=passed, failed=failed, notes="通过")
+    result = QcResult(status="rerun", passed=passed, failed=failed, notes="通过")
     passed.append("后续修改")
     failed.append("后续失败")
 
     assert result.passed == ("手部自然",)
     assert result.failed == ("光线不足",)
+
+
+def test_qc_result_rejects_pass_with_any_failed_item():
+    with pytest.raises(ValueError, match="failed 必须为空"):
+        QcResult(
+            status="pass",
+            passed=["产品整体正确"],
+            failed=["产品长度偏差"],
+            notes="",
+        )
 
 
 def test_qc_result_rejects_pass_when_fidelity_check_failed():
@@ -804,7 +814,7 @@ def test_qc_result_rejects_invalid_critical_failure_types(invalid):
     ],
 )
 def test_qc_result_human_failure_text_forbids_pass(failure_text):
-    with pytest.raises(ValueError, match="不得标记为 pass"):
+    with pytest.raises(ValueError, match="failed 必须为空"):
         QcResult(
             status="pass",
             passed=["构图正确"],

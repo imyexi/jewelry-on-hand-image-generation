@@ -12,4 +12,5 @@ PENDANT_ONLY_POLICY = CategoryPolicy(
         "保持无链独立吊坠品类判断",
         "禁止自动补链",
     ),
+    mode_qc_items={},
 )

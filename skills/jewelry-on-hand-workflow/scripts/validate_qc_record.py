@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -108,19 +109,26 @@ def _critical_failures(data: dict[str, Any], errors: list[str]) -> list[str]:
 
 
 def _validate_fidelity_checks(
-    data: dict[str, Any], status: Any, errors: list[str]
+    data: dict[str, Any],
+    status: Any,
+    errors: list[str],
+    expected_must_keep: list[tuple[str, str]] | None,
 ) -> None:
     if "fidelity_checks" not in data:
+        if expected_must_keep:
+            errors.append("fidelity_checks 数量必须与 must_keep 完全一致")
         return
     checks = data["fidelity_checks"]
     if not isinstance(checks, list):
         errors.append("fidelity_checks 必须是列表")
         return
+    valid_checks: list[dict[str, Any]] = []
     for index, check in enumerate(checks):
         label = f"fidelity_checks[{index}]"
         if not isinstance(check, dict):
             errors.append(f"{label} 必须是 JSON 对象")
             continue
+        valid_checks.append(check)
         for key in ("name", "question", "result", "notes"):
             value = check.get(key)
             if not isinstance(value, str) or (key != "notes" and not value.strip()):
@@ -130,6 +138,95 @@ def _validate_fidelity_checks(
             errors.append(f"{label}.result 必须是 pass/rerun/fail")
         if status == "pass" and result != "pass":
             errors.append("must_keep 关键识别点未通过时不得标记为 pass")
+    if expected_must_keep is not None:
+        _validate_must_keep_coverage(valid_checks, expected_must_keep, errors)
+
+
+def _validate_must_keep_coverage(
+    checks: list[dict[str, Any]],
+    expected: list[tuple[str, str]],
+    errors: list[str],
+) -> None:
+    names = [check.get("name") for check in checks if isinstance(check.get("name"), str)]
+    questions = [
+        check.get("question")
+        for check in checks
+        if isinstance(check.get("question"), str)
+    ]
+    actual_pair_list = [
+        (check.get("name"), check.get("question")) for check in checks
+    ]
+    if len(set(actual_pair_list)) != len(actual_pair_list):
+        errors.append("fidelity_checks 的 name/question 组合必须唯一")
+        return
+    if len(checks) != len(expected):
+        errors.append("fidelity_checks 数量必须与 must_keep 完全一致")
+        return
+    expected_names = [name for name, _ in expected]
+    if Counter(names) != Counter(expected_names):
+        errors.append("fidelity_checks.name 必须与 must_keep.name 完全一致")
+        return
+    expected_questions = [question for _, question in expected]
+    if Counter(questions) != Counter(expected_questions):
+        errors.append(
+            "fidelity_checks.question 必须与 must_keep.qc_question 完全一致"
+        )
+        return
+    if set(actual_pair_list) != set(expected):
+        errors.append("fidelity_checks 的 name/question 对应关系与 must_keep 不一致")
+
+
+def _expected_must_keep_for_qc(
+    qc_path: Path, errors: list[str]
+) -> list[tuple[str, str]] | None:
+    constraints_path = _constraints_path_for_qc(qc_path)
+    if constraints_path is None or not constraints_path.is_file():
+        return None
+    try:
+        constraints = _load_json(constraints_path)
+    except json.JSONDecodeError:
+        errors.append("产品保真约束文件不是有效 JSON")
+        return None
+    except (OSError, UnicodeError):
+        errors.append("产品保真约束文件无法按 UTF-8 文本读取")
+        return None
+    if not isinstance(constraints, dict):
+        errors.append("产品保真约束文件必须包含 JSON 对象")
+        return None
+    must_keep = constraints.get("must_keep")
+    if not isinstance(must_keep, list):
+        errors.append("产品保真约束的 must_keep 必须是列表")
+        return None
+
+    expected: list[tuple[str, str]] = []
+    for index, item in enumerate(must_keep):
+        if not isinstance(item, dict):
+            errors.append(f"must_keep[{index}] 必须是 JSON 对象")
+            return None
+        name = item.get("name")
+        question = item.get("qc_question")
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"must_keep[{index}].name 必须是非空字符串")
+            return None
+        if not isinstance(question, str) or not question.strip():
+            errors.append(f"must_keep[{index}].qc_question 必须是非空字符串")
+            return None
+        expected.append((name.strip(), question.strip()))
+    if len(set(expected)) != len(expected):
+        errors.append("must_keep 的 name/qc_question 组合必须唯一")
+        return None
+    return expected
+
+
+def _constraints_path_for_qc(qc_path: Path) -> Path | None:
+    generation_dir = qc_path.parent
+    if generation_dir.parent.name != "generation":
+        return None
+    return (
+        generation_dir.parent.parent
+        / "analysis"
+        / "product_fidelity_constraints.json"
+    )
 
 
 def validate_qc(path: Path) -> list[str]:
@@ -158,7 +255,8 @@ def validate_qc(path: Path) -> list[str]:
     notes = data.get("notes") if isinstance(data.get("notes"), str) else ""
     combined = " ".join(passed + failed) + " " + notes
     critical_failures = _critical_failures(data, errors)
-    _validate_fidelity_checks(data, status, errors)
+    expected_must_keep = _expected_must_keep_for_qc(path, errors)
+    _validate_fidelity_checks(data, status, errors, expected_must_keep)
 
     has_generic_source_person_check = _contains_any(combined, SOURCE_PERSON_TERMS)
     if not has_generic_source_person_check:

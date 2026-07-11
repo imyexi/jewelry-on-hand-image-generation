@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Callable
@@ -297,6 +297,7 @@ class CategoryPolicy:
     supported_modes: frozenset[DisplayMode]
     max_layer_count: int
     basic_qc_items: tuple[str, ...]
+    mode_qc_items: Mapping[DisplayMode, tuple[str, ...]]
     reference_evaluator: ReferenceEvaluator | None = None
     prompt_fragment_builder: PromptFragmentBuilder | None = None
 
@@ -335,3 +336,17 @@ class CategoryPolicy:
         if self.prompt_fragment_builder is None:
             raise ValueError(f"{self.category_name}尚未配置生成 Prompt 策略")
         return self.prompt_fragment_builder(product)
+
+    def qc_items_for_mode(self, display_mode: DisplayMode) -> tuple[str, ...]:
+        if not isinstance(display_mode, DisplayMode):
+            raise ValueError("展示模式必须使用 DisplayMode 枚举")
+        if display_mode not in self.supported_modes:
+            raise ValueError(
+                f"{self.category_name}不支持 {display_mode.value} 展示模式的 QC"
+            )
+        mode_items = self.mode_qc_items.get(display_mode)
+        if mode_items is None:
+            raise ValueError(
+                f"{self.category_name}尚未配置 {display_mode.value} 展示模式的 QC 清单"
+            )
+        return tuple(dict.fromkeys(self.basic_qc_items + mode_items))

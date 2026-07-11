@@ -12,7 +12,9 @@ QC 结果只能使用以下状态：
 
 ## 清单来源与记录方式
 
-运行时清单由三部分合并：品类策略的 `basic_qc_items`、当前展示模式必检项，以及 `product_fidelity_constraints.json` 中每个 `must_keep[].qc_question`。人工 QC 必须逐项检查，并把通过项写入 `passed`、失败项写入 `failed`；不得用布尔值、数字、空字符串或“未检查”代替结论。
+运行时清单由三部分合并：通用项、品类策略提供的基础项与展示模式项，以及 `product_fidelity_constraints.json` 中每个 `must_keep[].qc_question`。人工 QC 必须逐项检查，并把通过项写入 `passed`、失败项写入 `failed`；不得用布尔值、数字、空字符串或“未检查”代替结论。
+
+标准 run 的记录路径为 `<run>/generation/<rank>/qc.json`。写入器和便携校验器会从该路径自动反推 `<run>/analysis/product_fidelity_constraints.json`；只要约束文件存在，就必须执行 `must_keep` 完整覆盖校验，调用方不能选择跳过。
 
 每次都要检查以下通用项：
 
@@ -61,7 +63,7 @@ QC 结果只能使用以下状态：
 
 ## `must_keep` 判定
 
-每个 `must_keep` 都必须生成一条 `fidelity_checks` 记录。`result` 只能是 `pass`、`rerun` 或 `fail`。
+每个 `must_keep` 都必须生成且只能生成一条 `fidelity_checks` 记录。记录数量必须与 `must_keep` 数量相等，`name` 必须匹配 `must_keep[].name`，`question` 必须匹配 `must_keep[].qc_question`，name/question 组合不得重复。`result` 只能是 `pass`、`rerun` 或 `fail`。
 
 - 所有结果均为 `pass` 时，整体才可能为 `pass`。
 - 关键结构轻微变形但仍可辨认时，可记为 `rerun`，整体不得为 `pass`。
@@ -126,7 +128,14 @@ QC 结果只能使用以下状态：
     "没有迁移产品图中的人物局部，迁移检查通过"
   ],
   "failed": [],
-  "fidelity_checks": [],
+  "fidelity_checks": [
+    {
+      "name": "主吊坠",
+      "question": "主吊坠是否保持原连接？",
+      "result": "pass",
+      "notes": "位置、朝向和连接均保持"
+    }
+  ],
   "notes": "所有适用品类和展示模式必检项均已通过"
 }
 ```
@@ -135,6 +144,6 @@ QC 结果只能使用以下状态：
 
 ## 历史手串兼容与模型兜底
 
-历史手串 `qc.json` 不要求批量增加 `critical_failures`。便携校验仍接受旧字段结构，但继续要求明确记录原图手腕、手臂和皮肤块迁移检查；新记录不得用宽松 truthy 值绕过类型或状态 gate。
+只有无法在标准 run 路径找到 `analysis/product_fidelity_constraints.json` 时，才进入明确的 legacy 兼容分支。历史手串 `qc.json` 不要求批量增加 `fidelity_checks` 或 `critical_failures`；便携校验仍接受旧字段结构，但继续要求明确记录原图手腕、手臂和皮肤块迁移检查。标准 run 不得通过删除、漏写或传空 `fidelity_checks` 绕过 `must_keep`，新记录也不得用宽松 truthy 值绕过类型或状态 gate。
 
 `pass` 不计入 QC 失败次数；`rerun` 和 `reject` 均计入。当前 run 的未通过次数为零或一次时继续使用默认 `gpt_image_2`，超过一次后下一次使用 `nano_banana_v2` 兜底。不得删除或跳过已有非空 `generation/NN/`；缺少 `qc.json` 的目录必须先处理。

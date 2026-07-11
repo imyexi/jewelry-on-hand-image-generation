@@ -150,6 +150,13 @@ BRACELET_POLICY = CategoryPolicy(
         "产品关键结构完整",
         "手腕佩戴关系自然",
     ),
+    mode_qc_items={
+        DisplayMode.WORN: (
+            "手串贴合手腕，遮挡、松紧和接触阴影自然",
+            "手指、手掌、手腕和皮肤纹理自然",
+            "没有迁移产品图中的粗手腕、局部手臂或皮肤块",
+        )
+    },
     reference_evaluator=_evaluate_bracelet_reference,
     prompt_fragment_builder=_build_bracelet_prompt_fragments,
 )

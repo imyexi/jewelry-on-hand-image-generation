@@ -394,6 +394,28 @@ def _ignored_reference_jewelry(row: ReferenceRow) -> tuple[str, ...]:
     return tuple(ignored)
 
 
+_NECKLACE_MODE_QC_ITEMS = {
+    DisplayMode.WORN: (
+        "层数、上下顺序、长度等级和层间落差与产品图一致",
+        "吊坠所属层、位置、朝向和连接关系与产品图一致",
+        "链条真实绕颈并在胸前自然垂落",
+        "链条没有穿肤、穿衣、穿发、悬空或陷入身体",
+        "衣领和头发遮挡符合真实前后关系且未遮掉主要结构",
+        "多层链没有错误交叉、合并或复制",
+        "没有自动补链、凭空补链或补充不存在的连接结构",
+        "没有迁移产品图中的颈部、胸部、衣服、头发或皮肤块",
+    ),
+    DisplayMode.HAND_HELD: (
+        "产品结构完整且关键结构可辨认",
+        "手部与链条接触真实，链条自然垂落",
+        "手指没有穿透链条或吊坠",
+        "吊坠和关键结构没有被不合理遮挡",
+        "产品比例合理，没有因近景明显放大或缩小",
+        "没有虚构佩戴链路、自动补链或补充不存在的结构",
+    ),
+}
+
+
 NECKLACE_POLICY = CategoryPolicy(
     product_type=ProductType.NECKLACE,
     supported_modes=frozenset({DisplayMode.WORN, DisplayMode.HAND_HELD}),
@@ -404,6 +426,7 @@ NECKLACE_POLICY = CategoryPolicy(
         "项链层数、顺序和相对落差正确",
         "链条与身体或手部关系自然",
     ),
+    mode_qc_items=_NECKLACE_MODE_QC_ITEMS,
     reference_evaluator=_evaluate_necklace_reference,
     prompt_fragment_builder=_build_necklace_prompt_fragments,
 )
@@ -418,6 +441,7 @@ PENDANT_NECKLACE_POLICY = CategoryPolicy(
         "项链层数、顺序和相对落差正确",
         "吊坠形态、连接关系和所在层正确",
     ),
+    mode_qc_items=_NECKLACE_MODE_QC_ITEMS,
     reference_evaluator=_evaluate_necklace_reference,
     prompt_fragment_builder=_build_necklace_prompt_fragments,
 )
