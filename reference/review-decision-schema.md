@@ -1,6 +1,6 @@
 # Review 决策与产品确认快照 Schema
 
-`review/review_decision.json` 是提交生成任务前的人工审核凭证。系统在写入决策和读取决策时都会校验动作、产品保真状态，以及项链类产品确认快照与 `analysis/product_analysis.json` 的一致性。任一校验失败时必须停止，不得调用生成接口。
+`review/review_decision.json` 是提交生成任务前的人工审核凭证。系统在写入决策和读取决策时都会校验动作、产品保真状态，以及项链类或戒指产品确认快照与 `analysis/product_analysis.json` 的一致性。任一校验失败时必须停止，不得调用生成接口。
 
 ## 1. 决策文件结构
 
@@ -14,7 +14,7 @@
 | `fidelity_confirmed` | JSON 布尔值 | 生成类动作必须为真正的 JSON `true`；字符串 `"true"`、`"yes"`、`"1"` 和数字 `1` 均非法。 |
 | `fidelity_constraints_path` | 字符串 | 默认 `analysis/product_fidelity_constraints.json`；相对路径以 run 根目录为基准。 |
 | `fidelity_notes` | 字符串或缺省 | 仅作说明；关键识别点仍须写入保真约束文件。 |
-| `confirmation_snapshot` | 对象或缺省 | 类型安全的产品确认快照；项链生成类动作必填。 |
+| `confirmation_snapshot` | 对象或缺省 | 类型安全的产品确认快照；项链和戒指生成类动作必填。 |
 
 ### 1.2 动作规则
 
@@ -26,13 +26,13 @@
 
 ## 2. 产品确认快照
 
-`confirmation_snapshot` 保存审核时已经确认的最终产品结构。快照是一个整体：一旦出现，以下字段必须全部存在；允许为空的字段也必须显式写为 `null`，不能删除。
+`confirmation_snapshot` 保存审核时已经确认的最终产品结构。基础快照是一个整体：一旦出现，原有项链/吊坠字段必须全部存在；允许为空的字段也必须显式写为 `null`，不能删除。四个戒指字段只在 `confirmed_product_type=ring` 时落盘并全部必填；其他品类在模型内部按 `0/unknown` 处理，但不改变历史快照 JSON 结构。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `confirmed_product_type` | 枚举字符串 | `bracelet`、`necklace`、`pendant_necklace`、`pendant_only` 或 `unknown`。生成只支持前三类。 |
+| `confirmed_product_type` | 枚举字符串 | `bracelet`、`necklace`、`pendant_necklace`、`pendant_only`、`ring` 或 `unknown`。 |
 | `source_image_type` | 枚举字符串 | `worn_source`、`hand_held_source`、`flat_lay_source` 或 `unknown_source`；当前生成阶段只接受 `worn_source`。 |
-| `display_mode` | 枚举字符串 | `worn` 或 `hand_held`；手串只允许 `worn`，项链类两种模式均可。 |
+| `display_mode` | 枚举字符串 | `worn` 或 `hand_held`；手串和戒指只允许 `worn`，项链类两种模式均可。 |
 | `layer_count` | JSON 整数 | 项链类只允许 1 至 3 层。 |
 | `length_category` | 字符串或 `null` | `choker`、`collarbone`、`upper_chest`、`long` 或 `null`。 |
 | `has_pendant` | JSON 布尔值 | 是否存在主吊坠。 |
@@ -42,8 +42,12 @@
 | `pendant_orientation` | 字符串或 `null` | 主吊坠朝向，例如 `front_facing`。 |
 | `connection_structure` | 字符串或 `null` | 吊坠和链条的可见连接方式。 |
 | `is_independent_multi_item` | JSON 布尔值 | 是否为多件独立项链组合；当前为 `true` 时禁止生成。 |
+| `ring_count` | JSON 整数 | 戒指必须为 `1`；非戒指品类为 `0`。旧项链快照缺失时兼容读取为 `0`。 |
+| `hand_side` | 枚举字符串 | `left`、`right`、`unknown`；戒指必须明确，非戒指为 `unknown`。 |
+| `finger_position` | 枚举字符串 | `thumb`、`index`、`middle`、`ring`、`little`、`unknown`；戒指必须明确。 |
+| `ring_wear_style` | 枚举字符串 | 第一阶段戒指必须为 `finger_base`；`midi`、`cross_finger` 和 `unknown` 不可生成。 |
 
-普通项链必须使用 `has_pendant: false`、`pendant_count: 0`、`pendant_layer: null`。带链吊坠必须使用 `has_pendant: true`、至少一个吊坠和有效的 `pendant_layer`。`pendant_only` 即使结构可解析，也会以“当前版本不支持无链独立吊坠，且禁止自动补链”明确拒绝。
+普通项链必须使用 `has_pendant: false`、`pendant_count: 0`、`pendant_layer: null`。带链吊坠必须使用 `has_pendant: true`、至少一个吊坠和有效的 `pendant_layer`。戒指必须使用单枚、明确左右手、明确目标手指和 `finger_base`，并保持所有项链/吊坠字段为空结构。`pendant_only` 即使结构可解析，也会以“当前版本不支持无链独立吊坠，且禁止自动补链”明确拒绝。
 
 ## 3. 自动识别与人工确认
 
@@ -82,7 +86,7 @@
 3. 产品保真约束文件存在、合法，且 `review_status` 为 `confirmed`、`corrected` 或 `not_applicable`。
 4. 最终品类可生成；`unknown` 和 `pendant_only` 明确拒绝。
 5. 输入图类型、展示模式、层数和多件独立组合标记符合当前策略。
-6. 项链和带链吊坠生成决策包含完整 `confirmation_snapshot`。
+6. 项链、带链吊坠和戒指生成决策包含完整 `confirmation_snapshot`；旧项链快照可以缺少戒指字段并按 `0/unknown` 读取，现代戒指快照不得缺少任一戒指字段。
 7. 快照每个字段与最终 `analysis/product_analysis.json` 一致；任何字段不一致都拒绝。
 
 `validate_decision_against_analysis(decision, analysis)` 提供同一套可调用的严格校验，生成入口可在提交外部任务前再次调用。
@@ -95,7 +99,7 @@
 
 - 历史手串/手链生成决策可能没有 `confirmation_snapshot`，仍按旧格式读取，并继续执行原有产品保真 Gate。
 - 新写入且存在产品分析的决策会保存快照；手串快照存在时也必须与最终 analysis 一致。
-- 项链或带链吊坠的生成类决策不允许使用历史缺省，缺快照、少字段或值不一致都会拒绝。
+- 项链、带链吊坠或戒指的生成类决策不允许缺少快照；戒指快照缺少单枚、左右手、指位或佩戴方式任一字段都会拒绝。
 - `rerank`、`manual_reference` 等非生成动作不强制快照，仍不能绕过生成 Gate。
 
 ## 6. 示例

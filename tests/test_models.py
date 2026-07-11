@@ -16,6 +16,7 @@ from jewelry_on_hand.models import (
     ScoredReference,
 )
 from jewelry_on_hand.product_types import ProductType
+from jewelry_on_hand.ring_attributes import FingerPosition, HandSide, RingWearStyle
 
 
 def _analysis_data(**overrides):
@@ -88,6 +89,26 @@ def _confirmation_snapshot(**overrides):
         "connection_structure": "metal_bail",
         "is_independent_multi_item": False,
     }
+    data.update(overrides)
+    return data
+
+
+def _ring_analysis_data(**overrides):
+    data = _analysis_data(
+        product_type="戒指",
+        wear_position="左手无名指根部",
+        visible_appearance="单枚银色开口戒，正面有一颗透明圆形主石",
+        **_modern_classification("ring"),
+        display_mode="worn",
+        layer_count=1,
+        has_pendant=False,
+        pendant_count=0,
+        is_independent_multi_item=False,
+        ring_count=1,
+        hand_side="left",
+        finger_position="ring",
+        ring_wear_style="finger_base",
+    )
     data.update(overrides)
     return data
 
@@ -514,7 +535,20 @@ def test_product_confirmation_snapshot_roundtrip_uses_typed_enums():
 
 
 def test_product_confirmation_snapshot_rejects_each_missing_field():
-    for missing in _confirmation_snapshot():
+    for missing in (
+        "confirmed_product_type",
+        "source_image_type",
+        "display_mode",
+        "layer_count",
+        "length_category",
+        "has_pendant",
+        "pendant_count",
+        "pendant_layer",
+        "pendant_position",
+        "pendant_orientation",
+        "connection_structure",
+        "is_independent_multi_item",
+    ):
         payload = _confirmation_snapshot()
         del payload[missing]
 
@@ -525,6 +559,17 @@ def test_product_confirmation_snapshot_rejects_each_missing_field():
 def test_product_confirmation_snapshot_requires_json_integer_layer_count():
     with pytest.raises(ValueError, match="layer_count.*JSON 整数"):
         ProductConfirmationSnapshot.from_dict(_confirmation_snapshot(layer_count="2"))
+
+
+def test_legacy_necklace_snapshot_defaults_ring_fields_to_not_applicable():
+    payload = _confirmation_snapshot()
+
+    snapshot = ProductConfirmationSnapshot.from_dict(payload)
+
+    assert snapshot.ring_count == 0
+    assert snapshot.hand_side is HandSide.UNKNOWN
+    assert snapshot.finger_position is FingerPosition.UNKNOWN
+    assert snapshot.ring_wear_style is RingWearStyle.UNKNOWN
 
 
 def test_review_decision_roundtrip_preserves_confirmation_snapshot():
@@ -538,6 +583,71 @@ def test_review_decision_roundtrip_preserves_confirmation_snapshot():
 
     assert isinstance(decision.confirmation_snapshot, ProductConfirmationSnapshot)
     assert decision.confirmation_snapshot.to_dict() == _confirmation_snapshot()
+
+
+def test_ring_analysis_requires_single_confirmed_finger_base_ring():
+    analysis = ProductAnalysis.from_dict(_ring_analysis_data())
+
+    assert analysis.is_supported_product() is True
+    assert analysis.ring_count == 1
+    assert analysis.hand_side is HandSide.LEFT
+    assert analysis.finger_position is FingerPosition.RING
+    assert analysis.ring_wear_style is RingWearStyle.FINGER_BASE
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("ring_count", 2, "只支持单枚戒指"),
+        ("hand_side", "unknown", "必须确认左右手"),
+        ("finger_position", "unknown", "必须确认佩戴手指"),
+        ("ring_wear_style", "midi", "只支持常规指根佩戴"),
+        ("ring_wear_style", "cross_finger", "只支持常规指根佩戴"),
+        ("layer_count", 2, "不得声明项链层数或吊坠结构"),
+        ("has_pendant", True, "不得声明项链层数或吊坠结构"),
+    ],
+)
+def test_ring_analysis_rejects_unsupported_boundaries(field_name, value, message):
+    with pytest.raises(ValueError, match=message):
+        ProductAnalysis.from_dict(_ring_analysis_data(**{field_name: value}))
+
+
+def test_ring_analysis_requires_explicit_ring_fields():
+    for missing in ("ring_count", "hand_side", "finger_position", "ring_wear_style"):
+        payload = _ring_analysis_data()
+        del payload[missing]
+        with pytest.raises(ValueError, match=missing):
+            ProductAnalysis.from_dict(payload)
+
+
+def test_non_ring_analysis_rejects_residual_ring_fields():
+    with pytest.raises(ValueError, match="非戒指品类不得声明戒指结构"):
+        ProductAnalysis.from_dict(
+            _analysis_data(**_modern_classification("bracelet"), ring_count=1)
+        )
+
+
+def test_ring_confirmation_snapshot_requires_and_roundtrips_ring_fields():
+    analysis = ProductAnalysis.from_dict(_ring_analysis_data())
+
+    snapshot = ProductConfirmationSnapshot.from_analysis(analysis)
+
+    assert snapshot.to_dict()["ring_count"] == 1
+    assert snapshot.to_dict()["hand_side"] == "left"
+    assert snapshot.to_dict()["finger_position"] == "ring"
+    assert snapshot.to_dict()["ring_wear_style"] == "finger_base"
+    assert ProductConfirmationSnapshot.from_dict(snapshot.to_dict()) == snapshot
+
+
+def test_ring_confirmation_snapshot_rejects_each_missing_ring_field():
+    payload = ProductConfirmationSnapshot.from_analysis(
+        ProductAnalysis.from_dict(_ring_analysis_data())
+    ).to_dict()
+    for missing in ("ring_count", "hand_side", "finger_position", "ring_wear_style"):
+        incomplete = dict(payload)
+        del incomplete[missing]
+        with pytest.raises(ValueError, match=missing):
+            ProductConfirmationSnapshot.from_dict(incomplete)
 
 
 def test_review_decision_generate_rank_1_rejects_non_rank_1_selection():

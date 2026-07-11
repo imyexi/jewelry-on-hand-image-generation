@@ -27,9 +27,9 @@ def build_analysis_prompt(product_image: str | Path, dimensions: dict[str, Any] 
 
 重要边界：
 - 产品分析 JSON 是系统内部产物，不是用户第二输入；用户只提供产品上手原图。
-- 当前自动流程支持手串/手链、普通项链和带链吊坠；无链独立吊坠只能识别，禁止自动补链或进入生成。
+- 当前自动流程支持手串/手链、普通项链、带链吊坠和戒指；无链独立吊坠只能识别，禁止自动补链或进入生成。
 - 第一阶段只接受真人佩戴原图；source_image_type 必须如实描述输入图，白底、平铺、纯手持或未知来源会在加载阶段被拒绝。
-- product_type 保留肉眼可见的中文品类描述；detected_product_type 和 confirmed_product_type 使用 bracelet、necklace、pendant_necklace、pendant_only、unknown 之一。
+- product_type 保留肉眼可见的中文品类描述；detected_product_type 和 confirmed_product_type 使用 bracelet、necklace、pendant_necklace、pendant_only、ring、unknown 之一。
 - 分类明确时 confirmed_product_type 与 detected_product_type 一致；证据不足时使用 unknown，并在 classification_evidence 和 uncertain_details 记录原因。
 - display_mode 是后续生成展示模式，不等于 source_image_type。手串/手链只允许 worn；普通项链和带链吊坠的默认 display_mode 也是 worn，只有用户在后续人工确认中主动切换，才可改为 hand_held。
 - visible_appearance 必须只描述肉眼可见外观，包括形状、颜色、排列、透明度、光泽、配件和可见纹理。
@@ -41,6 +41,7 @@ def build_analysis_prompt(product_image: str | Path, dimensions: dict[str, Any] 
 - 带链吊坠必须填写 has_pendant=true、pendant_count 大于等于 1 和有效 pendant_layer；普通项链必须填写 false、0、null。pendant_layer 不得大于 layer_count。
 - 无链独立吊坠没有链层，必须填写 has_pendant=true、pendant_count 大于等于 1、pendant_layer=null；系统只解析并在加载阶段明确拒绝，禁止自动补链。
 - 多件独立项链组合叠戴必须标记 is_independent_multi_item=true，当前阶段会拒绝生成。
+- 戒指只允许 ring_count=1、hand_side 为 left/right、finger_position 为 thumb/index/middle/ring/little、ring_wear_style=finger_base；多枚、叠戴、指关节戒和跨指戒当前会拒绝生成。
 - 看不清的扣头、背面和遮挡结构不要臆测，分别写入 occluded_parts 和 uncertain_details。
 
 尺寸信息（仅比例参考）：
@@ -82,7 +83,11 @@ def build_analysis_prompt(product_image: str | Path, dimensions: dict[str, Any] 
   "symmetry": null,
   "occluded_parts": [],
   "uncertain_details": [],
-  "is_independent_multi_item": false
+  "is_independent_multi_item": false,
+  "ring_count": 0,
+  "hand_side": "unknown",
+  "finger_position": "unknown",
+  "ring_wear_style": "unknown"
 }}
 
 输出要求：
@@ -97,7 +102,7 @@ def load_product_analysis(path: str | Path) -> ProductAnalysis:
     if not analysis.is_supported_product():
         if analysis.normalized_product_type.value == "pendant_only":
             raise UnsupportedProductError("当前版本不支持无链独立吊坠，且禁止自动补链")
-        raise UnsupportedProductError("当前支持手串/手链、普通项链和带链吊坠；产品品类无法识别或不在当前支持范围内")
+        raise UnsupportedProductError("当前支持手串/手链、普通项链、带链吊坠和戒指；产品品类无法识别或不在当前支持范围内")
     try:
         validate_product_mode(
             analysis.normalized_product_type,

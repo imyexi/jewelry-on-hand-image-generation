@@ -1,6 +1,6 @@
 # 产品分析 JSON Schema 说明
 
-产品分析 JSON 是系统根据一张产品上手原图生成的内部结构化产物，不是用户需要额外提供的第二份输入。它同时记录原始可读品类、标准化品类、分类依据、展示模式、输入图类型、项链或吊坠结构，以及无法从图片确认的信息，供后续参考图选择、提示词生成和质检使用。
+产品分析 JSON 是系统根据一张产品上手原图生成的内部结构化产物，不是用户需要额外提供的第二份输入。它同时记录原始可读品类、标准化品类、分类依据、展示模式、输入图类型、项链/吊坠结构、戒指佩戴关系，以及无法从图片确认的信息，供后续参考图选择、提示词生成和质检使用。
 
 产品分析 JSON 只负责描述整体可见外观和结构，不能替代 `analysis/product_fidelity_constraints.json`。凡是随形、跑环、双尖、回纹、貔貅、桶珠、雕刻、吊坠、流苏、链坠等会影响货号识别的局部结构，都必须同步写入产品保真约束文件，供 review、prompt 和 QC 使用。
 
@@ -8,11 +8,12 @@
 
 - 用户输入：一张真人佩戴产品原图。
 - 可选尺寸：仅作为比例参考，不能覆盖、改写或替代图片中的可见外观。
-- 当前可生成品类：手串/手链、普通项链、带链吊坠。
+- 当前可生成品类：手串/手链、普通项链、带链吊坠、单枚常规指根戒指。
 - 可识别但不可生成：无链独立吊坠。无链独立吊坠没有链层，`pendant_layer` 必须为 `null`；系统完成结构解析后必须明确拒绝生成，且禁止自动补链。
 - 不可生成：无法识别或其他未支持品类。
 - 第一阶段输入图只接受 `worn_source`。现代分类记录必须显式提供 `source_image_type`，不得用缺失字段暗示 `worn_source`；`hand_held_source`、`flat_lay_source` 和 `unknown_source` 必须如实记录，但加载阶段会拒绝。
-- `display_mode` 描述后续生成展示模式，不等同于 `source_image_type`。手串/手链固定为 `worn`；普通项链和带链吊坠默认 `worn`，只有用户在后续人工确认中主动切换，才可改为 `hand_held`。本阶段只记录该确认结果，不负责实现后续 CLI 交互。
+- `display_mode` 描述后续生成展示模式，不等同于 `source_image_type`。手串/手链和戒指固定为 `worn`；普通项链和带链吊坠默认 `worn`，只有用户在后续人工确认中主动切换，才可改为 `hand_held`。本阶段只记录该确认结果，不负责实现后续 CLI 交互。
+- 戒指第一阶段只支持单枚常规指根佩戴。现代戒指分析必须显式记录 `ring_count=1`、明确的 `hand_side`、明确的 `finger_position` 和 `ring_wear_style=finger_base`；多枚、叠戴、指关节戒和跨指戒不得进入生成。
 - 每次分析都必须生成 `analysis/product_fidelity_constraints.json`；没有局部关键识别点时也要显式记录 `must_keep: []` 和 `review_status: not_applicable`。
 
 ## 当前完整结构
@@ -55,7 +56,11 @@
   "symmetry": "approximately_symmetric",
   "occluded_parts": ["后颈扣头"],
   "uncertain_details": ["扣头具体结构"],
-  "is_independent_multi_item": false
+  "is_independent_multi_item": false,
+  "ring_count": 0,
+  "hand_side": "unknown",
+  "finger_position": "unknown",
+  "ring_wear_style": "unknown"
 }
 ```
 
@@ -64,12 +69,12 @@
 | 字段 | 类型 | 当前含义 |
 | --- | --- | --- |
 | `product_type` | 非空字符串 | 保留原始、可读的品类描述；历史自由文本如“朱砂手链/手串”继续可读。 |
-| `detected_product_type` | 标准品类字符串 | 图片初步识别结果：`bracelet`、`necklace`、`pendant_necklace`、`pendant_only` 或 `unknown`。 |
+| `detected_product_type` | 标准品类字符串 | 图片初步识别结果：`bracelet`、`necklace`、`pendant_necklace`、`pendant_only`、`ring` 或 `unknown`。 |
 | `confirmed_product_type` | 标准品类字符串 | 系统保守确认或人工纠正后的结果；后续流程以此字段为准。 |
 | `classification_confidence` | 非空字符串 | 分类置信度，例如 `high`、`medium`、`low`。 |
 | `classification_evidence` | 字符串列表 | 支持分类的肉眼可见证据，不写材质推断。 |
 | `classification_source` | 非空字符串 | 分类来源，例如 `auto_confirmed`、`manual_override`、`legacy_inferred`。 |
-| `display_mode` | 枚举字符串 | 后续生成展示模式：手串/手链固定为 `worn`；项链默认 `worn`，经用户后续人工确认才可为 `hand_held`。 |
+| `display_mode` | 枚举字符串 | 后续生成展示模式：手串/手链和戒指固定为 `worn`；项链默认 `worn`，经用户后续人工确认才可为 `hand_held`。 |
 | `source_image_type` | 枚举字符串 | 输入图类型：`worn_source`、`hand_held_source`、`flat_lay_source` 或 `unknown_source`。 |
 | `wear_position` | 非空字符串 | 肉眼可见佩戴位置，例如手腕、颈部、锁骨或胸前。 |
 | `visible_appearance` | 非空字符串 | 整体可见外观、排列、透明度、光泽、配件和可见纹理。 |
@@ -92,6 +97,10 @@
 | `occluded_parts` | 字符串列表 | 被身体、头发、衣物或画面裁切遮挡的部位。 |
 | `uncertain_details` | 字符串列表 | 图片无法确认且禁止臆测的细节。 |
 | `is_independent_multi_item` | 布尔值 | 是否为多件独立产品组合叠戴；当前不支持多件独立项链组合生成。 |
+| `ring_count` | 非负 JSON 整数 | 戒指必须显式为 `1`；非戒指品类必须为 `0`。 |
+| `hand_side` | 枚举字符串 | 戒指所在手：`left`、`right`、`unknown`；戒指生成前不得为 `unknown`，非戒指品类必须为 `unknown`。 |
+| `finger_position` | 枚举字符串 | `thumb`、`index`、`middle`、`ring`、`little`、`unknown`；戒指生成前不得为 `unknown`。 |
+| `ring_wear_style` | 枚举字符串 | `finger_base`、`midi`、`cross_finger`、`unknown`；第一阶段戒指只允许 `finger_base`。 |
 
 `product_dimensions` 的固定子字段如下：
 
@@ -105,10 +114,11 @@
 | `bracelet` | `worn` | `worn_source` | 1 层 | 支持 |
 | `necklace` | 默认 `worn`；人工确认后可为 `hand_held` | `worn_source` | 1 至 3 层 | 支持 |
 | `pendant_necklace` | 默认 `worn`；人工确认后可为 `hand_held` | `worn_source` | 1 至 3 层 | 支持 |
+| `ring` | `worn` | `worn_source` | 公共 `layer_count=1`，且 `ring_count=1` | 支持单枚常规指根佩戴 |
 | `pendant_only` | 无 | 无 | 不进入生成 | 明确拒绝，禁止自动补链 |
 | `unknown` | 无 | 无 | 不进入生成 | 必须先人工纠正 |
 
-对于前三个支持品类，`flat_lay_source`、`hand_held_source` 和 `unknown_source` 均不满足第一阶段输入边界。普通项链或带链吊坠只有用户在后续人工确认中主动切换，输出模式才可为 `hand_held`；即使已经切换，输入仍必须是 `worn_source`。
+对于四个支持品类，`flat_lay_source`、`hand_held_source` 和 `unknown_source` 均不满足第一阶段输入边界。普通项链或带链吊坠只有用户在后续人工确认中主动切换，输出模式才可为 `hand_held`；即使已经切换，输入仍必须是 `worn_source`。戒指不允许切换为 `hand_held`。
 
 ## 结构校验规则
 
@@ -121,12 +131,15 @@
 - 无链独立吊坠是层位规则的明确例外：必须声明 `has_pendant=true`、`pendant_count` 大于等于 1、`pendant_layer=null`，解析成功后再由支持范围 gate 拒绝生成并禁止自动补链。
 - `pendant_layer` 必须为正整数且不得大于 `layer_count`。
 - 普通项链和带链吊坠的 `is_independent_multi_item` 必须为 `false`；多件独立项链组合叠戴当前不进入生成。
+- 现代戒指记录必须完整提供 `ring_count`、`hand_side`、`finger_position`、`ring_wear_style`；缺少任一字段都属于戒指分析契约不完整。
+- 戒指必须满足 `ring_count=1`、`hand_side` 为 `left/right`、`finger_position` 为五种明确手指之一、`ring_wear_style=finger_base`、`layer_count=1`、`has_pendant=false`、`pendant_count=0`、`pendant_layer=null`、`is_independent_multi_item=false`。
+- 非戒指品类必须使用 `ring_count=0` 和三个 `unknown` 戒指枚举值，禁止在品类纠正后残留戒指结构字段。
 - 列表字段只能包含字符串；布尔、整数、枚举和可选字符串字段必须符合上表类型。
 - `confirmed_product_type` 可以与 `detected_product_type` 不同，用于保存人工纠正；后续支持判断以 `confirmed_product_type` 为准。
 
 ## 历史手串 JSON 兼容
 
-历史手串 JSON 可能只有原有基础字段，没有任何现代分类、模式或结构字段。只有五个现代分类字段全部缺失，并且原始 `product_type` 能够保守、明确归一化为手串/手链时，记录才按历史分类契约读取。普通项链、带链吊坠、无链独立吊坠、其他品类和不确定文本即使五字段全缺，也必须拒绝并要求完整现代分类契约。加载器保留旧手串的原始 `product_type` 字符串，并按下列默认值整体补齐，不要求迁移旧文件：
+历史手串 JSON 可能只有原有基础字段，没有任何现代分类、模式或结构字段。只有五个现代分类字段全部缺失，并且原始 `product_type` 能够保守、明确归一化为手串/手链时，记录才按历史分类契约读取。普通项链、带链吊坠、无链独立吊坠、戒指、其他品类和不确定文本即使五字段全缺，也必须拒绝并要求完整现代分类契约。加载器保留旧手串的原始 `product_type` 字符串，并按下列默认值整体补齐，不要求迁移旧文件：
 
 | 缺失字段 | 兼容默认值 |
 | --- | --- |
@@ -144,6 +157,8 @@
 | `pendant_layer`、`pendant_position`、`pendant_orientation`、`connection_structure`、`symmetry` | `null` |
 | `occluded_parts`、`uncertain_details` | `[]` |
 | `is_independent_multi_item` | `false` |
+| `ring_count` | `0` |
+| `hand_side`、`finger_position`、`ring_wear_style` | `unknown` |
 
 只要五个现代分类字段出现任意一个，记录就必须完整提供全部五个字段，且每个字段类型和值有效；缺少任一字段都会抛出“现代分类契约不完整”的中文错误。完整现代记录还必须显式提供 `source_image_type`。现代记录不会自动补造 `high`、空证据、`legacy_inferred` 或 `worn_source`，显式 `null` 也不触发历史回退。
 

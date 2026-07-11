@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
 from jewelry_on_hand.product_types import ProductType, normalize_product_type
+from jewelry_on_hand.ring_attributes import FingerPosition, HandSide, RingWearStyle
 
 
 _DIMENSION_FIELDS = (
@@ -253,6 +254,10 @@ class ProductAnalysis:
     occluded_parts: tuple[str, ...] = field(default_factory=tuple)
     uncertain_details: tuple[str, ...] = field(default_factory=tuple)
     is_independent_multi_item: bool = False
+    ring_count: int = 0
+    hand_side: HandSide | str = HandSide.UNKNOWN
+    finger_position: FingerPosition | str = FingerPosition.UNKNOWN
+    ring_wear_style: RingWearStyle | str = RingWearStyle.UNKNOWN
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -326,6 +331,34 @@ class ProductAnalysis:
             "is_independent_multi_item",
             _parse_bool(self.is_independent_multi_item, "is_independent_multi_item"),
         )
+        ring_count = _json_int(self.ring_count, "ring_count")
+        if ring_count is None or ring_count < 0:
+            raise ValueError("ring_count 必须是大于等于 0 的 JSON 整数")
+        object.__setattr__(self, "ring_count", ring_count)
+        try:
+            object.__setattr__(self, "hand_side", HandSide(self.hand_side))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("hand_side 必须是 left/right/unknown") from exc
+        try:
+            object.__setattr__(
+                self,
+                "finger_position",
+                FingerPosition(self.finger_position),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "finger_position 必须是 thumb/index/middle/ring/little/unknown"
+            ) from exc
+        try:
+            object.__setattr__(
+                self,
+                "ring_wear_style",
+                RingWearStyle(self.ring_wear_style),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "ring_wear_style 必须是 finger_base/midi/cross_finger/unknown"
+            ) from exc
         if isinstance(self.pendant_count, bool):
             raise ValueError("pendant_count 必须是大于等于 0 的整数")
         try:
@@ -370,6 +403,31 @@ class ProductAnalysis:
             raise ValueError(
                 "length_category 必须是 choker、collarbone、upper_chest、long 或 None"
             )
+        if confirmed is ProductType.RING:
+            if self.ring_count != 1:
+                raise ValueError("当前版本只支持单枚戒指")
+            if self.hand_side is HandSide.UNKNOWN:
+                raise ValueError("戒指生成前必须确认左右手")
+            if self.finger_position is FingerPosition.UNKNOWN:
+                raise ValueError("戒指生成前必须确认佩戴手指")
+            if self.ring_wear_style is not RingWearStyle.FINGER_BASE:
+                raise ValueError("当前版本只支持常规指根佩戴戒指")
+            if (
+                self.layer_count != 1
+                or self.has_pendant
+                or self.pendant_count != 0
+                or self.pendant_layer is not None
+                or self.is_independent_multi_item
+            ):
+                raise ValueError("戒指不得声明项链层数或吊坠结构")
+        elif (
+            self.ring_count != 0
+            or self.hand_side is not HandSide.UNKNOWN
+            or self.finger_position is not FingerPosition.UNKNOWN
+            or self.ring_wear_style is not RingWearStyle.UNKNOWN
+        ):
+            raise ValueError("非戒指品类不得声明戒指结构")
+
         if confirmed is ProductType.PENDANT_NECKLACE and (
             not self.has_pendant
             or self.pendant_count < 1
@@ -449,6 +507,22 @@ class ProductAnalysis:
                 raise ValueError(
                     "现代分类记录的 source_image_type 必须显式提供，不得使用历史默认"
                 )
+            if normalize_product_type(source["confirmed_product_type"]) is ProductType.RING:
+                missing_ring_fields = [
+                    field_name
+                    for field_name in (
+                        "ring_count",
+                        "hand_side",
+                        "finger_position",
+                        "ring_wear_style",
+                    )
+                    if field_name not in source
+                ]
+                if missing_ring_fields:
+                    raise ValueError(
+                        "戒指分析契约不完整，缺少字段："
+                        + "、".join(missing_ring_fields)
+                    )
         elif normalize_product_type(raw_product_type) is not ProductType.BRACELET:
             raise ValueError(
                 "只有可确认的旧手串/手链记录可以使用历史默认；"
@@ -541,6 +615,18 @@ class ProductAnalysis:
                 if "is_independent_multi_item" in source
                 else False
             ),
+            ring_count=(
+                _json_int(source["ring_count"], "ring_count")
+                if "ring_count" in source
+                else 0
+            ),
+            hand_side=source.get("hand_side", HandSide.UNKNOWN.value),
+            finger_position=source.get(
+                "finger_position", FingerPosition.UNKNOWN.value
+            ),
+            ring_wear_style=source.get(
+                "ring_wear_style", RingWearStyle.UNKNOWN.value
+            ),
         )
 
     @property
@@ -552,6 +638,7 @@ class ProductAnalysis:
             ProductType.BRACELET,
             ProductType.NECKLACE,
             ProductType.PENDANT_NECKLACE,
+            ProductType.RING,
         }
 
 
@@ -1073,6 +1160,10 @@ class ProductConfirmationSnapshot:
     pendant_orientation: str | None
     connection_structure: str | None
     is_independent_multi_item: bool
+    ring_count: int = 0
+    hand_side: HandSide | str = HandSide.UNKNOWN
+    finger_position: FingerPosition | str = FingerPosition.UNKNOWN
+    ring_wear_style: RingWearStyle | str = RingWearStyle.UNKNOWN
 
     def __post_init__(self) -> None:
         product_type = normalize_product_type(self.confirmed_product_type)
@@ -1112,6 +1203,34 @@ class ProductConfirmationSnapshot:
             "is_independent_multi_item",
             _json_bool(self.is_independent_multi_item, "is_independent_multi_item"),
         )
+        ring_count = _json_int(self.ring_count, "ring_count")
+        if ring_count is None or ring_count < 0:
+            raise ValueError("ring_count 必须是大于等于 0 的 JSON 整数")
+        object.__setattr__(self, "ring_count", ring_count)
+        try:
+            object.__setattr__(self, "hand_side", HandSide(self.hand_side))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("hand_side 必须是 left/right/unknown") from exc
+        try:
+            object.__setattr__(
+                self,
+                "finger_position",
+                FingerPosition(self.finger_position),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "finger_position 必须是 thumb/index/middle/ring/little/unknown"
+            ) from exc
+        try:
+            object.__setattr__(
+                self,
+                "ring_wear_style",
+                RingWearStyle(self.ring_wear_style),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "ring_wear_style 必须是 finger_base/midi/cross_finger/unknown"
+            ) from exc
         for field_name in (
             "length_category",
             "pendant_position",
@@ -1140,6 +1259,30 @@ class ProductConfirmationSnapshot:
             not self.has_pendant or pendant_count < 1 or pendant_layer is None
         ):
             raise ValueError("带链吊坠确认快照必须包含完整吊坠结构")
+        if product_type is ProductType.RING:
+            if ring_count != 1:
+                raise ValueError("戒指确认快照只支持单枚戒指")
+            if self.hand_side is HandSide.UNKNOWN:
+                raise ValueError("戒指确认快照必须确认左右手")
+            if self.finger_position is FingerPosition.UNKNOWN:
+                raise ValueError("戒指确认快照必须确认佩戴手指")
+            if self.ring_wear_style is not RingWearStyle.FINGER_BASE:
+                raise ValueError("戒指确认快照只支持常规指根佩戴")
+            if (
+                layer_count != 1
+                or self.has_pendant
+                or pendant_count != 0
+                or pendant_layer is not None
+                or self.is_independent_multi_item
+            ):
+                raise ValueError("戒指确认快照不得声明项链层数或吊坠结构")
+        elif (
+            ring_count != 0
+            or self.hand_side is not HandSide.UNKNOWN
+            or self.finger_position is not FingerPosition.UNKNOWN
+            or self.ring_wear_style is not RingWearStyle.UNKNOWN
+        ):
+            raise ValueError("非戒指确认快照不得声明戒指结构")
         if product_type is ProductType.NECKLACE and (
             self.has_pendant or pendant_count != 0 or pendant_layer is not None
         ):
@@ -1167,7 +1310,36 @@ class ProductConfirmationSnapshot:
         missing = [field_name for field_name in required_fields if field_name not in source]
         if missing:
             raise ValueError("确认快照不完整，缺少字段：" + "、".join(missing))
-        return cls(**{field_name: source[field_name] for field_name in required_fields})
+        product_type = normalize_product_type(source["confirmed_product_type"])
+        ring_fields = (
+            "ring_count",
+            "hand_side",
+            "finger_position",
+            "ring_wear_style",
+        )
+        if product_type is ProductType.RING:
+            missing_ring_fields = [
+                field_name for field_name in ring_fields if field_name not in source
+            ]
+            if missing_ring_fields:
+                raise ValueError(
+                    "戒指确认快照不完整，缺少字段："
+                    + "、".join(missing_ring_fields)
+                )
+        values = {field_name: source[field_name] for field_name in required_fields}
+        values.update(
+            {
+                "ring_count": source.get("ring_count", 0),
+                "hand_side": source.get("hand_side", HandSide.UNKNOWN.value),
+                "finger_position": source.get(
+                    "finger_position", FingerPosition.UNKNOWN.value
+                ),
+                "ring_wear_style": source.get(
+                    "ring_wear_style", RingWearStyle.UNKNOWN.value
+                ),
+            }
+        )
+        return cls(**values)
 
     @classmethod
     def from_analysis(cls, analysis: ProductAnalysis) -> "ProductConfirmationSnapshot":
@@ -1186,10 +1358,14 @@ class ProductConfirmationSnapshot:
             pendant_orientation=analysis.pendant_orientation,
             connection_structure=analysis.connection_structure,
             is_independent_multi_item=analysis.is_independent_multi_item,
+            ring_count=analysis.ring_count,
+            hand_side=analysis.hand_side,
+            finger_position=analysis.finger_position,
+            ring_wear_style=analysis.ring_wear_style,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "confirmed_product_type": self.confirmed_product_type.value,
             "source_image_type": self.source_image_type.value,
             "display_mode": self.display_mode.value,
@@ -1203,6 +1379,16 @@ class ProductConfirmationSnapshot:
             "connection_structure": self.connection_structure,
             "is_independent_multi_item": self.is_independent_multi_item,
         }
+        if self.confirmed_product_type is ProductType.RING:
+            data.update(
+                {
+                    "ring_count": self.ring_count,
+                    "hand_side": self.hand_side.value,
+                    "finger_position": self.finger_position.value,
+                    "ring_wear_style": self.ring_wear_style.value,
+                }
+            )
+        return data
 
 
 @dataclass(frozen=True)

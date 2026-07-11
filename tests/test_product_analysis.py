@@ -85,17 +85,23 @@ def test_prompt_includes_contract_fields_path_and_dimension_reference(tmp_path):
         "occluded_parts",
         "uncertain_details",
         "is_independent_multi_item",
+        "ring_count",
+        "hand_side",
+        "finger_position",
+        "ring_wear_style",
     ):
         assert field_name in prompt
     assert "只输出 JSON" in prompt
     assert "尺寸信息只作为比例参考" in prompt
-    assert "手串/手链、普通项链和带链吊坠" in prompt
+    assert "手串/手链、普通项链、带链吊坠和戒指" in prompt
     assert "第一阶段只接受真人佩戴原图" in prompt
     assert "普通项链和带链吊坠的默认 display_mode 也是 worn" in prompt
     assert "只有用户在后续人工确认中主动切换" in prompt
     assert "upper_chest" in prompt
     assert "无链独立吊坠没有链层" in prompt
     assert "pendant_layer=null" in prompt
+    assert "戒指只允许 ring_count=1" in prompt
+    assert "finger_base" in prompt
     assert "第一版只支持手串/手链" not in prompt
 
 
