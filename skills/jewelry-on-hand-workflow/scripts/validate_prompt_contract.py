@@ -15,7 +15,7 @@ SECTION_HEADINGS = (
     "【禁止项】",
 )
 
-PREAMBLE_REQUIRED_FRAGMENTS = ("小红书自然上手图", "3:4", "2K")
+PREAMBLE_ALLOWED_LINES = ("请生成一张小红书自然上手图，画幅 3:4，清晰 2K。",)
 
 COMMON_LAYER_REQUIREMENTS = {
     "【基础安全边界】": (
@@ -263,7 +263,7 @@ def validate_prompt(path: Path) -> list[str]:
     parsed = _parse_sections(text, errors)
     if parsed is not None:
         preamble, sections = parsed
-        _require_fragments(preamble, "Prompt 开头", PREAMBLE_REQUIRED_FRAGMENTS, errors)
+        _validate_preamble(preamble, errors)
         _require_layer_rules(sections, COMMON_LAYER_REQUIREMENTS, errors)
         _validate_owned_fragment_locations(sections, errors)
 
@@ -316,6 +316,15 @@ def _parse_sections(
         if not content:
             errors.append(f"{heading}内容不能为空")
     return text[: positions[0]].strip(), sections
+
+
+def _validate_preamble(preamble: str, errors: list[str]) -> None:
+    lines = _section_lines(preamble)
+    if lines != PREAMBLE_ALLOWED_LINES:
+        errors.append(
+            "Prompt 开头仅允许固定画面规格行，且必须恰好出现一次："
+            f"{PREAMBLE_ALLOWED_LINES[0]}"
+        )
 
 
 def _controlled_value(

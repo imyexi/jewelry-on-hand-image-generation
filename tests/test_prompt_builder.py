@@ -779,3 +779,30 @@ def test_validator_accepts_clean_category_specific_image_roles(tmp_path, product
     prompt = build_prompt(product, _scored(_row()))
 
     assert _prompt_contract_errors(tmp_path, prompt) == []
+
+
+def test_validator_rejects_fidelity_sentence_copied_into_preamble(tmp_path):
+    prompt = f"{EXACT_FIDELITY_SENTENCE}\n" + build_prompt(
+        _necklace_product(),
+        _scored(_row()),
+    )
+
+    errors = _prompt_contract_errors(tmp_path, prompt)
+
+    assert any("Prompt 开头仅允许固定画面规格行" in error for error in errors)
+
+
+def test_validator_rejects_necklace_structure_inserted_into_bracelet_preamble(tmp_path):
+    prompt = "项链层数：1 层。\n" + build_prompt(_product(), _scored(_row()))
+
+    errors = _prompt_contract_errors(tmp_path, prompt)
+
+    assert any("Prompt 开头仅允许固定画面规格行" in error for error in errors)
+
+
+def test_validator_accepts_exact_single_line_generation_preamble(tmp_path):
+    prompt = build_prompt(_necklace_product(), _scored(_row()))
+    preamble = prompt.split("【基础安全边界】", 1)[0].strip()
+
+    assert preamble == "请生成一张小红书自然上手图，画幅 3:4，清晰 2K。"
+    assert _prompt_contract_errors(tmp_path, prompt) == []
