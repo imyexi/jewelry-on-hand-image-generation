@@ -43,6 +43,8 @@ def _build_necklace_prompt_fragments(product: ProductAnalysis) -> PromptFragment
                 f"吊坠位置：{product.pendant_position or '未确定'}。",
                 f"吊坠朝向：{product.pendant_orientation or '未确定'}。",
                 f"吊坠连接：{product.connection_structure or '未确定'}。",
+                "吊坠身份保持：不得换层、不得翻面、不得移位、不得复制、不得丢失，"
+                "不得脱离或改变原连接关系。",
             )
         )
     else:

@@ -18,7 +18,7 @@ MIRROR_KEYWORDS = ("对镜", "镜子", "反射", "镜面", "镜中", "mirror")
 MIRROR_INSTRUCTION = "前景手部 + 镜中反射手部"
 
 
-def build_prompt(
+def build_generation_prompt(
     product: ProductAnalysis,
     reference: ScoredReference,
     fidelity_constraints: ProductFidelityConstraints | None = None,
@@ -45,9 +45,13 @@ def build_prompt(
 【两图职责】
 内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。
 内部图2：用户输入产品上手原图，作为产品款式、颜色、结构顺序、尺寸感和可见细节的唯一保真依据。
+内部图1只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系；必须移除内部图1中的原有首饰。
+内部图2仅提供产品身份；内部图2中的人物、皮肤、颈部、胸部、手腕、手臂、手部、脸、头发、衣服和背景一律不得继承。
 
 【产品分析与不确定性】
 产品类型：{_field(product.product_type)}
+规范产品品类：{product.confirmed_product_type.value}
+规范展示模式：{product.display_mode.value}
 佩戴位置：{_field(product.wear_position)}
 产品外观：{_field(product.visible_appearance)}
 颜色范围：{color_family}
@@ -92,6 +96,15 @@ def build_prompt(
 {fragments.prohibitions}
 禁止文字、水印、logo、平台标识，以及畸形手、多指、融指、断指。
 """.strip()
+
+
+def build_prompt(
+    product: ProductAnalysis,
+    reference: ScoredReference,
+    fidelity_constraints: ProductFidelityConstraints | None = None,
+) -> str:
+    """兼容既有调用；生成逻辑统一由 build_generation_prompt 提供。"""
+    return build_generation_prompt(product, reference, fidelity_constraints)
 
 
 def _fidelity_section(
@@ -187,5 +200,6 @@ __all__ = [
     "PRODUCT_ISOLATION_SENTENCE",
     "SAFETY_BOUNDARY_SENTENCE",
     "WRIST_SOURCE_SENTENCE",
+    "build_generation_prompt",
     "build_prompt",
 ]
