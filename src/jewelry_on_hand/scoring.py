@@ -3,11 +3,14 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Sequence
 
+from jewelry_on_hand.category_policies import get_category_policy
+from jewelry_on_hand.category_policies.base import (
+    contains_any as _contains_any,
+    contains_unnegated_any as _contains_unnegated_any,
+)
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
 
 
-TYPE_POINTS = 30
-APPLICABILITY_POINTS = 25
 POSE_PURPOSE_POINTS = 20
 WEARING_DISPLAY_POINTS = 12
 PRIORITY_STRATEGY_POINTS = 15
@@ -16,14 +19,10 @@ DARK_FLASH_MATCH_POINTS = 15
 CLEAR_NATURAL_MATCH_POINTS = 15
 RED_CHINESE_STYLE_MATCH_POINTS = 10
 MIRROR_POINTS = 20
-WRIST_FOREARM_AREA_POINTS = 15
 GESTURE_SKIN_LIGHT_NEGATIVE_SPACE_POINTS = 10
 CLOSE_UP_POINTS = 8
-LARGE_BEAD_CLOSE_UP_POINTS = 15
 NON_PRIORITY_POINTS = -30
-NON_TARGET_JEWELRY_POINTS = -40
 STILL_OBJECT_EARRING_PURPOSE_POINTS = -50
-STACKED_COMPLEX_JEWELRY_POINTS = -10
 CROP_RISK_POINTS = -15
 DIVERSITY_SCORE_WINDOW = 40
 SAME_SHOOT_GROUP_PENALTY = 35
@@ -33,24 +32,19 @@ SAME_POSE_CLUSTER_PENALTY = 12
 BATCH_SAME_FILE_PENALTY = 1000
 BATCH_SAME_SHOOT_GROUP_PENALTY = 45
 BATCH_SAME_STYLE_CLUSTER_PENALTY = 10
-
-
-TARGET_JEWELRY_TERMS = ("手链", "手串", "手镯")
-TARGET_FILTER_TERMS = ("手链", "手串")
-NON_TARGET_JEWELRY_TERMS = ("戒指", "耳饰", "耳环", "项链", "吊坠", "颈链")
-BROAD_NEGATION_PREFIXES = ("没有明显", "无明显", "不是", "不适合", "未见", "没有", "无", "未")
-DIRECT_NEGATION_PREFIXES = ("不", "非")
-NEGATION_PREFIXES = BROAD_NEGATION_PREFIXES + DIRECT_NEGATION_PREFIXES
-NON_NEGATION_PREFIXES = ("非常", "不错", "不只是", "不仅", "不但", "不单", "不止", "不局限于")
-NEGATION_BOUNDARIES = " 　，,。；;：:\n\r\t"
-NEGATION_CONTRAST_BOUNDARIES = ("但是", "不过", "然而", "但", "却")
-NEGATION_CONNECTORS = ("或", "和", "及", "与", "/", "、")
+SAME_FRAMING_PENALTY = 10
+SAME_COLLAR_PENALTY = 8
+SAME_HAIR_POSITION_PENALTY = 8
+SAME_BODY_ORIENTATION_PENALTY = 10
+SAME_HOLDING_METHOD_PENALTY = 10
 
 
 def select_top_references(
     product: ProductAnalysis, rows: Iterable[ReferenceRow]
 ) -> tuple[list[ScoredReference], list[ScoredReference]]:
-    filtered_rows = _filter_reference_rows([row for row in rows if row.file_exists])
+    filtered_rows = _filter_reference_rows(
+        product, [row for row in rows if row.file_exists]
+    )
     scored = [score_reference(product, row) for row in filtered_rows]
     ordered = sorted(scored, key=lambda item: (-item.score, item.row.index))
     candidates = _rerank(ordered)
@@ -94,17 +88,11 @@ def _copy_batch_usage(
 def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredReference:
     product_text = _product_text(product)
     row_text = row.combined_text()
-    score = 0
-    reason: list[str] = []
-    risk: list[str] = []
-
-    if _matches_target_type(product, row):
-        score += TYPE_POINTS
-        reason.append("饰品类型匹配手链/手串")
-
-    if _is_applicable(row.bracelet_applicability):
-        score += APPLICABILITY_POINTS
-        reason.append("适用性标记为可用于手链/手串")
+    policy = get_category_policy(product.confirmed_product_type)
+    adaptation = policy.evaluate_reference(product, row)
+    score = adaptation.score_adjustment
+    reason = list(adaptation.reasons)
+    risk = list(adaptation.risks)
 
     if _contains_any(row.purpose_category, ("上手", "姿势", "手模", "构图", "佩戴")):
         score += POSE_PURPOSE_POINTS
@@ -142,12 +130,6 @@ def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredRefere
         score += MIRROR_POINTS
         reason.append("对镜或镜面构图可用")
 
-    if _contains_any(row_text, ("手腕", "前臂", "手臂")) and _contains_any(
-        row_text, ("露出", "面积足", "完整", "清楚", "清晰")
-    ):
-        score += WRIST_FOREARM_AREA_POINTS
-        reason.append("手腕/前臂露出面积足")
-
     if _contains_any(
         row_text,
         ("手势", "姿势", "肤色", "皮肤", "光线", "光影", "留白", "自然光", "闪光"),
@@ -159,29 +141,17 @@ def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredRefere
         score += CLOSE_UP_POINTS
         reason.append("近景构图匹配")
 
-    if _is_large_bead(product) and _contains_any(row_text, ("近景", "特写", "close-up", "特近")):
-        score += LARGE_BEAD_CLOSE_UP_POINTS
-        reason.append("大珠产品适合近景参考")
-
     if _is_non_priority(row.default_strategy):
         score += NON_PRIORITY_POINTS
         risk.append("默认策略提示不优先使用")
-
-    if _is_non_target_jewelry(row):
-        score += NON_TARGET_JEWELRY_POINTS
-        risk.append("参考图饰品类型不是目标手链/手串")
 
     if _has_still_object_earring_purpose(row):
         score += STILL_OBJECT_EARRING_PURPOSE_POINTS
         risk.append("用途偏静物/物品/耳饰参考")
 
-    ignored_reference_jewelry = _ignored_reference_jewelry(row_text)
+    ignored_reference_jewelry = adaptation.ignored_reference_jewelry
     if ignored_reference_jewelry:
         risk.append("参考图含需忽略的非目标首饰")
-
-    if _contains_any(row_text, ("叠戴", "堆叠", "多层", "复杂", "繁复", "多件")):
-        score += STACKED_COMPLEX_JEWELRY_POINTS
-        risk.append("叠戴或复杂首饰会干扰替换")
 
     if _contains_unnegated_any(
         row_text, ("裁切", "截断", "切手", "遮挡", "缺失", "不完整", "过近")
@@ -217,6 +187,13 @@ def _select_diverse_top_references(
     max_score = candidates[0].score
     quality_floor = max_score - DIVERSITY_SCORE_WINDOW
     quality_pool = [item for item in candidates if item.score >= quality_floor] or list(candidates)
+    safe_quality_pool = [
+        item
+        for item in quality_pool
+        if not item.risk and not item.ignored_reference_jewelry
+    ]
+    if safe_quality_pool:
+        quality_pool = safe_quality_pool
     quality_pool = _prefer_unused_files(quality_pool, candidates, batch_usage)
     first_item = max(
         quality_pool,
@@ -281,6 +258,16 @@ def _diversity_adjusted_score(
             penalty += SAME_SCENE_CLUSTER_PENALTY
         if item_profile["pose_cluster"] == selected_profile["pose_cluster"]:
             penalty += SAME_POSE_CLUSTER_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "framing"):
+            penalty += SAME_FRAMING_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "collar"):
+            penalty += SAME_COLLAR_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "hair_position"):
+            penalty += SAME_HAIR_POSITION_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "body_orientation"):
+            penalty += SAME_BODY_ORIENTATION_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "holding_method"):
+            penalty += SAME_HOLDING_METHOD_PENALTY
     return item.score - penalty - _batch_penalty(item_profile, item.row.file_name, batch_usage)
 
 
@@ -328,7 +315,59 @@ def _diversity_profile(row: ReferenceRow) -> dict[str, str]:
         "scene_cluster": _scene_cluster(row),
         "pose_cluster": _pose_cluster(row),
         "shoot_group": _shoot_group(row.file_name),
+        "framing": row.framing.strip() or "未标注",
+        "collar": row.collar_type.strip() or "未标注",
+        "hair_position": _hair_position_cluster(row),
+        "body_orientation": _body_orientation_cluster(row),
+        "holding_method": _holding_method_cluster(row),
     }
+
+
+def _same_labeled_profile(
+    first: dict[str, str], second: dict[str, str], key: str
+) -> bool:
+    return first[key] != "未标注" and first[key] == second[key]
+
+
+def _hair_position_cluster(row: ReferenceRow) -> str:
+    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
+    for label, terms in (
+        ("左侧", ("头发左侧", "左侧头发", "头发向左")),
+        ("右侧", ("头发右侧", "右侧头发", "头发向右")),
+        ("后置", ("头发后置", "头发在后", "盘发", "扎发")),
+        ("双侧披发", ("披发", "散发", "头发披肩")),
+    ):
+        if _contains_any(text, terms):
+            return label
+    return "未标注"
+
+
+def _body_orientation_cluster(row: ReferenceRow) -> str:
+    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
+    for label, terms in (
+        ("左侧身", ("左侧身", "身体向左", "左转身")),
+        ("右侧身", ("右侧身", "身体向右", "右转身")),
+        ("侧身", ("侧身", "侧面")),
+        ("背身", ("背身", "背面")),
+        ("正面", ("正面", "面向镜头", "身体朝前")),
+    ):
+        if _contains_any(text, terms):
+            return label
+    return "未标注"
+
+
+def _holding_method_cluster(row: ReferenceRow) -> str:
+    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
+    for label, terms in (
+        ("双手", ("双手持", "双手展示", "双手悬挂")),
+        ("捏持", ("捏持", "指尖夹持", "两指夹持")),
+        ("掌托", ("掌心托住", "手掌托住", "托在掌心")),
+        ("握持", ("握持", "虎口持", "虎口握")),
+        ("悬挂", ("悬挂", "提起链条")),
+    ):
+        if _contains_any(text, terms):
+            return label
+    return "未标注"
 
 
 def _style_cluster(row: ReferenceRow) -> str:
@@ -343,7 +382,7 @@ def _scene_cluster(row: ReferenceRow) -> str:
 
 
 def _pose_cluster(row: ReferenceRow) -> str:
-    text = f"{row.purpose_category} {row.recommended_usage} {row.notes}"
+    text = f"{row.purpose_category} {row.recommended_usage} {row.notes} {row.pose_keywords}"
     if _contains_any(text, ("对镜", "镜子", "镜面", "镜中")):
         return "对镜"
     if _contains_any(text, ("双手", "交叠")):
@@ -402,53 +441,36 @@ def _make_scored(
     )
 
 
-def _filter_reference_rows(rows: Sequence[ReferenceRow]) -> list[ReferenceRow]:
-    for predicate in (
-        _passes_hard_filter,
-        _passes_medium_confidence_filter,
-        _passes_non_priority_filter,
-        _passes_combined_jewelry_filter,
-    ):
-        matches = [row for row in rows if predicate(row)]
-        if matches:
-            return matches
-    return []
+def _filter_reference_rows(
+    product: ProductAnalysis, rows: Sequence[ReferenceRow]
+) -> list[ReferenceRow]:
+    policy = get_category_policy(product.confirmed_product_type)
+    evaluated = [(row, policy.evaluate_reference(product, row)) for row in rows]
+    primary = [
+        (row, adaptation)
+        for row, adaptation in evaluated
+        if adaptation.eligible and not adaptation.diversity_candidate
+    ]
+    if primary:
+        best_tier = min(adaptation.selection_tier for _, adaptation in primary)
+        primary_rows = [
+            row for row, adaptation in primary if adaptation.selection_tier == best_tier
+        ]
+    else:
+        primary_rows = []
+    diversity_rows = [
+        row
+        for row, adaptation in evaluated
+        if adaptation.eligible and adaptation.diversity_candidate
+    ]
+    if not primary_rows:
+        return diversity_rows
 
-
-def _passes_hard_filter(row: ReferenceRow) -> bool:
-    return (
-        _is_high_confidence(row.confidence)
-        and _is_priority_strategy(row.default_strategy)
-        and _is_target_only_jewelry(row)
-        and _is_applicable(row.bracelet_applicability)
-    )
-
-
-def _passes_medium_confidence_filter(row: ReferenceRow) -> bool:
-    return (
-        _is_high_or_medium_confidence(row.confidence)
-        and _is_priority_strategy(row.default_strategy)
-        and _is_target_only_jewelry(row)
-        and _is_applicable(row.bracelet_applicability)
-    )
-
-
-def _passes_non_priority_filter(row: ReferenceRow) -> bool:
-    return (
-        _is_high_or_medium_confidence(row.confidence)
-        and _is_priority_or_relaxed_non_priority(row.default_strategy)
-        and _is_target_only_jewelry(row)
-        and _is_applicable(row.bracelet_applicability)
-    )
-
-
-def _passes_combined_jewelry_filter(row: ReferenceRow) -> bool:
-    return (
-        _is_high_or_medium_confidence(row.confidence)
-        and _is_priority_or_relaxed_non_priority(row.default_strategy)
-        and _is_target_combined_jewelry(row)
-        and _is_applicable(row.bracelet_applicability)
-    )
+    primary_indexes = {row.index for row in primary_rows}
+    return [
+        *primary_rows,
+        *(row for row in diversity_rows if row.index not in primary_indexes),
+    ]
 
 
 def _product_text(product: ProductAnalysis) -> str:
@@ -464,104 +486,9 @@ def _product_text(product: ProductAnalysis) -> str:
     return " ".join(part for part in parts if part)
 
 
-def _contains_any(text: str, terms: Iterable[str]) -> bool:
-    lowered = text.lower()
-    return any(term.lower() in lowered for term in terms)
-
-
-def _contains_unnegated_any(text: str, terms: Iterable[str]) -> bool:
-    lowered = text.lower()
-    term_list = tuple(terms)
-    for term in term_list:
-        lowered_term = term.lower()
-        start = 0
-        while True:
-            index = lowered.find(lowered_term, start)
-            if index == -1:
-                break
-            if not _has_negation_prefix(text, index, term_list):
-                return True
-            start = index + len(lowered_term)
-    return False
-
-
-def _has_negation_prefix(text: str, term_start: int, terms: tuple[str, ...]) -> bool:
-    prefix = _same_clause_prefix(text, term_start)
-    compact_prefix = "".join(
-        char for char in prefix if not char.isspace()
-    )
-    negation = _nearest_valid_negation(compact_prefix)
-    if negation is None:
-        return False
-    _, negation_text = negation
-    tail = compact_prefix[negation[0] + len(negation_text) :]
-    if negation_text in DIRECT_NEGATION_PREFIXES:
-        return tail == "" or _contains_only_terms_and_connectors(tail, terms)
-    return len(tail) <= 6
-
-
-def _contains_only_terms_and_connectors(text: str, terms: tuple[str, ...]) -> bool:
-    remaining = text
-    sorted_terms = sorted(terms, key=len, reverse=True)
-    while remaining:
-        for connector in NEGATION_CONNECTORS:
-            if remaining.startswith(connector):
-                remaining = remaining[len(connector) :]
-                break
-        else:
-            for term in sorted_terms:
-                if remaining.startswith(term):
-                    remaining = remaining[len(term) :]
-                    break
-            else:
-                return False
-    return True
-
-
-def _nearest_valid_negation(compact_prefix: str) -> tuple[int, str] | None:
-    candidates: list[tuple[int, str]] = []
-    for negation in NEGATION_PREFIXES:
-        start = 0
-        while True:
-            index = compact_prefix.find(negation, start)
-            if index == -1:
-                break
-            if not _is_non_negation_phrase(compact_prefix, index):
-                candidates.append((index, negation))
-            start = index + len(negation)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: (item[0], len(item[1])))
-
-
-def _is_non_negation_phrase(compact_prefix: str, index: int) -> bool:
-    return any(compact_prefix.startswith(phrase, index) for phrase in NON_NEGATION_PREFIXES)
-
-
-def _same_clause_prefix(text: str, term_start: int) -> str:
-    prefix = text[:term_start]
-    clause_start = 0
-    for boundary in NEGATION_BOUNDARIES:
-        index = prefix.rfind(boundary)
-        if index >= clause_start:
-            clause_start = index + len(boundary)
-    for boundary in NEGATION_CONTRAST_BOUNDARIES:
-        index = prefix.rfind(boundary)
-        if index >= clause_start:
-            clause_start = index + len(boundary)
-    return prefix[clause_start:]
-
-
 def _has_style_match(product_text: str, row_text: str, terms: Iterable[str]) -> bool:
     term_list = tuple(terms)
     return _contains_any(product_text, term_list) and _contains_any(row_text, term_list)
-
-
-def _matches_target_type(product: ProductAnalysis, row: ReferenceRow) -> bool:
-    product_targets = tuple(term for term in TARGET_JEWELRY_TERMS if term in product.product_type)
-    if not product_targets:
-        product_targets = TARGET_JEWELRY_TERMS
-    return _contains_any(row.jewelry_type, product_targets)
 
 
 def _has_wearing_display_signal(row: ReferenceRow) -> bool:
@@ -569,12 +496,6 @@ def _has_wearing_display_signal(row: ReferenceRow) -> bool:
     return _contains_any(
         explicit_text,
         ("佩戴展示", "上手展示", "真人佩戴", "佩戴效果", "戴手上展示"),
-    )
-
-
-def _is_applicable(text: str) -> bool:
-    return _contains_any(text, ("是", "可用于", "适用", "手链", "手串")) and not _contains_any(
-        text, ("否", "不适用", "不可用")
     )
 
 
@@ -586,63 +507,6 @@ def _is_non_priority(text: str) -> bool:
     return _contains_any(text, ("不优先", "无特殊要求不优先", "不建议", "谨慎使用"))
 
 
-def _is_relaxed_non_priority(text: str) -> bool:
-    return _contains_any(text, ("无特殊要求不优先使用", "无特殊要求不优先"))
-
-
-def _is_priority_or_relaxed_non_priority(text: str) -> bool:
-    return _is_priority_strategy(text) or _is_relaxed_non_priority(text)
-
-
-def _is_high_confidence(text: str) -> bool:
-    return "高" in text
-
-
-def _is_high_or_medium_confidence(text: str) -> bool:
-    return _is_high_confidence(text) or "中" in text
-
-
-def _is_large_bead(product: ProductAnalysis) -> bool:
-    bead_diameter = product.product_dimensions.bead_diameter_mm
-    return bead_diameter is not None and bead_diameter >= 10
-
-
-def _is_non_target_jewelry(row: ReferenceRow) -> bool:
-    jewelry_text = row.jewelry_type
-    has_non_target = _contains_any(jewelry_text, NON_TARGET_JEWELRY_TERMS)
-    has_target = _contains_any(jewelry_text, TARGET_JEWELRY_TERMS)
-    return has_non_target and not has_target
-
-
-def _is_target_only_jewelry(row: ReferenceRow) -> bool:
-    jewelry_text = row.jewelry_type
-    return _contains_any(jewelry_text, TARGET_FILTER_TERMS) and not _contains_any(
-        jewelry_text, NON_TARGET_JEWELRY_TERMS
-    )
-
-
-def _is_target_combined_jewelry(row: ReferenceRow) -> bool:
-    jewelry_text = row.jewelry_type
-    return _contains_any(jewelry_text, TARGET_FILTER_TERMS) and _contains_any(
-        jewelry_text, NON_TARGET_JEWELRY_TERMS
-    )
-
-
 def _has_still_object_earring_purpose(row: ReferenceRow) -> bool:
     text = f"{row.purpose_category} {row.recommended_usage} {row.notes} {row.jewelry_type}"
     return _contains_unnegated_any(text, ("静物", "摆拍", "平铺", "物品", "物体", "耳饰", "耳环"))
-
-
-def _ignored_reference_jewelry(text: str) -> tuple[str, ...]:
-    ignored: list[str] = []
-    if _contains_unnegated_any(text, ("戒指",)):
-        ignored.append("参考图中的戒指")
-    if _contains_unnegated_any(text, ("耳饰", "耳环")):
-        ignored.append("参考图中的耳饰")
-    if _contains_unnegated_any(text, ("项链", "吊坠", "颈链")):
-        ignored.append("参考图中的项链")
-    if _contains_unnegated_any(
-        text, ("原有手链", "原手链", "已有手链", "旧手链", "原有手串", "已有手串")
-    ):
-        ignored.append("参考图中的原有手链")
-    return tuple(ignored)

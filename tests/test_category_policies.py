@@ -1,8 +1,74 @@
+from pathlib import Path
+
 import pytest
 
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.display_modes import DisplayMode
+from jewelry_on_hand.models import ProductAnalysis, ReferenceRow
 from jewelry_on_hand.product_types import ProductType
+
+
+def necklace_product(display_mode="worn"):
+    return ProductAnalysis.from_dict(
+        {
+            "product_type": "普通项链",
+            "detected_product_type": "necklace",
+            "confirmed_product_type": "necklace",
+            "classification_confidence": "high",
+            "classification_evidence": ["可见完整项链结构"],
+            "classification_source": "model",
+            "wear_position": "颈部和锁骨",
+            "visible_appearance": "单层珠链",
+            "color_family": ["白色"],
+            "style_mood": "清透",
+            "composition": "胸前近景",
+            "product_dimensions": {},
+            "needs_full_front_display": True,
+            "special_requirements": [],
+            "source_image_type": "worn_source",
+            "display_mode": display_mode,
+            "layer_count": 1,
+            "length_category": "collarbone",
+        }
+    )
+
+
+def necklace_reference(**overrides):
+    data = {
+        "index": 1,
+        "file_name": "necklace.jpg",
+        "relative_path": "necklace.jpg",
+        "absolute_path": Path("C:/tmp/necklace.jpg"),
+        "width": 1000,
+        "height": 1200,
+        "size_mb": 1,
+        "purpose_category": "真人佩戴构图参考",
+        "bracelet_applicability": "",
+        "default_strategy": "常规可优先使用",
+        "style_category": "清透自然光",
+        "scene_keywords": "锁骨 胸前",
+        "jewelry_type": "项链",
+        "recommended_usage": "项链真人佩戴展示",
+        "notes": "颈部和胸前完整，无裁切",
+        "confidence": "高",
+        "file_exists": True,
+        "applicable_product_types": "necklace,pendant_necklace",
+        "applicable_display_modes": "worn",
+        "framing": "胸前半身",
+        "visible_body_regions": "颈部 锁骨 胸前",
+        "product_visibility": "高",
+        "neck_visibility": "高",
+        "collarbone_visibility": "高",
+        "chest_visibility": "高",
+        "hand_visibility": "低",
+        "collar_type": "低领",
+        "clothing_occlusion_risk": "低",
+        "hair_occlusion_risk": "低",
+        "existing_jewelry": "细项链",
+        "crop_risk": "低",
+    }
+    data.update(overrides)
+    return ReferenceRow(**data)
 
 
 def test_bracelet_policy_preserves_existing_category():
@@ -101,3 +167,32 @@ def test_bracelet_policy_enforces_its_single_layer_limit():
     policy = get_category_policy(ProductType.BRACELET)
     with pytest.raises(ValueError, match="手串/手链.*1 层"):
         policy.validate_generation(layer_count=2, is_independent_multi_item=False)
+
+
+def test_necklace_policy_exposes_testable_reference_adaptation_result():
+    policy = get_category_policy(ProductType.NECKLACE)
+
+    adaptation = policy.evaluate_reference(necklace_product(), necklace_reference())
+
+    assert adaptation.eligible
+    assert adaptation.score_adjustment > 0
+    assert any("品类" in reason and "展示模式" in reason for reason in adaptation.reasons)
+    assert adaptation.risks == ()
+
+
+def test_necklace_policy_adaptation_reports_hard_filter_risks():
+    policy = get_category_policy(ProductType.NECKLACE)
+
+    adaptation = policy.evaluate_reference(
+        necklace_product(),
+        necklace_reference(
+            applicable_product_types="",
+            hair_occlusion_risk="高",
+            crop_risk="高",
+        ),
+    )
+
+    assert not adaptation.eligible
+    assert any("适用品类" in risk for risk in adaptation.risks)
+    assert any("头发" in risk for risk in adaptation.risks)
+    assert any("裁切" in risk for risk in adaptation.risks)

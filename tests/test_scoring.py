@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from jewelry_on_hand.models import ProductAnalysis, ProductDimensions, ReferenceRow, ScoredReference
 from jewelry_on_hand.scoring import (
     score_reference,
@@ -83,6 +85,26 @@ def test_select_top_references_keeps_hard_filtered_candidates_and_top_three_rank
     assert [item.score for item in candidates] == sorted(
         [item.score for item in candidates], reverse=True
     )
+
+
+def test_candidate_pool_keeps_clean_rows_and_adds_combined_jewelry_for_batch_diversity():
+    clean = row(1, file_name="clean.jpg")
+    combined = row(
+        2,
+        file_name="combined.jpg",
+        jewelry_type="手链、项链、戒指组合",
+        scene_keywords="对镜 室内 自然光",
+        recommended_usage="对镜手腕构图",
+    )
+
+    selected, candidates = select_top_references(product(), [clean, combined])
+
+    assert {item.row.file_name for item in candidates} == {"clean.jpg", "combined.jpg"}
+    assert selected[0].row.file_name == "clean.jpg"
+    combined_candidate = next(
+        item for item in candidates if item.row.file_name == "combined.jpg"
+    )
+    assert combined_candidate.ignored_reference_jewelry
 
 
 def test_select_top_references_diversifies_same_score_shoot_group():
@@ -391,3 +413,305 @@ def test_select_top_references_uses_model_rank_without_bypass():
     _, candidates = select_top_references(product(), rows)
 
     assert [item.rank for item in candidates] == [1, 2, 3, 4]
+
+
+def necklace_product(display_mode="worn", length_category="collarbone", layer_count=1):
+    return ProductAnalysis.from_dict({
+        "product_type": "普通项链",
+        "detected_product_type": "necklace",
+        "confirmed_product_type": "necklace",
+        "classification_confidence": "high",
+        "classification_evidence": ["可见完整项链结构"],
+        "classification_source": "model",
+        "wear_position": "颈部和锁骨",
+        "visible_appearance": "单层珠链",
+        "color_family": ["白色"],
+        "style_mood": "清透",
+        "composition": "胸前近景",
+        "product_dimensions": {},
+        "needs_full_front_display": True,
+        "special_requirements": [],
+        "source_image_type": "worn_source",
+        "display_mode": display_mode,
+        "layer_count": layer_count,
+        "length_category": length_category,
+    })
+
+
+def necklace_row(index, **overrides):
+    data = {
+        "index": index,
+        "file_name": f"necklace-{index}.jpg",
+        "relative_path": f"necklace-{index}.jpg",
+        "absolute_path": Path(f"C:/tmp/necklace-{index}.jpg"),
+        "width": 1000,
+        "height": 1200,
+        "size_mb": 1,
+        "purpose_category": "真人佩戴构图参考",
+        "bracelet_applicability": "",
+        "default_strategy": "常规可优先使用",
+        "style_category": "清透自然光",
+        "scene_keywords": "锁骨 胸前",
+        "jewelry_type": "项链",
+        "recommended_usage": "项链真人佩戴展示",
+        "notes": "颈部和胸前完整，无裁切",
+        "confidence": "高",
+        "file_exists": True,
+        "applicable_product_types": "necklace,pendant_necklace",
+        "applicable_display_modes": "worn",
+        "framing": "胸前半身",
+        "visible_body_regions": "颈部 锁骨 胸前",
+        "product_visibility": "高",
+        "neck_visibility": "高",
+        "collarbone_visibility": "高",
+        "chest_visibility": "高",
+        "hand_visibility": "低",
+        "collar_type": "低领",
+        "clothing_occlusion_risk": "低",
+        "hair_occlusion_risk": "低",
+        "existing_jewelry": "细项链",
+        "crop_risk": "低",
+    }
+    data.update(overrides)
+    return ReferenceRow(**data)
+
+
+def test_necklace_worn_prefers_neck_and_chest_reference():
+    scored = score_reference(necklace_product(), necklace_row(101))
+    assert any("项链" in reason and "匹配" in reason for reason in scored.reason)
+    assert not any("饰品类型不是目标" in risk for risk in scored.risk)
+
+
+def test_necklace_worn_filter_rejects_wrist_only_reference():
+    good = necklace_row(102)
+    wrist = necklace_row(
+        103,
+        applicable_product_types="bracelet",
+        applicable_display_modes="worn",
+        visible_body_regions="手腕 前臂",
+        neck_visibility="低",
+        collarbone_visibility="低",
+        chest_visibility="低",
+        jewelry_type="手链/手串",
+    )
+    selected, _ = select_top_references(necklace_product(), [wrist, good])
+    assert [item.row.index for item in selected] == [102]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"applicable_product_types": ""},
+        {"applicable_display_modes": ""},
+        {"visible_body_regions": ""},
+        {"product_visibility": ""},
+        {"collar_type": ""},
+        {"clothing_occlusion_risk": ""},
+        {"hair_occlusion_risk": ""},
+        {"crop_risk": ""},
+    ],
+)
+def test_necklace_worn_filter_rejects_missing_required_annotations(overrides):
+    missing = necklace_row(108, **overrides)
+    good = necklace_row(109)
+
+    selected, candidates = select_top_references(necklace_product(), [missing, good])
+
+    assert [item.row.index for item in selected] == [109]
+    assert [item.row.index for item in candidates] == [109]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_risk"),
+    [
+        ({"product_visibility": "低"}, "展示面积"),
+        ({"clothing_occlusion_risk": "高", "collar_type": "高领"}, "衣领"),
+        ({"hair_occlusion_risk": "高"}, "头发"),
+        ({"crop_risk": "高"}, "裁切"),
+    ],
+)
+def test_necklace_worn_filter_rejects_visibility_occlusion_and_crop_risks(
+    overrides, expected_risk
+):
+    rejected = necklace_row(110, **overrides)
+    good = necklace_row(111)
+
+    selected, candidates = select_top_references(necklace_product(), [rejected, good])
+    rejected_score = score_reference(necklace_product(), rejected)
+
+    assert [item.row.index for item in selected] == [111]
+    assert [item.row.index for item in candidates] == [111]
+    assert any(expected_risk in risk for risk in rejected_score.risk)
+
+
+def test_long_necklace_filter_rejects_collarbone_crop():
+    cropped = necklace_row(104, framing="锁骨特写", chest_visibility="低", crop_risk="高")
+    full = necklace_row(105, framing="胸前半身", chest_visibility="高", crop_risk="低")
+    selected, _ = select_top_references(necklace_product(length_category="long"), [cropped, full])
+    assert [item.row.index for item in selected] == [105]
+
+
+def test_multi_layer_necklace_requires_vertical_chest_space_and_rewards_it():
+    tight = necklace_row(
+        112,
+        framing="锁骨特写",
+        chest_visibility="低",
+        notes="颈部完整，但没有多层垂直空间",
+    )
+    spacious = necklace_row(
+        113,
+        framing="胸前半身",
+        chest_visibility="高",
+        notes="颈部和胸前完整，有多层垂直空间和层间落差",
+    )
+
+    selected, candidates = select_top_references(
+        necklace_product(length_category="upper_chest", layer_count=3),
+        [tight, spacious],
+    )
+
+    assert [item.row.index for item in selected] == [113]
+    assert [item.row.index for item in candidates] == [113]
+    assert any("多层" in reason and "垂直空间" in reason for reason in selected[0].reason)
+
+
+def test_necklace_hand_held_requires_visible_hand_and_mode():
+    worn = necklace_row(106, applicable_display_modes="worn", hand_visibility="低")
+    held = necklace_row(
+        107,
+        applicable_display_modes="hand_held",
+        visible_body_regions="手指 掌心",
+        hand_visibility="高",
+        recommended_usage="项链手持展示，链条可自然垂落",
+        notes="手指与链条真实接触，完整链条无裁切",
+    )
+    selected, _ = select_top_references(necklace_product(display_mode="hand_held"), [worn, held])
+    assert [item.row.index for item in selected] == [107]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_risk"),
+    [
+        (
+            {"visible_body_regions": "手腕 前臂", "hand_visibility": "高"},
+            "腕部",
+        ),
+        (
+            {"visible_body_regions": "", "hand_visibility": "低"},
+            "手指、掌心或双手",
+        ),
+        (
+            {
+                "recommended_usage": "项链手持展示",
+                "notes": "手指与链条真实接触，但画面没有链条垂落空间",
+            },
+            "垂落空间",
+        ),
+        (
+            {
+                "recommended_usage": "项链悬空展示，链条可自然垂落",
+                "notes": "手部靠近产品但没有真实接触",
+            },
+            "真实接触",
+        ),
+        (
+            {
+                "recommended_usage": "项链手持展示，链条可自然垂落",
+                "notes": "手指与链条真实接触，但关键结构严重遮挡",
+                "crop_risk": "高",
+            },
+            "关键结构",
+        ),
+    ],
+)
+def test_necklace_hand_held_filter_rejects_invalid_compositions(
+    overrides, expected_risk
+):
+    rejected_data = {
+        "applicable_display_modes": "hand_held",
+        "visible_body_regions": "手指 掌心",
+        "hand_visibility": "高",
+        "recommended_usage": "项链手持展示，链条可自然垂落",
+        "notes": "手指与链条真实接触，完整链条无裁切",
+    }
+    rejected_data.update(overrides)
+    rejected = necklace_row(114, **rejected_data)
+    good = necklace_row(
+        115,
+        applicable_display_modes="hand_held",
+        visible_body_regions="手指 掌心",
+        hand_visibility="高",
+        recommended_usage="项链手持展示，链条可自然垂落",
+        notes="手指与链条真实接触，完整链条无裁切",
+    )
+
+    product = necklace_product(display_mode="hand_held")
+    selected, candidates = select_top_references(product, [rejected, good])
+    rejected_score = score_reference(product, rejected)
+
+    assert [item.row.index for item in selected] == [115]
+    assert [item.row.index for item in candidates] == [115]
+    assert any(expected_risk in risk for risk in rejected_score.risk)
+
+
+def test_necklace_diversity_penalizes_repeated_framing_collar_hair_and_orientation():
+    duplicate_profile = {
+        "framing": "胸前近景",
+        "collar_type": "低领",
+        "pose_keywords": "正面 头发左侧",
+    }
+    rows = [
+        necklace_row(201, file_name="first.jpg", **duplicate_profile),
+        necklace_row(202, file_name="duplicate.jpg", **duplicate_profile),
+        necklace_row(
+            203,
+            file_name="diverse.jpg",
+            framing="上半身",
+            collar_type="V领",
+            pose_keywords="右侧身 头发右侧",
+        ),
+        necklace_row(204, file_name="another-duplicate.jpg", **duplicate_profile),
+    ]
+
+    selected, _ = select_top_references(necklace_product(), rows)
+
+    assert [item.row.index for item in selected[:2]] == [201, 203]
+
+
+def test_hand_held_diversity_penalizes_repeated_holding_method():
+    common = {
+        "applicable_display_modes": "hand_held",
+        "visible_body_regions": "手指 掌心",
+        "hand_visibility": "高",
+        "notes": "手指与链条真实接触，完整链条无裁切",
+    }
+    rows = [
+        necklace_row(
+            211,
+            file_name="pinch-first.jpg",
+            recommended_usage="单手捏持项链，链条自然垂落",
+            **common,
+        ),
+        necklace_row(
+            212,
+            file_name="pinch-duplicate.jpg",
+            recommended_usage="单手捏持项链，链条自然垂落",
+            **common,
+        ),
+        necklace_row(
+            213,
+            file_name="palm-diverse.jpg",
+            recommended_usage="虎口握持项链，链条自然垂落",
+            **common,
+        ),
+        necklace_row(
+            214,
+            file_name="pinch-another.jpg",
+            recommended_usage="单手捏持项链，链条自然垂落",
+            **common,
+        ),
+    ]
+
+    selected, _ = select_top_references(necklace_product(display_mode="hand_held"), rows)
+
+    assert [item.row.index for item in selected[:2]] == [211, 213]
