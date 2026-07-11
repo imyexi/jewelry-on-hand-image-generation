@@ -61,6 +61,12 @@ GENERIC_COLUMN_ALIASES = {
     "mirror_relation": ("镜面关系",),
     "existing_jewelry": ("原有首饰类型", "原有首饰"),
     "crop_risk": ("裁切风险",),
+    "hand_side": ("左右手",),
+    "visible_fingers": ("可见手指",),
+    "hand_orientation": ("手部朝向",),
+    "ring_face_visibility": ("戒面可见度",),
+    "finger_separation": ("手指分离度",),
+    "finger_occlusion_risk": ("手指遮挡风险",),
 }
 
 
@@ -134,6 +140,12 @@ def _load_rows_from_workbook(workbook: Any) -> list[ReferenceRow]:
                 mirror_relation=row_data["mirror_relation"],
                 existing_jewelry=row_data["existing_jewelry"],
                 crop_risk=row_data["crop_risk"],
+                hand_side=row_data["hand_side"],
+                visible_fingers=row_data["visible_fingers"],
+                hand_orientation=row_data["hand_orientation"],
+                ring_face_visibility=row_data["ring_face_visibility"],
+                finger_separation=row_data["finger_separation"],
+                finger_occlusion_risk=row_data["finger_occlusion_risk"],
             )
         )
     return reference_rows

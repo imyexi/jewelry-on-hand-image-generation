@@ -845,6 +845,12 @@ class ReferenceRow:
     mirror_relation: str = ""
     existing_jewelry: str = ""
     crop_risk: str = ""
+    hand_side: str = ""
+    visible_fingers: str = ""
+    hand_orientation: str = ""
+    ring_face_visibility: str = ""
+    finger_separation: str = ""
+    finger_occlusion_risk: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "index", _required_int(self.index, "index"))
@@ -883,6 +889,12 @@ class ReferenceRow:
             "mirror_relation",
             "existing_jewelry",
             "crop_risk",
+            "hand_side",
+            "visible_fingers",
+            "hand_orientation",
+            "ring_face_visibility",
+            "finger_separation",
+            "finger_occlusion_risk",
         ):
             value = getattr(self, field_name)
             if not isinstance(value, str):
@@ -967,6 +979,22 @@ class ReferenceRow:
                 source, "existing_jewelry", "原有首饰类型", "原有首饰"
             ),
             crop_risk=_reference_field_value(source, "crop_risk", "裁切风险"),
+            hand_side=_reference_field_value(source, "hand_side", "左右手"),
+            visible_fingers=_reference_field_value(
+                source, "visible_fingers", "可见手指"
+            ),
+            hand_orientation=_reference_field_value(
+                source, "hand_orientation", "手部朝向"
+            ),
+            ring_face_visibility=_reference_field_value(
+                source, "ring_face_visibility", "戒面可见度"
+            ),
+            finger_separation=_reference_field_value(
+                source, "finger_separation", "手指分离度"
+            ),
+            finger_occlusion_risk=_reference_field_value(
+                source, "finger_occlusion_risk", "手指遮挡风险"
+            ),
         )
 
     def combined_text(self) -> str:
@@ -996,6 +1024,12 @@ class ReferenceRow:
             self.mirror_relation,
             self.existing_jewelry,
             self.crop_risk,
+            self.hand_side,
+            self.visible_fingers,
+            self.hand_orientation,
+            self.ring_face_visibility,
+            self.finger_separation,
+            self.finger_occlusion_risk,
         )
         return " ".join(str(part) for part in parts if part)
 
@@ -1038,6 +1072,12 @@ class ReferenceRow:
             self.mirror_relation,
             self.existing_jewelry,
             self.crop_risk,
+            self.hand_side,
+            self.visible_fingers,
+            self.hand_orientation,
+            self.ring_face_visibility,
+            self.finger_separation,
+            self.finger_occlusion_risk,
         )
         if any(generic_values):
             metadata.update(
@@ -1074,6 +1114,18 @@ class ReferenceRow:
                     "原有首饰类型": self.existing_jewelry,
                     "crop_risk": self.crop_risk,
                     "裁切风险": self.crop_risk,
+                    "hand_side": self.hand_side,
+                    "左右手": self.hand_side,
+                    "visible_fingers": self.visible_fingers,
+                    "可见手指": self.visible_fingers,
+                    "hand_orientation": self.hand_orientation,
+                    "手部朝向": self.hand_orientation,
+                    "ring_face_visibility": self.ring_face_visibility,
+                    "戒面可见度": self.ring_face_visibility,
+                    "finger_separation": self.finger_separation,
+                    "手指分离度": self.finger_separation,
+                    "finger_occlusion_risk": self.finger_occlusion_risk,
+                    "手指遮挡风险": self.finger_occlusion_risk,
                 }
             )
         return metadata

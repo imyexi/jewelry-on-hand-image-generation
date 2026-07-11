@@ -44,6 +44,12 @@ GENERIC_COLUMNS = (
     "镜面关系",
     "原有首饰类型",
     "裁切风险",
+    "左右手",
+    "可见手指",
+    "手部朝向",
+    "戒面可见度",
+    "手指分离度",
+    "手指遮挡风险",
 )
 
 
@@ -90,6 +96,12 @@ def _generic_row(absolute_path, **overrides):
             "镜面关系": "无镜面",
             "原有首饰类型": "细项链",
             "裁切风险": "低",
+            "左右手": "left",
+            "可见手指": "thumb,index,middle,ring,little",
+            "手部朝向": "back",
+            "戒面可见度": "高",
+            "手指分离度": "高",
+            "手指遮挡风险": "低",
         }
     )
     data.update(overrides)
@@ -190,6 +202,12 @@ def test_load_reference_rows_maps_optional_generic_columns(tmp_path):
     assert row.mirror_relation == "无镜面"
     assert row.existing_jewelry == "细项链"
     assert row.crop_risk == "低"
+    assert row.hand_side == "left"
+    assert row.visible_fingers == "thumb,index,middle,ring,little"
+    assert row.hand_orientation == "back"
+    assert row.ring_face_visibility == "高"
+    assert row.finger_separation == "高"
+    assert row.finger_occlusion_risk == "低"
 
 
 def test_legacy_workbook_keeps_generic_fields_empty_instead_of_inferring_necklace(tmp_path):
@@ -207,6 +225,8 @@ def test_legacy_workbook_keeps_generic_fields_empty_instead_of_inferring_necklac
     assert row.applicable_product_types == ""
     assert row.applicable_display_modes == ""
     assert row.neck_visibility == ""
+    assert row.hand_side == ""
+    assert row.visible_fingers == ""
 
 
 def test_legacy_reference_row_positional_arguments_remain_compatible(tmp_path):
@@ -358,6 +378,12 @@ def test_reference_row_reads_multi_category_fields(tmp_path):
             "镜面关系": "镜中自拍",
             "原有首饰类型": "细项链",
             "裁切风险": "低",
+            "左右手": "left",
+            "可见手指": "index,middle,ring,little",
+            "手部朝向": "back",
+            "戒面可见度": "高",
+            "手指分离度": "中",
+            "手指遮挡风险": "低",
             "文件存在": True,
         }
     )
@@ -370,11 +396,19 @@ def test_reference_row_reads_multi_category_fields(tmp_path):
     assert row.pose_keywords == "正面站立"
     assert row.mirror_relation == "镜中自拍"
     assert row.existing_jewelry == "细项链"
+    assert row.hand_side == "left"
+    assert row.visible_fingers == "index,middle,ring,little"
+    assert row.hand_orientation == "back"
+    assert row.ring_face_visibility == "高"
+    assert row.finger_separation == "中"
+    assert row.finger_occlusion_risk == "低"
     assert "颈部" in row.combined_text()
     metadata = row.metadata_dict()
     assert metadata["适用产品类型"] == "普通项链,带链吊坠"
     assert metadata["姿势关键词"] == "正面站立"
     assert metadata["镜面关系"] == "镜中自拍"
+    assert metadata["左右手"] == "left"
+    assert metadata["可见手指"] == "index,middle,ring,little"
 
 
 def test_reference_row_accepts_existing_applicable_category_header(tmp_path):
