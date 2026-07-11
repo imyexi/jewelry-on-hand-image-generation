@@ -5,6 +5,7 @@ import pytest
 
 from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
 from jewelry_on_hand.models import (
+    ProductConfirmationSnapshot,
     ProductFidelityConstraints,
     ProductAnalysis,
     ProductDimensions,
@@ -66,6 +67,25 @@ def _constraints_data(**overrides):
         "needs_user_review": True,
         "detail_crop_recommended": True,
         "review_status": "pending",
+    }
+    data.update(overrides)
+    return data
+
+
+def _confirmation_snapshot(**overrides):
+    data = {
+        "confirmed_product_type": "pendant_necklace",
+        "source_image_type": "worn_source",
+        "display_mode": "worn",
+        "layer_count": 2,
+        "length_category": "collarbone",
+        "has_pendant": True,
+        "pendant_count": 1,
+        "pendant_layer": 2,
+        "pendant_position": "front_center",
+        "pendant_orientation": "front_facing",
+        "connection_structure": "metal_bail",
+        "is_independent_multi_item": False,
     }
     data.update(overrides)
     return data
@@ -481,6 +501,42 @@ def test_review_decision_generate_rank_1_defaults_only_for_missing_or_empty_list
     for invalid in (0, False, ""):
         with pytest.raises(ValueError, match="selected_ranks"):
             ReviewDecision.from_dict({"action": "generate_rank_1", "selected_ranks": invalid, "fidelity_confirmed": True})
+
+
+def test_product_confirmation_snapshot_roundtrip_uses_typed_enums():
+    snapshot = ProductConfirmationSnapshot.from_dict(_confirmation_snapshot())
+
+    assert snapshot.confirmed_product_type is ProductType.PENDANT_NECKLACE
+    assert snapshot.source_image_type is SourceImageType.WORN_SOURCE
+    assert snapshot.display_mode is DisplayMode.WORN
+    assert snapshot.to_dict() == _confirmation_snapshot()
+
+
+def test_product_confirmation_snapshot_rejects_each_missing_field():
+    for missing in _confirmation_snapshot():
+        payload = _confirmation_snapshot()
+        del payload[missing]
+
+        with pytest.raises(ValueError, match=missing):
+            ProductConfirmationSnapshot.from_dict(payload)
+
+
+def test_product_confirmation_snapshot_requires_json_integer_layer_count():
+    with pytest.raises(ValueError, match="layer_count.*JSON 整数"):
+        ProductConfirmationSnapshot.from_dict(_confirmation_snapshot(layer_count="2"))
+
+
+def test_review_decision_roundtrip_preserves_confirmation_snapshot():
+    decision = ReviewDecision.from_dict(
+        {
+            "action": "generate_rank_1",
+            "fidelity_confirmed": True,
+            "confirmation_snapshot": _confirmation_snapshot(),
+        }
+    )
+
+    assert isinstance(decision.confirmation_snapshot, ProductConfirmationSnapshot)
+    assert decision.confirmation_snapshot.to_dict() == _confirmation_snapshot()
 
 
 def test_review_decision_generate_rank_1_rejects_non_rank_1_selection():

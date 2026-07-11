@@ -1060,6 +1060,152 @@ class _FrozenList(list[int]):
 
 
 @dataclass(frozen=True)
+class ProductConfirmationSnapshot:
+    confirmed_product_type: ProductType | str
+    source_image_type: SourceImageType | str
+    display_mode: DisplayMode | str
+    layer_count: int
+    length_category: str | None
+    has_pendant: bool
+    pendant_count: int
+    pendant_layer: int | None
+    pendant_position: str | None
+    pendant_orientation: str | None
+    connection_structure: str | None
+    is_independent_multi_item: bool
+
+    def __post_init__(self) -> None:
+        product_type = normalize_product_type(self.confirmed_product_type)
+        is_explicit_unknown = (
+            self.confirmed_product_type is ProductType.UNKNOWN
+            or self.confirmed_product_type == ProductType.UNKNOWN.value
+        )
+        if product_type is ProductType.UNKNOWN and not is_explicit_unknown:
+            raise ValueError("confirmed_product_type 必须是规范品类")
+        object.__setattr__(self, "confirmed_product_type", product_type)
+        try:
+            object.__setattr__(self, "source_image_type", SourceImageType(self.source_image_type))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "source_image_type 必须是 worn_source/hand_held_source/flat_lay_source/unknown_source"
+            ) from exc
+        try:
+            object.__setattr__(self, "display_mode", DisplayMode(self.display_mode))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("display_mode 必须是 worn/hand_held") from exc
+
+        layer_count = _json_int(self.layer_count, "layer_count")
+        if layer_count is None or layer_count < 1:
+            raise ValueError("layer_count 必须是大于等于 1 的 JSON 整数")
+        pendant_count = _json_int(self.pendant_count, "pendant_count")
+        if pendant_count is None or pendant_count < 0:
+            raise ValueError("pendant_count 必须是大于等于 0 的 JSON 整数")
+        pendant_layer = _json_int(self.pendant_layer, "pendant_layer", allow_none=True)
+        if pendant_layer is not None and pendant_layer < 1:
+            raise ValueError("pendant_layer 必须大于等于 1 或为 null")
+        object.__setattr__(self, "layer_count", layer_count)
+        object.__setattr__(self, "pendant_count", pendant_count)
+        object.__setattr__(self, "pendant_layer", pendant_layer)
+        object.__setattr__(self, "has_pendant", _json_bool(self.has_pendant, "has_pendant"))
+        object.__setattr__(
+            self,
+            "is_independent_multi_item",
+            _json_bool(self.is_independent_multi_item, "is_independent_multi_item"),
+        )
+        for field_name in (
+            "length_category",
+            "pendant_position",
+            "pendant_orientation",
+            "connection_structure",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _optional_non_empty_string(getattr(self, field_name), field_name),
+            )
+
+        if product_type in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}:
+            if not 1 <= layer_count <= 3:
+                raise ValueError("项链产品只支持 1 至 3 层")
+            if self.is_independent_multi_item:
+                raise ValueError("当前版本不支持多件独立项链组合叠戴")
+            if (
+                self.length_category is not None
+                and self.length_category not in _NECKLACE_LENGTH_CATEGORIES
+            ):
+                raise ValueError(
+                    "项链确认快照的 length_category 必须是 choker、collarbone、upper_chest、long 或 null"
+                )
+        if product_type is ProductType.PENDANT_NECKLACE and (
+            not self.has_pendant or pendant_count < 1 or pendant_layer is None
+        ):
+            raise ValueError("带链吊坠确认快照必须包含完整吊坠结构")
+        if product_type is ProductType.NECKLACE and (
+            self.has_pendant or pendant_count != 0 or pendant_layer is not None
+        ):
+            raise ValueError("普通项链确认快照不得声明主吊坠")
+        if pendant_layer is not None and pendant_layer > layer_count:
+            raise ValueError("pendant_layer 不能大于 layer_count")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ProductConfirmationSnapshot":
+        source = _ensure_mapping(data, "ProductConfirmationSnapshot")
+        required_fields = (
+            "confirmed_product_type",
+            "source_image_type",
+            "display_mode",
+            "layer_count",
+            "length_category",
+            "has_pendant",
+            "pendant_count",
+            "pendant_layer",
+            "pendant_position",
+            "pendant_orientation",
+            "connection_structure",
+            "is_independent_multi_item",
+        )
+        missing = [field_name for field_name in required_fields if field_name not in source]
+        if missing:
+            raise ValueError("确认快照不完整，缺少字段：" + "、".join(missing))
+        return cls(**{field_name: source[field_name] for field_name in required_fields})
+
+    @classmethod
+    def from_analysis(cls, analysis: ProductAnalysis) -> "ProductConfirmationSnapshot":
+        if not isinstance(analysis, ProductAnalysis):
+            raise ValueError("analysis 必须是 ProductAnalysis")
+        return cls(
+            confirmed_product_type=analysis.confirmed_product_type,
+            source_image_type=analysis.source_image_type,
+            display_mode=analysis.display_mode,
+            layer_count=analysis.layer_count,
+            length_category=analysis.length_category,
+            has_pendant=analysis.has_pendant,
+            pendant_count=analysis.pendant_count,
+            pendant_layer=analysis.pendant_layer,
+            pendant_position=analysis.pendant_position,
+            pendant_orientation=analysis.pendant_orientation,
+            connection_structure=analysis.connection_structure,
+            is_independent_multi_item=analysis.is_independent_multi_item,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "confirmed_product_type": self.confirmed_product_type.value,
+            "source_image_type": self.source_image_type.value,
+            "display_mode": self.display_mode.value,
+            "layer_count": self.layer_count,
+            "length_category": self.length_category,
+            "has_pendant": self.has_pendant,
+            "pendant_count": self.pendant_count,
+            "pendant_layer": self.pendant_layer,
+            "pendant_position": self.pendant_position,
+            "pendant_orientation": self.pendant_orientation,
+            "connection_structure": self.connection_structure,
+            "is_independent_multi_item": self.is_independent_multi_item,
+        }
+
+
+@dataclass(frozen=True)
 class ReviewDecision:
     action: ReviewAction
     selected_ranks: list[int]
@@ -1067,6 +1213,7 @@ class ReviewDecision:
     fidelity_confirmed: bool = False
     fidelity_notes: str | None = None
     fidelity_constraints_path: str = "analysis/product_fidelity_constraints.json"
+    confirmation_snapshot: ProductConfirmationSnapshot | None = None
 
     def __post_init__(self) -> None:
         supported_actions = {
@@ -1115,6 +1262,12 @@ class ReviewDecision:
                 self.fidelity_constraints_path, "fidelity_constraints_path"
             ),
         )
+        snapshot = self.confirmation_snapshot
+        if isinstance(snapshot, dict):
+            snapshot = ProductConfirmationSnapshot.from_dict(snapshot)
+        elif snapshot is not None and not isinstance(snapshot, ProductConfirmationSnapshot):
+            raise ValueError("confirmation_snapshot 必须是产品确认快照或 null")
+        object.__setattr__(self, "confirmation_snapshot", snapshot)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ReviewDecision":
@@ -1165,6 +1318,11 @@ class ReviewDecision:
             source.get("fidelity_constraints_path"),
             "fidelity_constraints_path",
         ) or "analysis/product_fidelity_constraints.json"
+        confirmation_snapshot = (
+            ProductConfirmationSnapshot.from_dict(source["confirmation_snapshot"])
+            if source.get("confirmation_snapshot") is not None
+            else None
+        )
 
         return cls(
             action=action,  # type: ignore[arg-type]
@@ -1173,6 +1331,7 @@ class ReviewDecision:
             fidelity_confirmed=fidelity_confirmed,
             fidelity_notes=fidelity_notes,
             fidelity_constraints_path=fidelity_constraints_path,
+            confirmation_snapshot=confirmation_snapshot,
         )
 
     @staticmethod

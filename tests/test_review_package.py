@@ -6,7 +6,7 @@ import pytest
 
 from jewelry_on_hand.models import ReferenceRow, ScoredReference
 from jewelry_on_hand.review_package import write_review_package
-from jewelry_on_hand.run_paths import RunPaths, read_json
+from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
 def constraints_data(review_status="pending"):
@@ -48,6 +48,7 @@ def make_scored(
     reason: list[str] | None = None,
     risk: list[str] | None = None,
     ignored_reference_jewelry: list[str] | None = None,
+    reference_fields: dict[str, str] | None = None,
 ) -> ScoredReference:
     ref = tmp_path / file_name
     ref.write_bytes(b"ref")
@@ -69,6 +70,7 @@ def make_scored(
         "手腕露出",
         "高",
         True,
+        **(reference_fields or {}),
     )
     return ScoredReference(
         row,
@@ -184,6 +186,143 @@ def test_write_review_package_escapes_html_fields(tmp_path):
     assert "evil-&amp;-ref.jpg" in html
     assert "车内 &amp; 户外" in html
     assert "&quot;旧手链&quot;" in html
+
+
+def test_review_page_displays_and_escapes_product_confirmation_and_reference_risks(tmp_path):
+    paths = RunPaths.create(tmp_path, "run-1")
+    product = paths.input_dir / "product-on-hand.jpg"
+    product.write_bytes(b"product")
+    write_json(
+        paths.analysis_dir / "product_analysis.json",
+        {
+            "product_type": "带链吊坠",
+            "detected_product_type": "necklace",
+            "confirmed_product_type": "pendant_necklace",
+            "classification_confidence": "medium",
+            "classification_evidence": ["中央结构 <可能> 是主吊坠"],
+            "classification_source": "manual_override",
+            "display_mode": "worn",
+            "source_image_type": "worn_source",
+            "wear_position": "颈部和锁骨",
+            "visible_appearance": "双层珠链，第二层中央有吊坠",
+            "color_family": ["白色"],
+            "style_mood": "精致",
+            "composition": "胸前近景",
+            "product_dimensions": {},
+            "needs_full_front_display": True,
+            "special_requirements": [],
+            "layer_count": 2,
+            "length_category": "collarbone",
+            "chain_or_strand_type": "beaded",
+            "has_pendant": True,
+            "pendant_count": 1,
+            "pendant_layer": 2,
+            "pendant_position": "front_<center>",
+            "pendant_orientation": "front_facing",
+            "connection_structure": "metal_&bail",
+            "symmetry": "approximately_symmetric",
+            "occluded_parts": ["后颈 <扣头>"],
+            "uncertain_details": ["扣头 & 连接方式"],
+            "is_independent_multi_item": False,
+        },
+    )
+    selected = [
+        make_scored(
+            tmp_path,
+            reference_fields={
+                "applicable_product_types": "项链 & 带链吊坠",
+                "applicable_display_modes": "worn <优先>",
+                "framing": "胸部以上",
+                "visible_body_regions": "锁骨 / 胸前落点",
+                "product_visibility": "大于 35%",
+                "collar_type": "V 领",
+                "clothing_occlusion_risk": "衣领 <低风险>",
+                "hair_occlusion_risk": "长发 & 中风险",
+                "existing_jewelry": "原有项链",
+                "crop_risk": "吊坠可能被裁切",
+            },
+        )
+    ]
+
+    html = write_review_package(paths, product, selected, selected).read_text(encoding="utf-8")
+
+    for expected in (
+        "产品确认",
+        "自动识别品类",
+        "最终确认品类",
+        "分类置信度",
+        "分类证据",
+        "分类来源",
+        "输入图类型",
+        "展示模式",
+        "层数",
+        "长度等级",
+        "吊坠存在",
+        "吊坠数量",
+        "吊坠所属层",
+        "吊坠位置",
+        "吊坠朝向",
+        "吊坠连接",
+        "遮挡区域",
+        "不确定细节",
+        "支持状态",
+        "适用品类",
+        "适用展示模式",
+        "人物取景",
+        "目标落点/身体区域",
+        "预计展示面积",
+        "衣领类型",
+        "衣物遮挡风险",
+        "头发遮挡风险",
+        "裁切风险",
+        "原有首饰",
+        "入选理由",
+        "风险说明",
+    ):
+        assert expected in html
+    assert "中央结构 <可能> 是主吊坠" not in html
+    assert "中央结构 &lt;可能&gt; 是主吊坠" in html
+    assert "front_&lt;center&gt;" in html
+    assert "metal_&amp;bail" in html
+    assert "项链 &amp; 带链吊坠" in html
+    assert "worn &lt;优先&gt;" in html
+    assert "长发 &amp; 中风险" in html
+
+
+def test_review_page_shows_explicit_unsupported_reason(tmp_path):
+    paths = RunPaths.create(tmp_path, "run-1")
+    product = paths.input_dir / "product-on-hand.jpg"
+    product.write_bytes(b"product")
+    write_json(
+        paths.analysis_dir / "product_analysis.json",
+        {
+            "product_type": "无链独立吊坠",
+            "detected_product_type": "pendant_only",
+            "confirmed_product_type": "pendant_only",
+            "classification_confidence": "high",
+            "classification_evidence": ["未见链条"],
+            "classification_source": "auto_confirmed",
+            "display_mode": "worn",
+            "source_image_type": "worn_source",
+            "wear_position": "胸前",
+            "visible_appearance": "单个吊坠",
+            "color_family": ["金色"],
+            "style_mood": "简洁",
+            "composition": "胸前近景",
+            "product_dimensions": {},
+            "needs_full_front_display": True,
+            "layer_count": 1,
+            "has_pendant": True,
+            "pendant_count": 1,
+            "pendant_layer": None,
+            "is_independent_multi_item": False,
+        },
+    )
+    selected = [make_scored(tmp_path)]
+
+    html = write_review_package(paths, product, selected, selected).read_text(encoding="utf-8")
+
+    assert "当前版本不支持无链独立吊坠，且禁止自动补链" in html
 
 
 def test_write_review_package_url_encodes_image_src(tmp_path):
