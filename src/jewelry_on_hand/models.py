@@ -1354,6 +1354,74 @@ class ReviewDecision:
         return _FrozenList(ranks)
 
 
+QcCriticalFailure = Literal[
+    "must_keep_failed",
+    "category_mismatch",
+    "core_structure_missing",
+    "layer_count_mismatch",
+    "length_category_mismatch",
+    "pendant_layer_changed",
+    "multi_layer_restructured",
+    "auto_chain_added",
+    "source_person_region_migrated",
+    "severe_intersection",
+]
+
+_QC_CRITICAL_FAILURES = {
+    "must_keep_failed",
+    "category_mismatch",
+    "core_structure_missing",
+    "layer_count_mismatch",
+    "length_category_mismatch",
+    "pendant_layer_changed",
+    "multi_layer_restructured",
+    "auto_chain_added",
+    "source_person_region_migrated",
+    "severe_intersection",
+}
+
+_QC_REJECT_FAILURES = {
+    "category_mismatch",
+    "core_structure_missing",
+    "multi_layer_restructured",
+    "auto_chain_added",
+    "severe_intersection",
+}
+
+_QC_PASS_BLOCKING_FAILURE_TERMS = (
+    "must_keep",
+    "关键识别点失败",
+    "层数错误",
+    "层数不一致",
+    "长度等级错误",
+    "长度等级不一致",
+    "吊坠换层",
+    "产品图人物局部迁移",
+    "人物贴片",
+    "品类错误",
+    "品类不一致",
+    "核心结构缺失",
+    "核心配件缺失",
+    "多层关系重组",
+    "层间关系重组",
+    "自动补链",
+    "严重穿模",
+    "严重穿透",
+)
+
+_QC_REJECT_FAILURE_TERMS = (
+    "品类错误",
+    "品类不一致",
+    "核心结构缺失",
+    "核心配件缺失",
+    "多层关系重组",
+    "层间关系重组",
+    "自动补链",
+    "严重穿模",
+    "严重穿透",
+)
+
+
 @dataclass(frozen=True)
 class QcResult:
     status: Literal["pass", "rerun", "reject"]
@@ -1361,6 +1429,7 @@ class QcResult:
     failed: tuple[str, ...]
     notes: str
     fidelity_checks: tuple["FidelityCheck", ...] = field(default_factory=tuple)
+    critical_failures: tuple[QcCriticalFailure, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.status not in {"pass", "rerun", "reject"}:
@@ -1369,10 +1438,23 @@ class QcResult:
         object.__setattr__(self, "failed", _string_sequence(self.failed, "failed"))
         if not isinstance(self.notes, str):
             raise ValueError("notes 必须是字符串")
+        failure_text = " ".join(self.failed)
         checks = _parse_fidelity_checks(self.fidelity_checks)
         if self.status == "pass" and any(check.result != "pass" for check in checks):
             raise ValueError("must_keep 关键识别点失败时不得标记为 pass")
+        critical_failures = _parse_qc_critical_failures(self.critical_failures)
+        if self.status == "pass" and (
+            critical_failures
+            or _contains_any_text(failure_text, _QC_PASS_BLOCKING_FAILURE_TERMS)
+        ):
+            raise ValueError("存在关键 QC 失败时不得标记为 pass")
+        if self.status != "reject" and (
+            any(failure in _QC_REJECT_FAILURES for failure in critical_failures)
+            or _contains_any_text(failure_text, _QC_REJECT_FAILURE_TERMS)
+        ):
+            raise ValueError("品类、结构、自动补链或严重穿模错误必须标记为 reject")
         object.__setattr__(self, "fidelity_checks", checks)
+        object.__setattr__(self, "critical_failures", critical_failures)
 
 
 FidelityCheckResult = Literal["pass", "rerun", "fail"]
@@ -1428,3 +1510,26 @@ def _parse_fidelity_checks(value: Any) -> tuple[FidelityCheck, ...]:
         else:
             checks.append(FidelityCheck.from_dict(item))
     return tuple(checks)
+
+
+def _parse_qc_critical_failures(value: Any) -> tuple[QcCriticalFailure, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("critical_failures 必须是列表")
+    failures: list[QcCriticalFailure] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("critical_failures 只能包含非空字符串")
+        normalized = item.strip()
+        if normalized not in _QC_CRITICAL_FAILURES:
+            raise ValueError(f"critical_failures 包含未知错误代码：{normalized}")
+        if normalized in failures:
+            raise ValueError("critical_failures 不能包含重复错误代码")
+        failures.append(normalized)  # type: ignore[arg-type]
+    return tuple(failures)
+
+
+def _contains_any_text(text: str, terms: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(term.lower() in lowered for term in terms)

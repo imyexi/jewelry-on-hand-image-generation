@@ -738,6 +738,101 @@ def test_qc_result_accepts_fidelity_checks_for_rerun_and_copies_items():
     assert result.fidelity_checks[0].result == "fail"
 
 
+@pytest.mark.parametrize(
+    "critical_failure",
+    [
+        "must_keep_failed",
+        "layer_count_mismatch",
+        "length_category_mismatch",
+        "pendant_layer_changed",
+        "source_person_region_migrated",
+    ],
+)
+def test_qc_result_critical_failures_forbid_pass(critical_failure):
+    with pytest.raises(ValueError, match="不得标记为 pass"):
+        QcResult(
+            status="pass",
+            passed=["构图正确"],
+            failed=[],
+            notes="",
+            critical_failures=[critical_failure],
+        )
+
+
+@pytest.mark.parametrize(
+    "critical_failure",
+    [
+        "category_mismatch",
+        "core_structure_missing",
+        "multi_layer_restructured",
+        "auto_chain_added",
+        "severe_intersection",
+    ],
+)
+def test_qc_result_severe_failures_require_reject(critical_failure):
+    with pytest.raises(ValueError, match="必须标记为 reject"):
+        QcResult(
+            status="rerun",
+            passed=["构图正确"],
+            failed=["存在严重错误"],
+            notes="",
+            critical_failures=[critical_failure],
+        )
+
+
+@pytest.mark.parametrize("invalid", [True, 1, "auto_chain_added", [""]])
+def test_qc_result_rejects_invalid_critical_failure_types(invalid):
+    with pytest.raises(ValueError, match="critical_failures"):
+        QcResult(
+            status="reject",
+            passed=["构图正确"],
+            failed=["自动补链"],
+            notes="",
+            critical_failures=invalid,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_text",
+    [
+        "must_keep 关键识别点失败",
+        "项链层数错误",
+        "长度等级错误",
+        "吊坠换层",
+        "检测到自动补链",
+        "产品图人物局部迁移",
+    ],
+)
+def test_qc_result_human_failure_text_forbids_pass(failure_text):
+    with pytest.raises(ValueError, match="不得标记为 pass"):
+        QcResult(
+            status="pass",
+            passed=["构图正确"],
+            failed=[failure_text],
+            notes="",
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_text",
+    [
+        "品类错误",
+        "核心结构缺失",
+        "多层关系重组",
+        "检测到自动补链",
+        "链条严重穿模",
+    ],
+)
+def test_qc_result_severe_human_failure_text_requires_reject(failure_text):
+    with pytest.raises(ValueError, match="必须标记为 reject"):
+        QcResult(
+            status="rerun",
+            passed=["构图正确"],
+            failed=[failure_text],
+            notes="",
+        )
+
+
 def test_legacy_bracelet_json_gets_normalized_defaults():
     analysis = ProductAnalysis.from_dict(_analysis_data())
 

@@ -1,6 +1,9 @@
 import pytest
 
-from jewelry_on_hand.qc import write_qc_result
+from jewelry_on_hand.display_modes import DisplayMode
+from jewelry_on_hand.models import MustKeepConstraint
+from jewelry_on_hand.product_types import ProductType
+from jewelry_on_hand.qc import build_qc_checklist, write_qc_result
 from jewelry_on_hand.run_paths import read_json
 
 
@@ -127,3 +130,82 @@ def test_write_qc_result_rejects_pass_when_fidelity_check_failed(tmp_path):
                 }
             ],
         )
+
+
+def test_build_qc_checklist_includes_policy_worn_necklace_and_must_keep_items():
+    must_keep = MustKeepConstraint(
+        name="主吊坠",
+        source_text="第二层中央水滴吊坠",
+        normalized_keyword="水滴吊坠",
+        location="第二层中央",
+        visual_shape="水滴形",
+        relationship="连接第二层链条",
+        forbid=("不得换层",),
+        qc_question="主吊坠是否仍位于第二层中央并保持水滴形？",
+    )
+
+    items = build_qc_checklist(
+        ProductType.PENDANT_NECKLACE,
+        DisplayMode.WORN,
+        (must_keep,),
+    )
+
+    assert "项链层数、顺序和相对落差正确" in items
+    assert "层数、上下顺序、长度等级和层间落差与产品图一致" in items
+    assert "吊坠所属层、位置、朝向和连接关系与产品图一致" in items
+    assert "链条没有穿肤、穿衣、穿发、悬空或陷入身体" in items
+    assert "多层链没有错误交叉、合并或复制" in items
+    assert "没有迁移产品图中的颈部、胸部、衣服、头发或皮肤块" in items
+    assert must_keep.qc_question in items
+
+
+def test_build_qc_checklist_includes_hand_held_necklace_checks():
+    items = build_qc_checklist(
+        ProductType.NECKLACE,
+        DisplayMode.HAND_HELD,
+    )
+
+    assert "产品结构完整且关键结构可辨认" in items
+    assert "手部与链条接触真实，链条自然垂落" in items
+    assert "手指没有穿透链条或吊坠" in items
+    assert "吊坠和关键结构没有被不合理遮挡" in items
+    assert "产品比例合理，没有因近景明显放大或缩小" in items
+    assert "没有虚构佩戴链路、自动补链或补充不存在的结构" in items
+
+
+@pytest.mark.parametrize(
+    "critical_failure",
+    [
+        "layer_count_mismatch",
+        "length_category_mismatch",
+        "pendant_layer_changed",
+        "auto_chain_added",
+        "source_person_region_migrated",
+    ],
+)
+def test_write_qc_result_rejects_pass_when_critical_check_failed(
+    tmp_path,
+    critical_failure,
+):
+    with pytest.raises(ValueError, match="不得标记为 pass"):
+        write_qc_result(
+            tmp_path,
+            "pass",
+            ["构图正确"],
+            [],
+            "",
+            critical_failures=[critical_failure],
+        )
+
+
+def test_write_qc_result_persists_critical_failures_for_reject(tmp_path):
+    path = write_qc_result(
+        tmp_path,
+        "reject",
+        ["无水印"],
+        ["检测到自动补链"],
+        "返回产品分析阶段",
+        critical_failures=["auto_chain_added"],
+    )
+
+    assert read_json(path)["critical_failures"] == ["auto_chain_added"]

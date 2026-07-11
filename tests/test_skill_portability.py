@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_SKILL = PROJECT_ROOT / "skills" / "jewelry-on-hand-workflow"
 INSTALLER = PROJECT_ROOT / "scripts" / "install_codex_skills.py"
 ARTIFACT_INSPECTOR = WORKFLOW_SKILL / "scripts" / "inspect_run_artifacts.py"
+QC_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_qc_record.py"
 
 
 def test_workflow_skill_is_versioned_with_project_and_has_no_local_absolute_paths() -> None:
@@ -205,6 +206,67 @@ def test_artifact_inspector_rejects_invalid_modern_contract(
     errors = _inspect_run(run_root)
 
     assert any(message in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("passed", [True], "passed 只能包含非空字符串"),
+        ("failed", [1], "failed 只能包含非空字符串"),
+        ("critical_failures", True, "critical_failures 必须是列表"),
+        ("critical_failures", [], "critical_failures 不能为空列表"),
+    ],
+)
+def test_qc_validator_strictly_validates_json_types(tmp_path, field, value, message):
+    qc_path = tmp_path / "qc.json"
+    data = {
+        "status": "reject",
+        "passed": ["无水印"],
+        "failed": ["自动补链"],
+        "notes": "拒绝",
+        "critical_failures": ["auto_chain_added"],
+    }
+    data[field] = value
+    _write_json(qc_path, data)
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert any(message in error for error in errors), errors
+
+
+def test_qc_validator_forbids_pass_with_critical_failure(tmp_path):
+    qc_path = tmp_path / "qc.json"
+    _write_json(
+        qc_path,
+        {
+            "status": "pass",
+            "passed": ["层数正确"],
+            "failed": [],
+            "notes": "通过",
+            "critical_failures": ["layer_count_mismatch"],
+        },
+    )
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert any("严重错误" in error and "pass" in error for error in errors), errors
+
+
+def test_qc_validator_requires_reject_for_severe_failed_text(tmp_path):
+    qc_path = tmp_path / "qc.json"
+    _write_json(
+        qc_path,
+        {
+            "status": "rerun",
+            "passed": ["没有迁移产品图中的人物局部"],
+            "failed": ["检测到自动补链"],
+            "notes": "需要处理",
+        },
+    )
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert any("必须标记为 reject" in error for error in errors), errors
 
 
 def _inspect_run(run_root: Path) -> list[str]:
