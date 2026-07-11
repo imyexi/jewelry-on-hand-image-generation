@@ -21,7 +21,9 @@ from jewelry_on_hand.product_types import ProductType, normalize_product_type
         ("pendant necklace", ProductType.PENDANT_NECKLACE),
         ("无链独立吊坠", ProductType.PENDANT_ONLY),
         ("pendant only", ProductType.PENDANT_ONLY),
-        ("戒指", ProductType.UNKNOWN),
+        ("戒指", ProductType.RING),
+        ("指环", ProductType.RING),
+        ("ring", ProductType.RING),
     ],
 )
 def test_normalize_product_type(raw, expected):
@@ -45,6 +47,8 @@ def test_ambiguous_free_text_is_not_silently_guessed():
         "可能是项链",
         "项链或戒指",
         "项链和戒指组合",
+        "疑似戒指",
+        "这是戒指吗？",
         "项链和耳钉",
         "项链搭配耳钉",
         "项链和其他饰品",

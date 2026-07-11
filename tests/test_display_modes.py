@@ -13,6 +13,10 @@ def test_necklace_defaults_to_worn():
     assert default_display_mode(ProductType.NECKLACE) is DisplayMode.WORN
 
 
+def test_ring_defaults_to_worn():
+    assert default_display_mode(ProductType.RING) is DisplayMode.WORN
+
+
 @pytest.mark.parametrize(
     ("product_type", "message"),
     [
@@ -89,6 +93,26 @@ def test_bracelet_hand_held_mode_does_not_expand_the_existing_boundary():
             ProductType.BRACELET,
             DisplayMode.HAND_HELD,
             SourceImageType.WORN_SOURCE,
+        )
+
+
+def test_ring_supports_only_worn_from_worn_source():
+    validate_product_mode(
+        ProductType.RING,
+        DisplayMode.WORN,
+        SourceImageType.WORN_SOURCE,
+    )
+    with pytest.raises(ValueError, match="戒指.*手持展示"):
+        validate_product_mode(
+            ProductType.RING,
+            DisplayMode.HAND_HELD,
+            SourceImageType.WORN_SOURCE,
+        )
+    with pytest.raises(ValueError, match="白底或平铺"):
+        validate_product_mode(
+            ProductType.RING,
+            DisplayMode.WORN,
+            SourceImageType.FLAT_LAY_SOURCE,
         )
 
 

@@ -19,6 +19,7 @@ class SourceImageType(str, Enum):
 
 _SUPPORTED_MODES = {
     ProductType.BRACELET: frozenset({DisplayMode.WORN}),
+    ProductType.RING: frozenset({DisplayMode.WORN}),
     ProductType.NECKLACE: frozenset({DisplayMode.WORN, DisplayMode.HAND_HELD}),
     ProductType.PENDANT_NECKLACE: frozenset(
         {DisplayMode.WORN, DisplayMode.HAND_HELD}

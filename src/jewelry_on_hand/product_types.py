@@ -20,7 +20,6 @@ _UNCERTAIN_TEXT_MARKERS = (
 )
 
 _UNSUPPORTED_CATEGORY_TERMS = (
-    "戒指",
     "耳钉",
     "耳环",
     "耳饰",
@@ -37,6 +36,7 @@ _UNSUPPORTED_CATEGORY_TERMS = (
 
 class ProductType(str, Enum):
     BRACELET = "bracelet"
+    RING = "ring"
     NECKLACE = "necklace"
     PENDANT_NECKLACE = "pendant_necklace"
     PENDANT_ONLY = "pendant_only"
@@ -46,6 +46,7 @@ class ProductType(str, Enum):
     def display_name(self) -> str:
         return {
             ProductType.BRACELET: "手串/手链",
+            ProductType.RING: "戒指",
             ProductType.NECKLACE: "普通项链",
             ProductType.PENDANT_NECKLACE: "带链吊坠",
             ProductType.PENDANT_ONLY: "无链独立吊坠",
@@ -55,6 +56,7 @@ class ProductType(str, Enum):
 
 _ENGLISH_EXACT_ALIASES = {
     "bracelet": ProductType.BRACELET,
+    "ring": ProductType.RING,
     "necklace": ProductType.NECKLACE,
     "pendant necklace": ProductType.PENDANT_NECKLACE,
     "pendant only": ProductType.PENDANT_ONLY,
@@ -91,6 +93,7 @@ def normalize_product_type(value: str | ProductType | None) -> ProductType:
             ("带链吊坠", "吊坠项链", "项链吊坠"),
         ),
         (ProductType.BRACELET, ("手链", "手串", "手镯")),
+        (ProductType.RING, ("戒指", "指环")),
         (ProductType.NECKLACE, ("普通项链", "项链", "珠链")),
     )
     for product_type, terms in category_terms:
