@@ -1,9 +1,11 @@
 from jewelry_on_hand.category_policies.base import (
     CategoryPolicy,
+    ControlledLevel,
     ReferenceAdaptation,
     SHARED_BASIC_QC_ITEMS,
     contains_any,
     contains_unnegated_any,
+    parse_confidence_level,
 )
 from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow
@@ -69,17 +71,16 @@ def _evaluate_bracelet_reference(
 
 
 def _selection_tier(row: ReferenceRow) -> int | None:
-    high_confidence = "高" in row.confidence
-    medium_confidence = "中" in row.confidence
+    confidence = parse_confidence_level(row.confidence)
     priority = _is_priority_strategy(row.default_strategy)
     relaxed = contains_any(
         row.default_strategy, ("无特殊要求不优先使用", "无特殊要求不优先")
     )
-    if high_confidence and priority:
+    if confidence is ControlledLevel.HIGH and priority:
         return 0
-    if medium_confidence and priority:
+    if confidence is ControlledLevel.MEDIUM and priority:
         return 1
-    if (high_confidence or medium_confidence) and relaxed:
+    if confidence in {ControlledLevel.HIGH, ControlledLevel.MEDIUM} and relaxed:
         return 2
     return None
 

@@ -5,8 +5,10 @@ from collections.abc import Iterable, Sequence
 
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.category_policies.base import (
+    ControlledLevel,
     contains_any as _contains_any,
     contains_unnegated_any as _contains_unnegated_any,
+    parse_confidence_level,
 )
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
 
@@ -106,7 +108,7 @@ def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredRefere
         score += PRIORITY_STRATEGY_POINTS
         reason.append("默认策略为优先使用")
 
-    if "高" in row.confidence:
+    if parse_confidence_level(row.confidence) is ControlledLevel.HIGH:
         score += HIGH_CONFIDENCE_POINTS
         reason.append("判断置信度高")
 

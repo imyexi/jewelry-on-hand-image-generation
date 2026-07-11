@@ -715,3 +715,117 @@ def test_hand_held_diversity_penalizes_repeated_holding_method():
     selected, _ = select_top_references(necklace_product(display_mode="hand_held"), rows)
 
     assert [item.row.index for item in selected[:2]] == [211, 213]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_risk"),
+    [
+        ({"product_visibility": "不清晰"}, "展示面积"),
+        (
+            {"visible_body_regions": "不含颈部、锁骨或胸前，仅手腕"},
+            "颈部、锁骨或胸前空间",
+        ),
+        (
+            {"visible_body_regions": "颈部不可见，仅手腕"},
+            "颈部、锁骨或胸前空间",
+        ),
+    ],
+)
+def test_necklace_worn_negative_visibility_and_regions_override_bare_keywords(
+    overrides, expected_risk
+):
+    rejected = necklace_row(301, **overrides)
+
+    selected, candidates = select_top_references(necklace_product(), [rejected])
+    scored = score_reference(necklace_product(), rejected)
+
+    assert selected == []
+    assert candidates == []
+    assert any(expected_risk in risk for risk in scored.risk)
+
+
+def test_necklace_hand_visibility_rejects_negated_clear_signal():
+    rejected = necklace_row(
+        302,
+        applicable_display_modes="hand_held",
+        visible_body_regions="手指 掌心",
+        hand_visibility="不清晰",
+        recommended_usage="项链手持展示，链条自然垂落",
+        notes="手指与链条真实接触，完整链条无裁切",
+    )
+    product = necklace_product(display_mode="hand_held")
+
+    selected, candidates = select_top_references(product, [rejected])
+    scored = score_reference(product, rejected)
+
+    assert selected == []
+    assert candidates == []
+    assert any("手指、掌心或双手不可清晰辨识" in risk for risk in scored.risk)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("hair_occlusion_risk", "无严重遮挡"),
+        ("hair_occlusion_risk", "无明显遮挡"),
+        ("hair_occlusion_risk", "轻微遮挡"),
+        ("crop_risk", "不高"),
+        ("crop_risk", "无裁切"),
+        ("crop_risk", "中"),
+    ],
+)
+def test_necklace_risk_levels_honor_negation_before_risk_keywords(
+    field_name, value
+):
+    reference = necklace_row(303, **{field_name: value})
+
+    selected, candidates = select_top_references(necklace_product(), [reference])
+
+    assert [item.row.index for item in selected] == [303]
+    assert [item.row.index for item in candidates] == [303]
+
+
+@pytest.mark.parametrize(
+    "notes",
+    [
+        "手指与链条真实接触，链条自然垂落，但手部明显畸变",
+        "手指与链条真实接触，链条自然垂落，但手指严重遮挡吊坠",
+        "手指与链条真实接触，链条自然垂落，但手指严重遮挡关键结构",
+        "手指与链条真实接触，链条自然垂落，但画面空间不足",
+        "手指与链条真实接触，链条自然垂落，但链条下半段超出画面",
+        "手指与链条真实接触，链条自然垂落，但链条下半段被裁切",
+        "手指与链条真实接触，链条自然垂落，但链条不完整",
+    ],
+)
+def test_necklace_hand_held_severe_negative_signals_override_positive_drop(notes):
+    rejected = necklace_row(
+        304,
+        applicable_display_modes="hand_held",
+        visible_body_regions="手指 掌心",
+        hand_visibility="高",
+        recommended_usage="项链手持展示，链条可自然垂落",
+        notes=notes,
+        crop_risk="低",
+    )
+    product = necklace_product(display_mode="hand_held")
+
+    selected, candidates = select_top_references(product, [rejected])
+    scored = score_reference(product, rejected)
+
+    assert selected == []
+    assert candidates == []
+    assert any(
+        keyword in risk
+        for risk in scored.risk
+        for keyword in ("畸变", "遮挡", "空间不足", "超出画面", "裁切", "不完整")
+    )
+
+
+@pytest.mark.parametrize("confidence", ["不高", "中低"])
+def test_bracelet_confidence_rejects_negated_or_ambiguous_levels(confidence):
+    selected, candidates = select_top_references(
+        product(), [row(305, confidence=confidence)]
+    )
+
+    assert selected == []
+    assert candidates == []

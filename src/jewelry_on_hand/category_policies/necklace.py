@@ -2,10 +2,15 @@ import re
 
 from jewelry_on_hand.category_policies.base import (
     CategoryPolicy,
+    ControlledLevel,
     ReferenceAdaptation,
     SHARED_BASIC_QC_ITEMS,
+    contains_affirmed_any,
     contains_any,
     contains_unnegated_any,
+    parse_confidence_level,
+    parse_risk_level,
+    parse_visibility_level,
 )
 from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow
@@ -13,8 +18,6 @@ from jewelry_on_hand.product_types import ProductType
 
 
 _NECKLACE_TYPES = {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}
-_VISIBLE_VALUES = ("高", "中", "清晰", "完整", "充足")
-_HIGH_RISK_VALUES = ("高", "严重", "完全遮挡", "大面积遮挡")
 
 
 def _evaluate_necklace_reference(
@@ -39,17 +42,23 @@ def _evaluate_necklace_reference(
         elif not display_mode_matches:
             risks.append("参考图展示模式与目标项链不匹配")
 
+    product_visibility = parse_visibility_level(row.product_visibility)
     if not row.product_visibility.strip():
         risks.append("缺少产品预计展示面积标注")
-    elif not contains_any(row.product_visibility, _VISIBLE_VALUES):
+    elif product_visibility is None:
+        risks.append("产品预计展示面积标注无法识别")
+    elif product_visibility is ControlledLevel.LOW:
         risks.append("产品展示面积不足，无法清晰辨识项链")
     else:
         score += 15
         reasons.append("项链预计展示面积充足")
 
+    crop_risk = parse_risk_level(row.crop_risk)
     if not row.crop_risk.strip():
         risks.append("缺少项链裁切风险标注")
-    elif contains_any(row.crop_risk, _HIGH_RISK_VALUES):
+    elif crop_risk is None:
+        risks.append("项链裁切风险标注无法识别")
+    elif crop_risk is ControlledLevel.HIGH:
         risks.append("裁切风险过高，可能无法完整展示项链")
     else:
         score += 8
@@ -82,7 +91,9 @@ def _evaluate_worn_reference(
     body_text = row.visible_body_regions
     if not body_text.strip():
         risks.append("缺少项链佩戴所需的颈部、锁骨或胸前区域标注")
-    elif not contains_any(body_text, ("颈", "锁骨", "胸前", "胸口", "胸部")):
+    elif not contains_affirmed_any(
+        body_text, ("颈部", "颈", "锁骨", "胸前", "胸口", "胸部")
+    ):
         risks.append("颈部、锁骨或胸前空间不足，不能用于项链佩戴")
     else:
         score += 15
@@ -98,22 +109,26 @@ def _evaluate_worn_reference(
 
     if not row.collar_type.strip():
         risks.append("缺少衣领类型标注")
+    clothing_risk = parse_risk_level(row.clothing_occlusion_risk)
+    hair_risk = parse_risk_level(row.hair_occlusion_risk)
     if not row.clothing_occlusion_risk.strip():
         risks.append("缺少衣领或衣物遮挡风险标注")
-    elif contains_any(row.clothing_occlusion_risk, _HIGH_RISK_VALUES):
+    elif clothing_risk is None:
+        risks.append("衣领或衣物遮挡风险标注无法识别")
+    elif clothing_risk is ControlledLevel.HIGH:
         risks.append("衣领或衣物会严重遮挡项链落点")
     if not row.hair_occlusion_risk.strip():
         risks.append("缺少头发遮挡风险标注")
-    elif contains_any(row.hair_occlusion_risk, _HIGH_RISK_VALUES):
+    elif hair_risk is None:
+        risks.append("头发遮挡风险标注无法识别")
+    elif hair_risk is ControlledLevel.HIGH:
         risks.append("头发会大面积遮挡项链主要结构")
     if (
         row.collar_type.strip()
         and row.clothing_occlusion_risk.strip()
         and row.hair_occlusion_risk.strip()
-        and not contains_any(
-            f"{row.clothing_occlusion_risk} {row.hair_occlusion_risk}",
-            _HIGH_RISK_VALUES,
-        )
+        and clothing_risk in {ControlledLevel.LOW, ControlledLevel.MEDIUM}
+        and hair_risk in {ControlledLevel.LOW, ControlledLevel.MEDIUM}
     ):
         score += 10
         reasons.append("衣领和头发遮挡风险低")
@@ -121,7 +136,8 @@ def _evaluate_worn_reference(
     if product.layer_count > 1:
         vertical_text = f"{row.framing} {row.visible_body_regions} {row.notes} {row.pose_keywords}"
         has_vertical_space = (
-            contains_any(row.chest_visibility, _VISIBLE_VALUES)
+            parse_visibility_level(row.chest_visibility)
+            in {ControlledLevel.HIGH, ControlledLevel.MEDIUM}
             and contains_any(row.framing, ("胸", "半身", "上半身", "全身"))
             and contains_unnegated_any(
                 vertical_text, ("多层垂直空间", "层间落差", "多层空间", "垂直空间")
@@ -142,14 +158,21 @@ def _evaluate_hand_held_reference(
 ) -> int:
     score = 0
     body_text = row.visible_body_regions
-    wrist_only = contains_any(body_text, ("手腕", "前臂")) and not contains_any(
+    has_hand_region = contains_affirmed_any(
         body_text, ("手指", "掌心", "手掌", "双手")
+    )
+    wrist_only = (
+        contains_affirmed_any(body_text, ("手腕", "前臂"))
+        and not has_hand_region
     )
     if wrist_only:
         risks.append("仅腕部构图，不能用于项链手持展示")
-    elif not body_text.strip() or not contains_any(
-        body_text, ("手指", "掌心", "手掌", "双手")
-    ) or not contains_any(row.hand_visibility, _VISIBLE_VALUES):
+    elif (
+        not body_text.strip()
+        or not has_hand_region
+        or parse_visibility_level(row.hand_visibility)
+        not in {ControlledLevel.HIGH, ControlledLevel.MEDIUM}
+    ):
         risks.append("手指、掌心或双手不可清晰辨识")
     else:
         score += 15
@@ -171,11 +194,46 @@ def _evaluate_hand_held_reference(
         score += 12
         reasons.append("手部与项链接触关系真实")
 
-    if contains_any(row.crop_risk, _HIGH_RISK_VALUES) or contains_unnegated_any(
-        hand_text, ("关键结构严重遮挡", "吊坠严重遮挡", "链条严重遮挡")
-    ):
+    if parse_risk_level(row.crop_risk) is ControlledLevel.HIGH:
         risks.append("项链关键结构存在严重遮挡或裁切")
+    risks.extend(_hand_held_severe_risks(hand_text))
     return score
+
+
+def _hand_held_severe_risks(text: str) -> list[str]:
+    risks: list[str] = []
+    if contains_affirmed_any(
+        text, ("手部明显畸变", "手部严重畸变", "手指明显畸变", "手指严重畸变")
+    ):
+        risks.append("手部存在明显畸变，不能建立真实手持关系")
+    if contains_affirmed_any(
+        text,
+        (
+            "手指严重遮挡吊坠",
+            "手指严重遮挡关键结构",
+            "关键结构严重遮挡",
+            "吊坠严重遮挡",
+            "链条严重遮挡",
+        ),
+    ):
+        risks.append("手指严重遮挡吊坠或项链关键结构")
+    if contains_affirmed_any(
+        text, ("画面空间不足", "展示空间不足", "垂落空间不足")
+    ):
+        risks.append("画面空间不足，无法完整容纳项链")
+    if contains_affirmed_any(
+        text,
+        (
+            "链条下半段超出画面",
+            "链条超出画面",
+            "链条下半段被裁切",
+            "链条被裁切",
+            "链条下半段不完整",
+            "链条不完整",
+        ),
+    ):
+        risks.append("链条下半段超出画面、被裁切或不完整")
+    return risks
 
 
 def _matches_product_type(product_type: ProductType, row: ReferenceRow) -> bool:
@@ -215,13 +273,17 @@ def _framing_fits_length(product: ProductAnalysis, row: ReferenceRow) -> bool:
     if product.length_category in {"upper_chest", "long"}:
         return (
             contains_any(framing, ("胸", "半身", "上半身", "全身"))
-            and contains_any(row.chest_visibility, _VISIBLE_VALUES)
+            and parse_visibility_level(row.chest_visibility)
+            in {ControlledLevel.HIGH, ControlledLevel.MEDIUM}
             and not contains_any(framing, ("锁骨特写", "颈部特写"))
         )
     return contains_any(framing, ("颈", "锁骨", "胸", "半身", "上半身")) and (
-        contains_any(row.neck_visibility, _VISIBLE_VALUES)
-        or contains_any(row.collarbone_visibility, _VISIBLE_VALUES)
-        or contains_any(row.chest_visibility, _VISIBLE_VALUES)
+        parse_visibility_level(row.neck_visibility)
+        in {ControlledLevel.HIGH, ControlledLevel.MEDIUM}
+        or parse_visibility_level(row.collarbone_visibility)
+        in {ControlledLevel.HIGH, ControlledLevel.MEDIUM}
+        or parse_visibility_level(row.chest_visibility)
+        in {ControlledLevel.HIGH, ControlledLevel.MEDIUM}
     )
 
 
@@ -232,11 +294,12 @@ def _selection_tier(row: ReferenceRow, risks: list[str]) -> int | None:
     relaxed = contains_any(
         row.default_strategy, ("无特殊要求不优先使用", "无特殊要求不优先")
     )
-    if "高" in row.confidence and priority:
+    confidence = parse_confidence_level(row.confidence)
+    if confidence is ControlledLevel.HIGH and priority:
         return 0
-    if "中" in row.confidence and priority:
+    if confidence is ControlledLevel.MEDIUM and priority:
         return 1
-    if ("高" in row.confidence or "中" in row.confidence) and relaxed:
+    if confidence in {ControlledLevel.HIGH, ControlledLevel.MEDIUM} and relaxed:
         return 2
     risks.append("参考图基础质量或默认使用策略不满足要求")
     return None

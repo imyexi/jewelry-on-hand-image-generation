@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Callable
 
 from jewelry_on_hand.display_modes import DisplayMode
@@ -19,6 +20,48 @@ _NON_NEGATION_PREFIXES = ("非常", "不错", "不只是", "不仅", "不但", "
 _NEGATION_BOUNDARIES = " 　，,。；;：:\n\r\t"
 _NEGATION_CONTRAST_BOUNDARIES = ("但是", "不过", "然而", "但", "却")
 _NEGATION_CONNECTORS = ("或", "和", "及", "与", "/", "、")
+_CONTROLLED_NEGATIONS = (
+    "不含",
+    "不包括",
+    "未包含",
+    "没有",
+    "未见",
+    "不可见",
+    "看不到",
+    "无法",
+    "无",
+    "未",
+    "不",
+)
+_POSITIVE_VISIBILITY_QUALIFIERS = ("可见", "清晰", "完整", "露出")
+_NEGATIVE_VISIBILITY_QUALIFIERS = (
+    "不可见",
+    "未见",
+    "不清晰",
+    "不完整",
+    "没有露出",
+    "未露出",
+)
+_STRONG_CLAUSE_BOUNDARIES = (
+    "。",
+    "；",
+    ";",
+    "！",
+    "!",
+    "？",
+    "?",
+    "但是",
+    "不过",
+    "然而",
+    "但",
+    "却",
+)
+
+
+class ControlledLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 @dataclass(frozen=True)
@@ -54,6 +97,122 @@ def contains_unnegated_any(text: str, terms: Iterable[str]) -> bool:
                 return True
             start = index + len(lowered_term)
     return False
+
+
+def contains_affirmed_any(text: str, terms: Iterable[str]) -> bool:
+    lowered = text.lower()
+    term_list = sorted(set(terms), key=len, reverse=True)
+    for term in term_list:
+        lowered_term = term.lower()
+        start = 0
+        while True:
+            index = lowered.find(lowered_term, start)
+            if index == -1:
+                break
+            if any(
+                len(other) > len(term) and lowered.startswith(other.lower(), index)
+                for other in term_list
+            ):
+                start = index + len(lowered_term)
+                continue
+            prefix = _strong_clause_prefix(text, index)
+            suffix = text[index + len(term) : index + len(term) + 6]
+            explicitly_hidden = suffix.startswith(_NEGATIVE_VISIBILITY_QUALIFIERS)
+            explicitly_visible = contains_any(
+                suffix, _POSITIVE_VISIBILITY_QUALIFIERS
+            ) and not explicitly_hidden
+            if not explicitly_hidden and (
+                explicitly_visible or not contains_any(prefix, _CONTROLLED_NEGATIONS)
+            ):
+                return True
+            start = index + len(lowered_term)
+    return False
+
+
+def parse_visibility_level(text: str) -> ControlledLevel | None:
+    value = _compact_text(text)
+    if not value or contains_any(value, ("中低", "中高", "高中", "高低")):
+        return None
+    if contains_any(
+        value,
+        (
+            "不清晰",
+            "不完整",
+            "不明显",
+            "不可见",
+            "看不清",
+            "无法辨识",
+            "不足",
+            "缺失",
+            "过小",
+            "低",
+            "无",
+        ),
+    ):
+        return ControlledLevel.LOW
+    if contains_any(value, ("高", "清晰", "完整", "充足", "明显", "可见")):
+        return ControlledLevel.HIGH
+    if contains_any(value, ("中", "一般", "尚可", "部分", "有限")):
+        return ControlledLevel.MEDIUM
+    return None
+
+
+def parse_risk_level(text: str) -> ControlledLevel | None:
+    value = _compact_text(text)
+    if not value:
+        return None
+    if contains_affirmed_any(
+        value, ("大面积", "完全遮挡", "严重", "明显畸变", "高")
+    ):
+        return ControlledLevel.HIGH
+    if contains_any(
+        value,
+        (
+            "不高",
+            "无严重",
+            "无明显",
+            "没有明显",
+            "轻微",
+            "较低",
+            "低",
+            "无",
+            "没有",
+            "未见",
+        ),
+    ):
+        return ControlledLevel.LOW
+    if contains_any(value, ("中", "中等", "一般")):
+        return ControlledLevel.MEDIUM
+    return None
+
+
+def parse_confidence_level(text: str) -> ControlledLevel | None:
+    value = _compact_text(text)
+    if value in {"高", "高置信", "高置信度"}:
+        return ControlledLevel.HIGH
+    if value in {"中", "中置信", "中置信度"}:
+        return ControlledLevel.MEDIUM
+    if value in {"低", "低置信", "低置信度"}:
+        return ControlledLevel.LOW
+    return None
+
+
+def _compact_text(text: str) -> str:
+    return "".join(
+        character
+        for character in text.strip().lower()
+        if not character.isspace()
+    )
+
+
+def _strong_clause_prefix(text: str, term_start: int) -> str:
+    prefix = text[:term_start]
+    clause_start = 0
+    for boundary in _STRONG_CLAUSE_BOUNDARIES:
+        index = prefix.rfind(boundary)
+        if index >= clause_start:
+            clause_start = index + len(boundary)
+    return prefix[clause_start:]
 
 
 def _has_negation_prefix(text: str, term_start: int, terms: tuple[str, ...]) -> bool:
