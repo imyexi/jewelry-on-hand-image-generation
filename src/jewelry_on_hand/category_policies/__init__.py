@@ -5,11 +5,13 @@ from jewelry_on_hand.category_policies.necklace import (
     PENDANT_NECKLACE_POLICY,
 )
 from jewelry_on_hand.category_policies.pendant import PENDANT_ONLY_POLICY
+from jewelry_on_hand.category_policies.ring import RING_POLICY
 from jewelry_on_hand.product_types import ProductType
 
 
 _POLICIES = {
     ProductType.BRACELET: BRACELET_POLICY,
+    ProductType.RING: RING_POLICY,
     ProductType.NECKLACE: NECKLACE_POLICY,
     ProductType.PENDANT_NECKLACE: PENDANT_NECKLACE_POLICY,
     ProductType.PENDANT_ONLY: PENDANT_ONLY_POLICY,

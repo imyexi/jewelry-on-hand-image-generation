@@ -33,6 +33,34 @@ def necklace_product(display_mode="worn"):
     )
 
 
+def ring_product():
+    return ProductAnalysis.from_dict(
+        {
+            "product_type": "戒指",
+            "detected_product_type": "ring",
+            "confirmed_product_type": "ring",
+            "classification_confidence": "high",
+            "classification_evidence": ["单枚戒指佩戴在左手无名指根部"],
+            "classification_source": "model",
+            "wear_position": "左手无名指根部",
+            "visible_appearance": "单枚银色素圈戒",
+            "color_family": ["银色"],
+            "style_mood": "简洁",
+            "composition": "手部近景",
+            "product_dimensions": {},
+            "needs_full_front_display": True,
+            "special_requirements": [],
+            "source_image_type": "worn_source",
+            "display_mode": "worn",
+            "layer_count": 1,
+            "ring_count": 1,
+            "hand_side": "left",
+            "finger_position": "ring",
+            "ring_wear_style": "finger_base",
+        }
+    )
+
+
 def necklace_reference(**overrides):
     data = {
         "index": 1,
@@ -84,6 +112,34 @@ def test_necklace_policy_supports_worn_and_hand_held(product_type):
     assert policy.supported_modes == frozenset({DisplayMode.WORN, DisplayMode.HAND_HELD})
 
 
+def test_ring_policy_is_registered_and_worn_only():
+    policy = get_category_policy(ProductType.RING)
+
+    assert policy.product_type is ProductType.RING
+    assert policy.max_layer_count == 1
+    assert policy.supported_modes == frozenset({DisplayMode.WORN})
+
+
+def test_ring_policy_rejects_multi_item_flag():
+    with pytest.raises(ValueError, match="单枚戒指"):
+        get_category_policy(ProductType.RING).validate_generation(
+            layer_count=1,
+            is_independent_multi_item=True,
+        )
+
+
+def test_ring_policy_provides_prompt_and_qc_contract():
+    policy = get_category_policy(ProductType.RING)
+
+    fragments = policy.build_prompt_fragments(ring_product())
+    items = policy.qc_items_for_mode(DisplayMode.WORN)
+
+    assert "内部图1中的戒指必须移除" in fragments.image_one_role
+    assert "画面中只有一枚目标戒指" in items
+    assert "戒指位于确认后的左右手和目标手指根部" in items
+    assert "戒圈自然环绕手指" in " ".join(items)
+
+
 def test_pendant_only_policy_explains_current_block():
     policy = get_category_policy(ProductType.PENDANT_ONLY)
     with pytest.raises(ValueError, match="不支持无链独立吊坠"):
@@ -131,6 +187,7 @@ def test_pendant_necklace_policy_rejects_independent_multi_item_stacking():
     "product_type",
     [
         ProductType.BRACELET,
+        ProductType.RING,
         ProductType.NECKLACE,
         ProductType.PENDANT_NECKLACE,
         ProductType.PENDANT_ONLY,
@@ -148,6 +205,7 @@ def test_policy_exposes_category_name_and_basic_qc_items(product_type):
     "product_type",
     [
         ProductType.BRACELET,
+        ProductType.RING,
         ProductType.NECKLACE,
         ProductType.PENDANT_NECKLACE,
         ProductType.PENDANT_ONLY,
@@ -167,6 +225,7 @@ def test_pendant_only_policy_keeps_the_no_auto_chain_constraint():
     ("product_type", "display_mode"),
     [
         (ProductType.BRACELET, DisplayMode.WORN),
+        (ProductType.RING, DisplayMode.WORN),
         (ProductType.NECKLACE, DisplayMode.WORN),
         (ProductType.NECKLACE, DisplayMode.HAND_HELD),
         (ProductType.PENDANT_NECKLACE, DisplayMode.WORN),

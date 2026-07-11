@@ -321,6 +321,8 @@ class CategoryPolicy:
             and is_independent_multi_item
         ):
             raise ValueError("当前版本不支持多件独立项链组合叠戴")
+        if self.product_type is ProductType.RING and is_independent_multi_item:
+            raise ValueError("当前版本只支持单枚戒指，不支持多件独立组合")
 
     def evaluate_reference(
         self, product: "ProductAnalysis", row: "ReferenceRow"
