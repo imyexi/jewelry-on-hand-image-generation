@@ -366,6 +366,47 @@ def test_qc_validator_requires_complete_unique_must_keep_coverage(
     assert any(message in error for error in errors), errors
 
 
+@pytest.mark.parametrize("field", ["name", "question", "result", "notes"])
+@pytest.mark.parametrize("invalid_value", [["数组"], {"对象": True}, True, 1])
+def test_qc_validator_fidelity_checks_field_type_errors_do_not_crash(
+    tmp_path,
+    field,
+    invalid_value,
+):
+    run_root = tmp_path / "run"
+    qc_path = run_root / "generation" / "01" / "qc.json"
+    (run_root / "analysis").mkdir(parents=True)
+    qc_path.parent.mkdir(parents=True)
+    _write_json(
+        run_root / "analysis" / "product_fidelity_constraints.json",
+        _portable_constraints_with_must_keep(),
+    )
+    check = {
+        "name": "主吊坠",
+        "question": "主吊坠是否保持原连接？",
+        "result": "pass",
+        "notes": "",
+    }
+    check[field] = invalid_value
+    _write_json(
+        qc_path,
+        {
+            "status": "rerun",
+            "passed": ["没有迁移产品图中的人物局部"],
+            "failed": ["需要复核"],
+            "notes": "",
+            "fidelity_checks": [check],
+        },
+    )
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert any(
+        f"fidelity_checks[0].{field} 必须是字符串" in error
+        for error in errors
+    ), errors
+
+
 @pytest.mark.parametrize(
     ("second_name", "second_question"),
     [

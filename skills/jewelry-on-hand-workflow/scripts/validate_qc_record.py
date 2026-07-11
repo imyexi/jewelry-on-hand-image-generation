@@ -128,16 +128,20 @@ def _validate_fidelity_checks(
         if not isinstance(check, dict):
             errors.append(f"{label} 必须是 JSON 对象")
             continue
-        valid_checks.append(check)
+        fields_valid = True
         for key in ("name", "question", "result", "notes"):
             value = check.get(key)
             if not isinstance(value, str) or (key != "notes" and not value.strip()):
                 errors.append(f"{label}.{key} 必须是字符串" + ("" if key == "notes" else "且不能为空"))
+                fields_valid = False
         result = check.get("result")
         if isinstance(result, str) and result not in {"pass", "rerun", "fail"}:
             errors.append(f"{label}.result 必须是 pass/rerun/fail")
+            fields_valid = False
         if status == "pass" and result != "pass":
             errors.append("must_keep 关键识别点未通过时不得标记为 pass")
+        if fields_valid:
+            valid_checks.append(check)
     if expected_must_keep is not None:
         _validate_must_keep_coverage(valid_checks, expected_must_keep, errors)
 
