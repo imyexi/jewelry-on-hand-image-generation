@@ -21,6 +21,7 @@ WORKFLOW_SKILL = PROJECT_ROOT / "skills" / "jewelry-on-hand-workflow"
 INSTALLER = PROJECT_ROOT / "scripts" / "install_codex_skills.py"
 ARTIFACT_INSPECTOR = WORKFLOW_SKILL / "scripts" / "inspect_run_artifacts.py"
 QC_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_qc_record.py"
+PROMPT_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_prompt_contract.py"
 PROJECT_GUIDE = PROJECT_ROOT / "CLAUDE.md"
 MANUAL_WORKFLOW = PROJECT_ROOT / "reference" / "manual-workflow.md"
 FIDELITY_SCHEMA = PROJECT_ROOT / "reference" / "product-fidelity-constraints-schema.md"
@@ -285,6 +286,24 @@ def test_installer_copies_project_skills_to_requested_codex_home(tmp_path: Path)
     assert (installed / "SKILL.md").exists()
     assert (installed / "references" / "workflow.md").exists()
     assert (installed / "scripts" / "validate_prompt_contract.py").exists()
+
+
+def test_portable_prompt_contract_declares_complete_ring_support() -> None:
+    namespace = runpy.run_path(str(PROMPT_VALIDATOR))
+    rules = namespace["RING_LAYER_REQUIREMENTS"]
+
+    assert "ring" in namespace["ALLOWED_PRODUCT_CATEGORIES"]
+    assert "内部图2是戒指身份唯一来源" in rules["【两图职责】"]
+    assert "只生成一枚目标戒指" in rules["【品类保真】"]
+    assert "戒圈自然环绕手指" in rules["【遮挡与接触物理】"]
+    for document in (
+        PROJECT_ROOT / "reference" / "prompt-template.md",
+        WORKFLOW_SKILL / "references" / "prompt-contract.md",
+    ):
+        text = _document_text(document)
+        assert "ring" in text
+        assert "戒指身份唯一来源" in text
+        assert "不可见戒圈背面" in text
 
 
 def test_artifact_inspector_accepts_legacy_bracelet_and_modern_necklace_json(

@@ -81,6 +81,40 @@ def _necklace_product(
     return ProductAnalysis(**data)
 
 
+def _ring_product(**overrides):
+    data = {
+        "product_type": "戒指",
+        "wear_position": "左手无名指根部",
+        "visible_appearance": "单枚银色开口戒，正面有一颗圆形主石",
+        "color_family": ["银色", "透明"],
+        "style_mood": "自然简洁",
+        "composition": "手部近景",
+        "product_dimensions": ProductDimensions(dimension_source="产品图可见比例"),
+        "needs_full_front_display": True,
+        "special_requirements": ["保持开口和主石朝向"],
+        "detected_product_type": ProductType.RING,
+        "confirmed_product_type": ProductType.RING,
+        "classification_confidence": "high",
+        "classification_evidence": ["左手无名指根部可见单枚戒指"],
+        "classification_source": "人工确认",
+        "display_mode": DisplayMode.WORN,
+        "source_image_type": "worn_source",
+        "layer_count": 1,
+        "has_pendant": False,
+        "pendant_count": 0,
+        "pendant_layer": None,
+        "is_independent_multi_item": False,
+        "ring_count": 1,
+        "hand_side": "left",
+        "finger_position": "ring",
+        "ring_wear_style": "finger_base",
+        "occluded_parts": ["戒圈背面"],
+        "uncertain_details": ["镶嵌背面结构"],
+    }
+    data.update(overrides)
+    return ProductAnalysis(**data)
+
+
 def _row(**overrides):
     data = {
         "index": 1,
@@ -175,6 +209,46 @@ def test_prompt_includes_exact_fixed_sentence_dimensions_mirror_and_ignored_jewe
     assert "珠径约 10mm" in prompt
     assert "参考图中的原有戒指" in prompt
     assert MIRROR_INSTRUCTION in prompt
+
+
+def test_ring_prompt_contains_complete_identity_position_and_physics_contract():
+    prompt = build_prompt(
+        _ring_product(),
+        _scored(
+            _row(
+                jewelry_type="戒指",
+                recommended_usage="左手无名指佩戴",
+                applicable_product_types="ring",
+                applicable_display_modes="worn",
+            ),
+            ignored_reference_jewelry=["参考图中的戒指"],
+        ),
+    )
+
+    for required in (
+        "内部图1中的戒指必须移除且不提供产品身份",
+        "内部图2是戒指身份唯一来源",
+        "只生成一枚目标戒指",
+        "佩戴在已确认的左手无名指根部",
+        "戒圈自然环绕手指",
+        "戒圈背侧按真实遮挡隐藏",
+        "不得悬浮、贴片、嵌入皮肤或穿透手指",
+        "不得改变戒面、主石、镶嵌、戒圈和装饰排列",
+        "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图",
+        "不可见戒圈背面不得补写为确定结构",
+        "被遮挡部分（仅标记不可见边界，不得推断或补全）：戒圈背面",
+        "不确定细节（仅作为不确定边界，不得转写为确定性结构）：镶嵌背面结构",
+    ):
+        assert required in prompt
+
+
+def test_portable_prompt_validator_accepts_complete_ring_contract(tmp_path):
+    prompt = build_prompt(
+        _ring_product(),
+        _scored(_row(jewelry_type="戒指"), ignored_reference_jewelry=["参考图中的戒指"]),
+    )
+
+    assert _prompt_contract_errors(tmp_path, prompt) == []
 
 
 def test_prompt_contract_includes_required_sections_dynamic_fields_and_image_order():

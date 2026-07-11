@@ -124,7 +124,31 @@ HAND_HELD_NECKLACE_LAYER_REQUIREMENTS = {
     ),
 }
 
-ALLOWED_PRODUCT_CATEGORIES = {"bracelet", "necklace", "pendant_necklace"}
+RING_LAYER_REQUIREMENTS = {
+    "【两图职责】": (
+        "内部图1中的戒指必须移除且不提供产品身份",
+        "内部图2是戒指身份唯一来源",
+    ),
+    "【品类保真】": (
+        "只生成一枚目标戒指",
+        "不得改变戒面、主石、镶嵌、戒圈和装饰排列",
+    ),
+    "【展示模式】": (
+        "真人佩戴：戒指必须佩戴在已确认的",
+        "不得静默换手、换指或改成指关节/跨指佩戴",
+    ),
+    "【遮挡与接触物理】": (
+        "戒圈自然环绕手指",
+        "戒圈背侧按真实遮挡隐藏",
+        "不得悬浮、贴片、嵌入皮肤或穿透手指",
+    ),
+    "【禁止项】": (
+        "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图",
+        "不可见戒圈背面不得补写为确定结构",
+    ),
+}
+
+ALLOWED_PRODUCT_CATEGORIES = {"bracelet", "necklace", "pendant_necklace", "ring"}
 ALLOWED_DISPLAY_MODES = {"worn", "hand_held"}
 FORBIDDEN_FRAGMENTS = ("???", "锟", "�")
 
@@ -173,6 +197,8 @@ LAYER_OWNED_PREFIXES = {
         "吊坠连接：",
         "吊坠身份保持：",
         "不得凭空添加吊坠或吊坠连接结构",
+        "只生成一枚目标戒指",
+        "不得改变戒面、主石、镶嵌、戒圈和装饰排列",
     ),
     "【展示模式】": (
         "真人佩戴：",
@@ -180,6 +206,7 @@ LAYER_OWNED_PREFIXES = {
         "根据有限可见的颈围和姿势适配",
         "真实绕颈并受重力自然垂落",
         "产品必须完整且可识别",
+        "真人佩戴：戒指必须佩戴在已确认的",
     ),
     "【参考构图场景】": (
         "参考图文件：",
@@ -206,6 +233,8 @@ LAYER_OWNED_PREFIXES = {
         "手指不得穿透链条或吊坠",
         "禁止把颈部或衣服连同项链作为贴片",
         "不得迁移内部图2中的人物颈部",
+        "戒圈自然环绕手指",
+        "戒圈背侧按真实遮挡隐藏",
         "肤色、手势、景深、光线要自然真实",
         "产品必须清晰可见",
     ),
@@ -215,6 +244,8 @@ LAYER_OWNED_PREFIXES = {
         "禁止自动补链、补扣头或推断背面结构",
         "不得删除、缩短或重组链条",
         "不得将被遮挡部分或不确定细节改写成确定性补全指令",
+        "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图",
+        "不可见戒圈背面不得补写为确定结构",
         "禁止文字、水印、logo、平台标识",
     ),
 }
@@ -254,6 +285,19 @@ NECKLACE_EXCLUSIVE_PREFIXES = (
     "不得迁移内部图2中的人物颈部",
     "禁止自动补链、补扣头或推断背面结构",
     "不得删除、缩短或重组链条",
+)
+
+RING_EXCLUSIVE_PREFIXES = (
+    "内部图1：自动参考图，只提供手部姿势、手模、构图、光线和场景",
+    "内部图1中的戒指必须移除且不提供产品身份",
+    "内部图2是戒指身份唯一来源",
+    "只生成一枚目标戒指",
+    "不得改变戒面、主石、镶嵌、戒圈和装饰排列",
+    "真人佩戴：戒指必须佩戴在已确认的",
+    "戒圈自然环绕手指",
+    "戒圈背侧按真实遮挡隐藏",
+    "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图",
+    "不可见戒圈背面不得补写为确定结构",
 )
 
 
@@ -363,6 +407,13 @@ def _validate_category_and_mode(
         _require_layer_rules(sections, BRACELET_LAYER_REQUIREMENTS, errors)
         return
 
+    if category == "ring":
+        if display_mode != "worn":
+            errors.append("ring 只允许 worn 展示模式")
+            return
+        _require_layer_rules(sections, RING_LAYER_REQUIREMENTS, errors)
+        return
+
     _require_layer_rules(sections, NECKLACE_SHARED_LAYER_REQUIREMENTS, errors)
     category_rules = (
         PENDANT_NECKLACE_LAYER_REQUIREMENTS
@@ -413,11 +464,30 @@ def _validate_forbidden_category_fragments(
     errors: list[str],
 ) -> None:
     if category == "bracelet":
-        forbidden_prefixes = NECKLACE_EXCLUSIVE_PREFIXES
-        message = "bracelet 禁止出现项链专属片段"
+        forbidden_groups = (
+            (NECKLACE_EXCLUSIVE_PREFIXES, "bracelet 禁止出现项链专属片段"),
+            (RING_EXCLUSIVE_PREFIXES, "bracelet 禁止出现戒指专属片段"),
+        )
+    elif category == "ring":
+        forbidden_groups = (
+            (BRACELET_EXCLUSIVE_PREFIXES, "ring 禁止出现手串专属片段"),
+            (NECKLACE_EXCLUSIVE_PREFIXES, "ring 禁止出现项链专属片段"),
+        )
     else:
-        forbidden_prefixes = BRACELET_EXCLUSIVE_PREFIXES
-        message = f"{category} 禁止出现手串专属片段"
+        forbidden_groups = (
+            (BRACELET_EXCLUSIVE_PREFIXES, f"{category} 禁止出现手串专属片段"),
+            (RING_EXCLUSIVE_PREFIXES, f"{category} 禁止出现戒指专属片段"),
+        )
+    for forbidden_prefixes, message in forbidden_groups:
+        _append_forbidden_prefix_errors(sections, forbidden_prefixes, message, errors)
+
+
+def _append_forbidden_prefix_errors(
+    sections: dict[str, str],
+    forbidden_prefixes: tuple[str, ...],
+    message: str,
+    errors: list[str],
+) -> None:
     for content in sections.values():
         for line in _section_lines(content):
             for prefix in forbidden_prefixes:

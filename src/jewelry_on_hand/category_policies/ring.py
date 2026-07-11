@@ -21,6 +21,7 @@ from jewelry_on_hand.ring_attributes import FingerPosition, HandSide
 RING_IMAGE_ONE_ROLE = (
     "内部图1：自动参考图，只提供手部姿势、手模、构图、光线和场景；"
     "内部图1中的戒指必须移除且不提供产品身份。"
+    "内部图2是戒指身份唯一来源。"
 )
 
 RING_BASIC_QC_ITEMS = (
@@ -38,20 +39,21 @@ def _build_ring_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
     return PromptFragments(
         image_one_role=RING_IMAGE_ONE_ROLE,
         category_fidelity=(
-            "只生成一枚目标戒指；戒圈粗细、开口、戒面、主石、镶嵌、颜色、"
-            "朝向和装饰排列必须与内部图2肉眼可见结构一致。"
+            "只生成一枚目标戒指；不得改变戒面、主石、镶嵌、戒圈和装饰排列；"
+            "戒圈粗细、开口、颜色、朝向以及所有肉眼可见结构必须与内部图2一致。"
         ),
         display_mode=(
             f"真人佩戴：戒指必须佩戴在已确认的{hand_name}{finger_name}根部，"
             "不得静默换手、换指或改成指关节/跨指佩戴。"
         ),
         occlusion_physics=(
-            "戒圈必须自然环绕手指，前侧可见部分与背侧遮挡关系真实，并具有"
-            "合理接触和阴影；不得悬浮、贴片、嵌入皮肤或穿透手指。"
+            "戒圈自然环绕手指；戒圈背侧按真实遮挡隐藏，接触和阴影真实；"
+            "不得悬浮、贴片、嵌入皮肤或穿透手指。"
         ),
         prohibitions=(
-            "不得迁移内部图2中的手、皮肤、指甲、掌纹或背景局部；"
-            "不得把不可见戒圈背面或镶嵌背面补写成确定结构。"
+            "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图；"
+            "不得迁移内部图2中的背景局部。不可见戒圈背面不得补写为确定结构；"
+            "镶嵌背面和其他遮挡结构同样不得推断。"
         ),
     )
 
