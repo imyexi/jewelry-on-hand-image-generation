@@ -133,7 +133,12 @@ def _validate_fidelity_checks(
 
 
 def validate_qc(path: Path) -> list[str]:
-    data = _load_json(path)
+    try:
+        data = _load_json(path)
+    except json.JSONDecodeError:
+        return ["qc 文件不是有效 JSON，无法校验"]
+    except (OSError, UnicodeError):
+        return ["qc 文件无法按 UTF-8 文本读取"]
     errors: list[str] = []
     if not isinstance(data, dict):
         return ["qc 文件必须包含 JSON 对象"]

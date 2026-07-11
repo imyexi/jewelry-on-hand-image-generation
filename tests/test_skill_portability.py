@@ -269,6 +269,16 @@ def test_qc_validator_requires_reject_for_severe_failed_text(tmp_path):
     assert any("必须标记为 reject" in error for error in errors), errors
 
 
+def test_qc_validator_reports_broken_json_in_chinese(tmp_path):
+    qc_path = tmp_path / "qc.json"
+    qc_path.write_text('{"status":', encoding="utf-8")
+
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+
+    assert len(errors) == 1
+    assert "不是有效 JSON" in errors[0]
+
+
 def _inspect_run(run_root: Path) -> list[str]:
     namespace = runpy.run_path(str(ARTIFACT_INSPECTOR))
     return namespace["inspect_run"](run_root)

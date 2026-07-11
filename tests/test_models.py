@@ -820,6 +820,7 @@ def test_qc_result_human_failure_text_forbids_pass(failure_text):
         "核心结构缺失",
         "多层关系重组",
         "检测到自动补链",
+        "检测到凭空补链",
         "链条严重穿模",
     ],
 )
