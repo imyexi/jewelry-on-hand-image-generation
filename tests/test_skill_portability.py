@@ -17,6 +17,89 @@ WORKFLOW_SKILL = PROJECT_ROOT / "skills" / "jewelry-on-hand-workflow"
 INSTALLER = PROJECT_ROOT / "scripts" / "install_codex_skills.py"
 ARTIFACT_INSPECTOR = WORKFLOW_SKILL / "scripts" / "inspect_run_artifacts.py"
 QC_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_qc_record.py"
+PROJECT_GUIDE = PROJECT_ROOT / "CLAUDE.md"
+MANUAL_WORKFLOW = PROJECT_ROOT / "reference" / "manual-workflow.md"
+FIDELITY_SCHEMA = PROJECT_ROOT / "reference" / "product-fidelity-constraints-schema.md"
+PORTABLE_WORKFLOW = WORKFLOW_SKILL / "references" / "workflow.md"
+TROUBLESHOOTING = WORKFLOW_SKILL / "references" / "troubleshooting.md"
+
+
+def _document_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
+@pytest.mark.parametrize(
+    "document",
+    [PROJECT_GUIDE, MANUAL_WORKFLOW, WORKFLOW_SKILL / "SKILL.md", PORTABLE_WORKFLOW],
+)
+def test_current_workflow_documents_describe_multi_category_generation_boundary(
+    document: Path,
+) -> None:
+    text = _document_text(document)
+
+    for product_type in (
+        "bracelet",
+        "necklace",
+        "pendant_necklace",
+        "pendant_only",
+        "unknown",
+    ):
+        assert product_type in text, f"{document} 缺少品类边界 {product_type}"
+    for display_mode in ("worn", "hand_held"):
+        assert display_mode in text, f"{document} 缺少展示模式 {display_mode}"
+    assert "worn_source" in text
+    assert "1 至 3 层" in text
+    assert "多件独立" in text
+    assert "自动补链" in text
+    assert "不可见" in text and "推断" in text
+
+
+@pytest.mark.parametrize("document", [MANUAL_WORKFLOW, PORTABLE_WORKFLOW])
+def test_operator_workflows_lock_cli_stages_reference_sources_and_canonical_gate(
+    document: Path,
+) -> None:
+    text = _document_text(document)
+
+    for command in ("prepare-review", "record-decision", "generate", "qc"):
+        assert command in text, f"{document} 缺少 CLI 阶段 {command}"
+    assert "--classification" in text
+    assert "显式" in text and "优先" in text
+    assert "飞书" in text
+    assert "--fidelity-constraints-path" in text
+    assert "导入源" in text
+    assert "analysis/product_fidelity_constraints.json" in text
+    assert "非标准" in text and "拒绝" in text
+    assert "完整产品确认快照" in text
+    assert "fidelity_confirmed" in text
+
+
+@pytest.mark.parametrize(
+    "document",
+    [MANUAL_WORKFLOW, PORTABLE_WORKFLOW, TROUBLESHOOTING],
+)
+def test_operator_documents_explain_strict_qc_and_legacy_boundary(document: Path) -> None:
+    text = _document_text(document)
+
+    assert "fidelity_checks" in text
+    assert "must_keep" in text
+    assert "完全一致" in text
+    assert "critical_failures" in text
+    assert "严重错误" in text and "reject" in text
+    assert "历史手串" in text
+    assert "显式非法" in text
+    assert "中文" in text
+
+
+def test_fidelity_schema_explains_canonical_record_decision_contract() -> None:
+    text = _document_text(FIDELITY_SCHEMA)
+
+    assert "--fidelity-constraints-path" in text
+    assert "导入源" in text
+    assert "analysis/product_fidelity_constraints.json" in text
+    assert "canonical" in text
+    assert "record-decision" in text
+    assert "generate" in text
+    assert "非标准" in text and "拒绝" in text
 
 
 def test_workflow_skill_is_versioned_with_project_and_has_no_local_absolute_paths() -> None:
