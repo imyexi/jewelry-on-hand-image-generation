@@ -12,6 +12,7 @@ from jewelry_on_hand.models import (
     ScoredReference,
 )
 from jewelry_on_hand.product_types import ProductType
+from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
 from jewelry_on_hand.prompt_builder import (
     PRODUCT_ISOLATION_SENTENCE,
     WRIST_SOURCE_SENTENCE,
@@ -413,6 +414,21 @@ def test_prompt_includes_product_fidelity_constraints_sections():
     assert "改成圆珠" in prompt
     assert "产品整体禁止变化" in prompt
     assert "珠子排列顺序" in prompt
+
+
+def test_prompt_renders_detailed_running_ring_constraint(tmp_path):
+    product = _product(
+        visible_appearance="黄色主珠旁套接一个红色小珠跑环",
+        special_requirements=["保持跑环套接黄色主珠的关系"],
+    )
+    constraints = build_product_fidelity_constraints(product)
+
+    prompt = build_prompt(product, _scored(_row()), constraints)
+
+    assert "多颗小珠串成的独立闭合小环" in prompt
+    assert "保持产品图中的环绕、套接或连接对象" in prompt
+    assert "并入手串主串" in prompt
+    assert _prompt_contract_errors(tmp_path, prompt) == []
 
 
 def test_prompt_includes_no_extra_keypoint_text_when_must_keep_empty():

@@ -176,6 +176,42 @@ def test_build_default_fidelity_constraints_detects_keyword_from_visible_appeara
     assert constraints.source["product_id"] == "JH016"
 
 
+def test_running_ring_constraint_is_a_closed_independent_small_bead_loop():
+    analysis = ProductAnalysis.from_dict(
+        _analysis_data("手链/手串")
+        | {
+            "visible_appearance": "黄色主珠旁套接一个红色小珠跑环。",
+            "special_requirements": ["保持跑环套接黄色主珠的关系"],
+        }
+    )
+
+    constraints = build_product_fidelity_constraints(analysis)
+    running_ring = next(
+        item for item in constraints.must_keep if item.normalized_keyword == "跑环"
+    )
+
+    assert "多颗小珠" in running_ring.visual_shape
+    assert "独立闭合小环" in running_ring.visual_shape
+    assert "环绕、套接或连接对象" in running_ring.relationship
+    assert "并入手串主串" in running_ring.forbid
+    assert "改成绳结或普通珠结" in running_ring.forbid
+    assert "改成单个金属环、金属片或连接扣" in running_ring.forbid
+    assert "改成流苏或链坠" in running_ring.forbid
+    assert "多颗小珠" in running_ring.qc_question
+    assert "连接对象" in running_ring.qc_question
+
+
+@pytest.mark.parametrize("text", ["红色小珠结", "普通珠结", "金色连接环"])
+def test_knot_or_metal_ring_text_does_not_trigger_running_ring(text):
+    analysis = ProductAnalysis.from_dict(
+        _analysis_data("手链/手串") | {"visible_appearance": text}
+    )
+
+    constraints = build_product_fidelity_constraints(analysis)
+
+    assert "跑环" not in constraints.detected_keywords
+
+
 def test_build_default_fidelity_constraints_marks_not_applicable_without_keyword():
     analysis = ProductAnalysis.from_dict(_analysis_data("手链/手串"))
 
