@@ -13,9 +13,11 @@ from jewelry_on_hand.models import (
 )
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
+from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.prompt_builder import (
     PRODUCT_ISOLATION_SENTENCE,
     WRIST_SOURCE_SENTENCE,
+    build_generation_prompt,
     build_prompt,
 )
 
@@ -210,6 +212,24 @@ def test_prompt_includes_exact_fixed_sentence_dimensions_mirror_and_ignored_jewe
     assert "珠径约 10mm" in prompt
     assert "参考图中的原有戒指" in prompt
     assert MIRROR_INSTRUCTION in prompt
+
+
+def test_build_prompt_rejects_hero_and_routes_to_independent_skill():
+    with pytest.raises(ValueError, match="\u72ec\u7acb\u4e3b\u56fe Skill"):
+        build_prompt(
+            _product(),
+            _scored(_row()),
+            output_role=OutputRole.HERO,
+        )
+
+
+def test_build_generation_prompt_rejects_string_hero_and_routes_to_independent_skill():
+    with pytest.raises(ValueError, match="\u72ec\u7acb\u4e3b\u56fe Skill"):
+        build_generation_prompt(
+            _product(),
+            _scored(_row()),
+            output_role="hero",
+        )
 
 
 def test_ring_prompt_contains_complete_identity_position_and_physics_contract():
