@@ -236,6 +236,8 @@ def _decision_to_dict(decision: ReviewDecision) -> dict[str, Any]:
         data["fidelity_notes"] = decision.fidelity_notes
     if decision.confirmation_snapshot is not None:
         data["confirmation_snapshot"] = decision.confirmation_snapshot.to_dict()
+    if decision.output_role is not None:
+        data["output_role"] = decision.output_role.value
     return data
 
 

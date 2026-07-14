@@ -15,6 +15,7 @@ from jewelry_on_hand.models import (
     ReviewDecision,
     ScoredReference,
 )
+from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.ring_attributes import FingerPosition, HandSide, RingWearStyle
 
@@ -523,6 +524,18 @@ def test_review_decision_generate_rank_1_defaults_only_for_missing_or_empty_list
     for invalid in (0, False, ""):
         with pytest.raises(ValueError, match="selected_ranks"):
             ReviewDecision.from_dict({"action": "generate_rank_1", "selected_ranks": invalid, "fidelity_confirmed": True})
+
+
+def test_review_decision_parses_output_role():
+    decision = ReviewDecision.from_dict(
+        {
+            "action": "generate_rank_1",
+            "fidelity_confirmed": True,
+            "output_role": "lifestyle",
+        }
+    )
+
+    assert decision.output_role is OutputRole.LIFESTYLE
 
 
 def test_product_confirmation_snapshot_roundtrip_uses_typed_enums():

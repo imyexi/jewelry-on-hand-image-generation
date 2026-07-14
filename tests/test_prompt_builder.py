@@ -11,9 +11,9 @@ from jewelry_on_hand.models import (
     ReferenceRow,
     ScoredReference,
 )
+from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
-from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.prompt_builder import (
     PRODUCT_ISOLATION_SENTENCE,
     WRIST_SOURCE_SENTENCE,
@@ -215,7 +215,7 @@ def test_prompt_includes_exact_fixed_sentence_dimensions_mirror_and_ignored_jewe
 
 
 def test_build_prompt_rejects_hero_and_routes_to_independent_skill():
-    with pytest.raises(ValueError, match="\u72ec\u7acb\u4e3b\u56fe Skill"):
+    with pytest.raises(ValueError, match="独立主图 Skill"):
         build_prompt(
             _product(),
             _scored(_row()),
@@ -223,8 +223,18 @@ def test_build_prompt_rejects_hero_and_routes_to_independent_skill():
         )
 
 
+def test_build_prompt_injects_scene_output_role_instruction():
+    prompt = build_prompt(
+        _product(),
+        _scored(_row()),
+        output_role=OutputRole.HAND_WORN,
+    )
+
+    assert "输出用途：手部佩戴图" in prompt
+
+
 def test_build_generation_prompt_rejects_string_hero_and_routes_to_independent_skill():
-    with pytest.raises(ValueError, match="\u72ec\u7acb\u4e3b\u56fe Skill"):
+    with pytest.raises(ValueError, match="独立主图 Skill"):
         build_generation_prompt(
             _product(),
             _scored(_row()),

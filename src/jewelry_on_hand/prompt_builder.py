@@ -8,6 +8,7 @@ from jewelry_on_hand.category_policies.bracelet import (
     BRACELET_WRIST_SOURCE_SENTENCE,
 )
 from jewelry_on_hand.models import ProductAnalysis, ProductFidelityConstraints, ScoredReference
+from jewelry_on_hand.output_roles import OutputRole, output_role_instruction
 
 
 FIDELITY_SENTENCE = "产品保真以内部图2中肉眼可见的外观为准，不要根据材质名称自行改款、换色、重设计或美化成其他款式。"
@@ -22,6 +23,7 @@ def build_generation_prompt(
     product: ProductAnalysis,
     reference: ScoredReference,
     fidelity_constraints: ProductFidelityConstraints | None = None,
+    output_role: OutputRole | str | None = None,
 ) -> str:
     """按固定层序组合公共约束与品类策略提示词。"""
     policy = get_category_policy(product.confirmed_product_type)
@@ -36,6 +38,11 @@ def build_generation_prompt(
     fidelity_section = _fidelity_section(fidelity_constraints)
     occluded_parts = _join_items(product.occluded_parts)
     uncertain_details = _join_items(product.uncertain_details)
+    role_instruction = output_role_instruction(
+        output_role,
+        product.confirmed_product_type,
+        product.display_mode,
+    )
 
     return f"""请生成一张小红书自然上手图，画幅 3:4，清晰 2K。
 
@@ -73,6 +80,7 @@ def build_generation_prompt(
 {fragments.display_mode}
 
 【参考构图场景】
+{role_instruction}
 参考图文件：{_field(reference.row.file_name, "未提供")}
 参考图路径：{_field(reference.row.relative_path, "未提供")}
 参考图排名：rank {reference.rank}，score {reference.score}
@@ -102,9 +110,15 @@ def build_prompt(
     product: ProductAnalysis,
     reference: ScoredReference,
     fidelity_constraints: ProductFidelityConstraints | None = None,
+    output_role: OutputRole | str | None = None,
 ) -> str:
     """兼容既有调用；生成逻辑统一由 build_generation_prompt 提供。"""
-    return build_generation_prompt(product, reference, fidelity_constraints)
+    return build_generation_prompt(
+        product,
+        reference,
+        fidelity_constraints,
+        output_role,
+    )
 
 
 def _fidelity_section(

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
+from jewelry_on_hand.output_roles import OutputRole, normalize_output_role
 from jewelry_on_hand.product_types import ProductType, normalize_product_type
 from jewelry_on_hand.ring_attributes import FingerPosition, HandSide, RingWearStyle
 
@@ -1452,6 +1453,7 @@ class ReviewDecision:
     fidelity_notes: str | None = None
     fidelity_constraints_path: str = "analysis/product_fidelity_constraints.json"
     confirmation_snapshot: ProductConfirmationSnapshot | None = None
+    output_role: OutputRole | str | None = None
 
     def __post_init__(self) -> None:
         supported_actions = {
@@ -1506,6 +1508,7 @@ class ReviewDecision:
         elif snapshot is not None and not isinstance(snapshot, ProductConfirmationSnapshot):
             raise ValueError("confirmation_snapshot 必须是产品确认快照或 null")
         object.__setattr__(self, "confirmation_snapshot", snapshot)
+        object.__setattr__(self, "output_role", normalize_output_role(self.output_role))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ReviewDecision":
@@ -1572,6 +1575,7 @@ class ReviewDecision:
             fidelity_notes=fidelity_notes,
             fidelity_constraints_path=fidelity_constraints_path,
             confirmation_snapshot=confirmation_snapshot,
+            output_role=source.get("output_role"),
         )
 
     @staticmethod
