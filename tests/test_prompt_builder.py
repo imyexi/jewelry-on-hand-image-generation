@@ -214,7 +214,7 @@ def test_prompt_includes_exact_fixed_sentence_dimensions_mirror_and_ignored_jewe
     assert MIRROR_INSTRUCTION in prompt
 
 
-def test_build_prompt_rejects_hero_and_routes_to_independent_skill():
+def test_构建提示词拒绝主图并指向独立主图技能():
     with pytest.raises(ValueError, match="独立主图 Skill"):
         build_prompt(
             _product(),
@@ -223,7 +223,7 @@ def test_build_prompt_rejects_hero_and_routes_to_independent_skill():
         )
 
 
-def test_build_prompt_injects_scene_output_role_instruction():
+def test_构建提示词注入场景输出角色用途():
     prompt = build_prompt(
         _product(),
         _scored(_row()),
@@ -233,7 +233,17 @@ def test_build_prompt_injects_scene_output_role_instruction():
     assert "输出用途：手部佩戴图" in prompt
 
 
-def test_build_generation_prompt_rejects_string_hero_and_routes_to_independent_skill():
+def test_普通项链真人佩戴与手部佩戴角色可以构建提示词():
+    prompt = build_prompt(
+        _necklace_product(display_mode=DisplayMode.WORN),
+        _scored(_row()),
+        output_role=OutputRole.HAND_WORN,
+    )
+
+    assert "输出用途：手部佩戴图。" in prompt
+
+
+def test_生成提示词拒绝字符串主图并指向独立主图技能():
     with pytest.raises(ValueError, match="独立主图 Skill"):
         build_generation_prompt(
             _product(),

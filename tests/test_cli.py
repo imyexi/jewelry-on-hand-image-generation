@@ -858,7 +858,7 @@ def _selected_reference_payload(rank, path):
     }
 
 
-def test_prepare_review_cli_persists_scene_output_role(tmp_path):
+def test_准备审核持久化场景输出角色(tmp_path):
     from jewelry_on_hand.cli import main
 
     product = tmp_path / "product.jpg"
@@ -892,8 +892,25 @@ def test_prepare_review_cli_persists_scene_output_role(tmp_path):
         tmp_path / "runs" / "scene" / "analysis" / "output_role.json"
     ) == {"output_role": "lifestyle"}
 
+    run_root = tmp_path / "runs" / "scene"
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_rank_1",
+            "--fidelity-confirmed",
+            "--output-role",
+            "lifestyle",
+        ]
+    ) == 0
+    assert read_json(run_root / "review" / "review_decision.json")[
+        "output_role"
+    ] == "lifestyle"
 
-def test_prepare_review_cli_rejects_hero_before_creating_run(tmp_path):
+
+def test_准备审核在创建运行目录前拒绝主图角色(tmp_path):
     from jewelry_on_hand.cli import main
 
     product = tmp_path / "product.jpg"
@@ -919,7 +936,7 @@ def test_prepare_review_cli_rejects_hero_before_creating_run(tmp_path):
     assert not (output_root / "hero").exists()
 
 
-def test_record_decision_cli_persists_matching_output_role(tmp_path):
+def test_记录决策持久化匹配的输出角色(tmp_path):
     from jewelry_on_hand.cli import main
 
     run_root = tmp_path / "runs" / "scene"
@@ -946,7 +963,7 @@ def test_record_decision_cli_persists_matching_output_role(tmp_path):
     ] == "hand_worn"
 
 
-def test_record_decision_cli_rejects_hero_without_writing_decision(
+def test_记录决策拒绝主图且不写决策(
     tmp_path,
     capsys,
 ):
@@ -974,7 +991,32 @@ def test_record_decision_cli_rejects_hero_without_writing_decision(
     assert not (run_root / "review" / "review_decision.json").exists()
 
 
-def test_generate_cli_rejects_hero_before_calling_generation_helper(
+def test_记录决策角色与运行角色不一致时不写决策(tmp_path, capsys):
+    from jewelry_on_hand.cli import main
+
+    run_root = tmp_path / "runs" / "scene"
+    write_json(
+        run_root / "analysis" / "output_role.json",
+        {"output_role": "hand_worn"},
+    )
+
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "rerank",
+            "--output-role",
+            "lifestyle",
+        ]
+    ) != 0
+
+    assert "不一致" in capsys.readouterr().err
+    assert not (run_root / "review" / "review_decision.json").exists()
+
+
+def test_生成在调用助手前拒绝主图角色(
     tmp_path,
     monkeypatch,
     capsys,
@@ -1027,4 +1069,63 @@ def test_generate_cli_rejects_hero_before_calling_generation_helper(
     ) != 0
 
     assert "主图 Skill" in capsys.readouterr().err
+    assert helper_called is False
+
+
+def test_生成时运行角色与决策角色不一致则不调用生成_helper(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from jewelry_on_hand.cli import main
+
+    run_root = tmp_path / "runs" / "mismatch"
+    analysis_dir = run_root / "analysis"
+    review_dir = run_root / "review"
+    input_dir = run_root / "input"
+    analysis_dir.mkdir(parents=True)
+    review_dir.mkdir()
+    input_dir.mkdir()
+    (input_dir / "product-on-hand.jpg").write_bytes(b"product")
+    reference = tmp_path / "reference.jpg"
+    reference.write_bytes(b"reference")
+    make_analysis(analysis_dir / "product_analysis.json")
+    make_constraints(analysis_dir / "product_fidelity_constraints.json")
+    write_json(
+        analysis_dir / "selected_references.json",
+        [_selected_reference_payload(1, reference)],
+    )
+    write_json(
+        analysis_dir / "output_role.json",
+        {"output_role": "hand_worn"},
+    )
+    write_json(
+        review_dir / "review_decision.json",
+        {
+            "action": "generate_rank_1",
+            "selected_ranks": [1],
+            "fidelity_confirmed": True,
+            "output_role": "lifestyle",
+        },
+    )
+    helper_called = False
+
+    def fail_if_called(*_args, **_kwargs):
+        nonlocal helper_called
+        helper_called = True
+        raise AssertionError("生成 helper 不得被调用")
+
+    monkeypatch.setattr("jewelry_on_hand.cli.run_generation", fail_if_called)
+
+    assert main(
+        [
+            "generate",
+            "--run-root",
+            str(run_root),
+            "--helper-script",
+            str(tmp_path / "helper.py"),
+        ]
+    ) != 0
+
+    assert "不一致" in capsys.readouterr().err
     assert helper_called is False

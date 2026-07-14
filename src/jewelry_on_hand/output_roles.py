@@ -2,9 +2,6 @@ from __future__ import annotations
 
 from enum import Enum
 
-from jewelry_on_hand.display_modes import DisplayMode
-from jewelry_on_hand.product_types import ProductType
-
 
 OUTPUT_ROLE_FILE_NAME = "output_role.json"
 
@@ -54,29 +51,11 @@ def require_scene_replacement_role(
 
 def output_role_instruction(
     output_role: OutputRole | str | None,
-    product_type: ProductType,
-    display_mode: DisplayMode,
 ) -> str:
     if output_role is None:
         return ""
     role = require_scene_replacement_role(output_role, stage="Prompt")
-    common = "使用深色背景，产品完整清晰，画面不得出现文字、水印、logo 或平台标识。"
-    if role is OutputRole.LIFESTYLE:
-        return (
-            f"输出用途：{role.display_name}。{common} "
-            "保留日常生活环境氛围，但不得遮挡产品主体。"
-        )
-    if product_type in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}:
-        if display_mode is not DisplayMode.HAND_HELD:
-            raise ValueError("项链的手部佩戴图必须使用 hand_held 展示模式")
-        return (
-            f"输出用途：{role.display_name}。{common} "
-            "手指轻持链条自然垂落，完整展示链条与吊坠。"
-        )
-    return (
-        f"输出用途：{role.display_name}。{common} "
-        "产品自然佩戴在手腕或手指根部，接触和阴影真实。"
-    )
+    return f"输出用途：{role.display_name}。"
 
 
 __all__ = [

@@ -526,7 +526,7 @@ def test_review_decision_generate_rank_1_defaults_only_for_missing_or_empty_list
             ReviewDecision.from_dict({"action": "generate_rank_1", "selected_ranks": invalid, "fidelity_confirmed": True})
 
 
-def test_review_decision_parses_output_role():
+def test_审核决策解析输出角色():
     decision = ReviewDecision.from_dict(
         {
             "action": "generate_rank_1",

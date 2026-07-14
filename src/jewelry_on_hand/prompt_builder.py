@@ -38,11 +38,7 @@ def build_generation_prompt(
     fidelity_section = _fidelity_section(fidelity_constraints)
     occluded_parts = _join_items(product.occluded_parts)
     uncertain_details = _join_items(product.uncertain_details)
-    role_instruction = output_role_instruction(
-        output_role,
-        product.confirmed_product_type,
-        product.display_mode,
-    )
+    role_instruction = output_role_instruction(output_role)
 
     return f"""请生成一张小红书自然上手图，画幅 3:4，清晰 2K。
 

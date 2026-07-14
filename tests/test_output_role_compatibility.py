@@ -1,16 +1,14 @@
 import pytest
 
-from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.output_roles import (
     OutputRole,
     output_role_instruction,
     require_scene_replacement_role,
 )
-from jewelry_on_hand.product_types import ProductType
 
 
 @pytest.mark.parametrize("role", [OutputRole.HAND_WORN, "lifestyle"])
-def test_scene_replacement_role_accepts_only_supported_roles(role):
+def test_场景替换角色仅接受受支持角色(role):
     assert require_scene_replacement_role(role, stage="prepare-review") in {
         OutputRole.HAND_WORN,
         OutputRole.LIFESTYLE,
@@ -18,16 +16,23 @@ def test_scene_replacement_role_accepts_only_supported_roles(role):
 
 
 @pytest.mark.parametrize("role", [None, OutputRole.HERO, "hero"])
-def test_scene_replacement_role_rejects_missing_or_hero(role):
+def test_场景替换角色拒绝缺失值或主图角色(role):
     with pytest.raises(ValueError, match="主图 Skill|hand_worn|lifestyle"):
         require_scene_replacement_role(role, stage="generate")
 
 
 @pytest.mark.parametrize("role", [OutputRole.HERO, "hero"])
-def test_output_role_instruction_rejects_hero(role):
+def test_输出用途指令拒绝主图角色(role):
     with pytest.raises(ValueError, match="主图 Skill"):
-        output_role_instruction(
-            role,
-            ProductType.BRACELET,
-            DisplayMode.WORN,
-        )
+        output_role_instruction(role)
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [
+        (OutputRole.HAND_WORN, "输出用途：手部佩戴图。"),
+        ("lifestyle", "输出用途：生活场景图。"),
+    ],
+)
+def test_输出用途声明保持品类无关(role, expected):
+    assert output_role_instruction(role) == expected
