@@ -1072,7 +1072,7 @@ def test_生成在调用助手前拒绝主图角色(
     assert helper_called is False
 
 
-def test_生成时运行角色与决策角色不一致则不调用生成_helper(
+def test_生成时运行角色与决策角色不一致则不调用生成助手(
     tmp_path,
     monkeypatch,
     capsys,
