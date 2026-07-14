@@ -282,7 +282,20 @@ def build_candidate_snapshot(
         row.product_visibility
     )
     text_or_ui_risk = _parse_text_or_ui_risk(notes)
-    body_region = _replacement_body_region(product, hand_side)
+    unique_selector = _unique_target_selector(source_jewelry)
+    if (
+        _describes_multiple_same_jewelry(source_jewelry)
+        and unique_selector is None
+    ):
+        _prepare_review_error(
+            "replacement_target.body_region",
+            "多件同类首饰缺少内外、上下或次序选择器，无法确认唯一目标",
+        )
+    body_region = _replacement_body_region(
+        hand_side,
+        visible_body_regions,
+        unique_selector,
+    )
     body_pose = _extract_review_segment(
         pose_keywords,
         ("身体", "躯干", "上半身", "全身", "半身", "未入镜"),
@@ -553,7 +566,19 @@ def _parse_product_visibility(value: str) -> bool:
     text = _required_review_value(value, "product_visibility")
     if any(
         marker in text
-        for marker in ("不足", "过小", "太小", "低", "不可见", "不完整")
+        for marker in (
+            "不足",
+            "过小",
+            "太小",
+            "低",
+            "不可见",
+            "不完整",
+            "不够",
+            "不清晰",
+        )
+    ) or re.search(
+        r"(?:不|未|无|欠|难以).{0,2}(?:大|高|清晰|完整|充分|充足|足够)",
+        text,
     ):
         return False
     if any(
@@ -569,21 +594,27 @@ def _parse_product_visibility(value: str) -> bool:
 
 def _parse_text_or_ui_risk(notes: str) -> TextOrUiRisk:
     text = notes.lower()
-    if any(
-        marker in text
-        for marker in (
-            "无文字",
-            "没有文字",
-            "无ui",
-            "无 ui",
-            "无界面",
-            "无平台界面",
-            "none",
-        )
-    ):
-        return "none"
-    if any(
-        marker in text
+    safe_markers = (
+        "无文字或平台界面",
+        "无文字和平台界面",
+        "无文字或平台 ui",
+        "无文字和平台 ui",
+        "无文字",
+        "没有文字",
+        "无ui",
+        "无 ui",
+        "无界面",
+        "无平台界面",
+        "none",
+    )
+    risk_text = text
+    safe_found = False
+    for marker in safe_markers:
+        if marker in risk_text:
+            safe_found = True
+            risk_text = risk_text.replace(marker, "")
+    small_found = any(
+        marker in risk_text
         for marker in (
             "小面积文字",
             "少量文字",
@@ -591,10 +622,9 @@ def _parse_text_or_ui_risk(notes: str) -> TextOrUiRisk:
             "可移除界面",
             "small_removable",
         )
-    ):
-        return "small_removable"
-    if any(
-        marker in text
+    )
+    blocking_found = any(
+        marker in risk_text
         for marker in (
             "大面积文字",
             "状态栏",
@@ -603,8 +633,18 @@ def _parse_text_or_ui_risk(notes: str) -> TextOrUiRisk:
             "平台界面",
             "blocking",
         )
-    ):
+    )
+    if safe_found and (small_found or blocking_found):
+        _prepare_review_error(
+            "text_or_ui_risk",
+            "文字或 UI 风险描述互相冲突",
+        )
+    if blocking_found:
         return "blocking"
+    if small_found:
+        return "small_removable"
+    if safe_found:
+        return "none"
     _prepare_review_error(
         "text_or_ui_risk",
         "无法从 notes 确认文字或 UI 风险",
@@ -612,21 +652,13 @@ def _parse_text_or_ui_risk(notes: str) -> TextOrUiRisk:
 
 
 def _replacement_body_region(
-    product: ProductAnalysis,
     hand_side: str,
+    visible_body_regions: Sequence[str],
+    unique_selector: str | None,
 ) -> str:
-    parts = [hand_side]
-    product_hand_side = getattr(product.hand_side, "value", product.hand_side)
-    if product_hand_side and product_hand_side != "unknown":
-        parts.append(str(product_hand_side))
-    finger_position = getattr(
-        product.finger_position,
-        "value",
-        product.finger_position,
-    )
-    if finger_position and finger_position != "unknown":
-        parts.append(str(finger_position))
-    parts.append(_required_review_value(product.wear_position, "wear_position"))
+    parts = [hand_side, *visible_body_regions]
+    if unique_selector is not None:
+        parts.append(unique_selector)
     return _join_review_values(*parts)
 
 
@@ -670,14 +702,19 @@ def _describes_multiple_same_jewelry(text: str) -> bool:
 
 
 def _has_unique_target_description(text: str) -> bool:
-    return bool(
-        re.search(
-            r"(?:左|右|内|外|上|下|前|后|近|远|第[一二三四五六七八九\d]+|"
-            r"left|right|inner|outer|upper|lower|thumb|index|middle|ring|little)",
-            text,
-            flags=re.IGNORECASE,
-        )
+    return _unique_target_selector(text) is not None
+
+
+def _unique_target_selector(text: str) -> str | None:
+    match = re.search(
+        r"(?:内侧|外侧|内圈|外圈|上方|下方|最上|最下|"
+        r"靠近?(?:手掌|手臂|前臂)|远离(?:手掌|手臂|前臂)|"
+        r"第[一二三四五六七八九\d]+(?:条|件|枚|层|个)?|"
+        r"inner|outer|upper|lower|first|second|third)",
+        text,
+        flags=re.IGNORECASE,
     )
+    return match.group(0) if match is not None else None
 
 
 def _prepare_review_error(field_name: str, detail: str) -> None:

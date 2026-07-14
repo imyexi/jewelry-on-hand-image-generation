@@ -301,7 +301,7 @@ def test_绑定校验拒绝多件同类首饰却没有唯一目标描述(
     data = _修改嵌套字段(
         data,
         "replacement_target.body_region",
-        "手腕",
+        "左手腕",
     )
     snapshot = ReferenceCompositionSnapshot.from_dict(data)
 
@@ -320,8 +320,22 @@ def test_绑定校验拒绝多件同类首饰却没有唯一目标描述(
         ({"output_role": "lifestyle"}, OutputRole.HAND_WORN, 1, None, "角色"),
         ({"rank": 2}, OutputRole.HAND_WORN, 1, None, "rank"),
         ({"reference_file": "别的图片.jpg"}, OutputRole.HAND_WORN, 1, None, "文件名"),
+        ({}, OutputRole.HAND_WORN, 1, "同内容但改名.jpg", "文件名"),
+        (
+            {"reference_file": "子目录/参考图.jpg"},
+            OutputRole.HAND_WORN,
+            1,
+            None,
+            "文件名",
+        ),
     ],
-    ids=("角色不一致", "排序不一致", "文件名不一致"),
+    ids=(
+        "角色不一致",
+        "排序不一致",
+        "快照文件名不一致",
+        "实际文件改名",
+        "快照文件名含路径",
+    ),
 )
 def test_绑定校验拒绝角色排序或文件名不一致(
     tmp_path: Path,
@@ -357,6 +371,96 @@ def test_候选草稿拒绝主图角色(
             手链产品,
             已评分参考图,
             OutputRole.HERO,
+        )
+
+
+@pytest.mark.parametrize(
+    "notes",
+    (
+        "正面视角；主体位于画面中下部；无文字；存在平台界面",
+        "正面视角；主体位于画面中下部；无文字；手机状态栏明显",
+    ),
+    ids=("平台界面冲突", "状态栏冲突"),
+)
+def test_候选草稿拒绝文字界面风险冲突(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+    notes: str,
+) -> None:
+    row = replace(已评分参考图.row, notes=notes)
+    reference = replace(已评分参考图, row=row)
+
+    with pytest.raises(ValueError, match="文字或 UI.*prepare-review"):
+        build_candidate_snapshot(
+            手链产品,
+            reference,
+            OutputRole.HAND_WORN,
+        )
+
+
+@pytest.mark.parametrize(
+    "product_visibility",
+    ("展示面积不大", "产品不够清晰"),
+    ids=("面积不大", "产品不清晰"),
+)
+def test_候选草稿将否定展示描述标记为不足(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+    参考图文件: Path,
+    product_visibility: str,
+) -> None:
+    row = replace(
+        已评分参考图.row,
+        product_visibility=product_visibility,
+    )
+    reference = replace(已评分参考图, row=row)
+
+    snapshot = build_candidate_snapshot(
+        手链产品,
+        reference,
+        OutputRole.HAND_WORN,
+    )
+
+    assert snapshot.product_visibility_sufficient is False
+    with pytest.raises(ValueError, match="展示面积不足.*prepare-review"):
+        validate_snapshot_binding(
+            snapshot,
+            reference_file=参考图文件,
+            output_role=OutputRole.HAND_WORN,
+            expected_rank=1,
+        )
+
+
+def test_候选草稿拒绝无法确定的展示面积描述(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+) -> None:
+    row = replace(已评分参考图.row, product_visibility="展示面积一般")
+    reference = replace(已评分参考图, row=row)
+
+    with pytest.raises(ValueError, match="product_visibility.*prepare-review"):
+        build_candidate_snapshot(
+            手链产品,
+            reference,
+            OutputRole.HAND_WORN,
+        )
+
+
+def test_候选草稿拒绝只有手侧定位的多件同类首饰(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+) -> None:
+    row = replace(
+        已评分参考图.row,
+        existing_jewelry="左手腕两条同类手链叠戴",
+    )
+    reference = replace(已评分参考图, row=row)
+
+    with pytest.raises(ValueError, match="唯一目标.*prepare-review"):
+        build_candidate_snapshot(
+            手链产品,
+            reference,
+            OutputRole.HAND_WORN,
         )
 
 
