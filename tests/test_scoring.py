@@ -1,8 +1,11 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from jewelry_on_hand import scoring as scoring_module
 from jewelry_on_hand.models import ProductAnalysis, ProductDimensions, ReferenceRow, ScoredReference
+from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.scoring import (
     score_reference,
     select_batch_diverse_references,
@@ -10,9 +13,19 @@ from jewelry_on_hand.scoring import (
 )
 
 
+def composition_signature_for_row(reference, output_role):
+    return scoring_module.composition_signature_for_row(reference, output_role)
+
+
+def select_diverse_eligible_references(candidates, output_role, **kwargs):
+    return scoring_module.select_diverse_eligible_references(
+        candidates, output_role, **kwargs
+    )
+
+
 def row(index, exists=True, strategy="常规可优先使用", file_name=None, **overrides):
     data = {
-        "purpose_category": "上手姿势/手模构图参考",
+        "purpose_category": "手部佩戴图",
         "bracelet_applicability": "是：可用于手链/手串",
         "default_strategy": strategy,
         "style_category": "暗调闪光",
@@ -60,27 +73,233 @@ def product(**overrides):
     return ProductAnalysis(**data)
 
 
+def test_角色硬门只读取飞书用途分类字段():
+    wrong_type = replace(
+        row(1),
+        purpose_category="主图",
+        scene_keywords="手部佩戴图 生活场景图 深色背景",
+        recommended_usage="手部佩戴图",
+    )
+
+    with pytest.raises(ValueError, match="手部佩戴图"):
+        select_top_references(product(), [wrong_type], OutputRole.HAND_WORN)
+
+
+def test_低重复选择绝不越过十分质量窗口():
+    references = [row(index) for index in range(1, 5)]
+    scored = [
+        ScoredReference(reference, score, rank, (), (), ())
+        for rank, (reference, score) in enumerate(
+            zip(references, [100, 96, 90, 89], strict=True),
+            start=1,
+        )
+    ]
+    selected = select_diverse_eligible_references(
+        scored,
+        OutputRole.HAND_WORN,
+        signature_usage={
+            composition_signature_for_row(scored[3].row, OutputRole.HAND_WORN): 0,
+            composition_signature_for_row(scored[0].row, OutputRole.HAND_WORN): 8,
+        },
+        audit_seed="QY027-hand_worn",
+    )
+
+    assert [item.score for item in selected] == [100, 96, 90]
+    assert 89 not in [item.score for item in selected]
+
+
+def test_同分候选优先选择使用次数较少的构图签名():
+    references = [
+        replace(row(1), framing="手腕近景"),
+        replace(row(2), framing="手部中景"),
+        replace(row(3), framing="半身手部构图"),
+    ]
+    scored = [
+        ScoredReference(reference, 100, rank, (), (), ())
+        for rank, reference in enumerate(references, start=1)
+    ]
+    usage = {
+        composition_signature_for_row(scored[0].row, OutputRole.LIFESTYLE): 5,
+        composition_signature_for_row(scored[1].row, OutputRole.LIFESTYLE): 0,
+        composition_signature_for_row(scored[2].row, OutputRole.LIFESTYLE): 1,
+    }
+
+    selected = select_diverse_eligible_references(
+        scored,
+        OutputRole.LIFESTYLE,
+        signature_usage=usage,
+        audit_seed="QY018",
+    )
+
+    assert selected[0].row == scored[1].row
+
+
+def test_完全平局顺序在相同种子下稳定且可由不同种子改变():
+    scored = [
+        ScoredReference(replace(row(index), framing="相同构图"), 100, index, (), (), ())
+        for index in range(1, 5)
+    ]
+
+    first = select_diverse_eligible_references(
+        scored, OutputRole.HAND_WORN, audit_seed="固定审计种子"
+    )
+    repeated = select_diverse_eligible_references(
+        tuple(reversed(scored)), OutputRole.HAND_WORN, audit_seed="固定审计种子"
+    )
+    orders = {
+        tuple(
+            item.row.file_name
+            for item in select_diverse_eligible_references(
+                scored,
+                OutputRole.HAND_WORN,
+                audit_seed=f"审计种子{index}",
+            )
+        )
+        for index in range(20)
+    }
+
+    assert [item.row.file_name for item in first] == [
+        item.row.file_name for item in repeated
+    ]
+    assert len(orders) > 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"notes": "画面含平台界面和状态栏"},
+        {"product_visibility": "低"},
+        {"notes": "目标手腕与首饰区域严重遮挡"},
+        {"crop_risk": "高"},
+        {"existing_jewelry": "原首饰无法完整识别"},
+        {
+            "notes": "仅手指完整可见",
+            "recommended_usage": "手指近景",
+            "visible_body_regions": "手指",
+        },
+    ],
+)
+def test_硬门阻止界面低展示遮挡裁切及原首饰不可识别候选(overrides):
+    rejected = replace(row(1), **overrides)
+    valid = replace(
+        row(2),
+        product_visibility="高",
+        crop_risk="低",
+        existing_jewelry="完整可识别的原手串",
+    )
+
+    selected, candidates = select_top_references(
+        product(), [rejected, valid], OutputRole.HAND_WORN
+    )
+
+    assert [item.row.index for item in candidates] == [2]
+    assert [item.row.index for item in selected] == [2]
+
+
+def test_批次选择累计构图签名使用次数():
+    first = ScoredReference(replace(row(1), framing="手腕近景"), 100, 1, (), (), ())
+    second = ScoredReference(replace(row(2), framing="手部中景"), 100, 2, (), (), ())
+
+    selections = select_batch_diverse_references(
+        [[first, second], [first, second]],
+        [OutputRole.HAND_WORN, OutputRole.HAND_WORN],
+        limit=1,
+        audit_seed="批次审计",
+    )
+
+    assert composition_signature_for_row(
+        selections[0][0].row, OutputRole.HAND_WORN
+    ) != composition_signature_for_row(
+        selections[1][0].row, OutputRole.HAND_WORN
+    )
+
+
+def test_不同输出角色的构图签名互不计数():
+    first = replace(row(1), framing="手腕近景")
+    second = replace(row(2), framing="手部中景")
+    assert composition_signature_for_row(first, OutputRole.HAND_WORN) != (
+        composition_signature_for_row(first, OutputRole.LIFESTYLE)
+    )
+
+    scored = [
+        ScoredReference(first, 100, 1, (), (), ()),
+        ScoredReference(second, 100, 2, (), (), ()),
+    ]
+    baseline = select_diverse_eligible_references(
+        scored, OutputRole.LIFESTYLE, audit_seed="角色隔离", limit=1
+    )
+    with_foreign_usage = select_diverse_eligible_references(
+        scored,
+        OutputRole.LIFESTYLE,
+        signature_usage={
+            composition_signature_for_row(
+                baseline[0].row, OutputRole.HAND_WORN
+            ): 99
+        },
+        audit_seed="角色隔离",
+        limit=1,
+    )
+
+    assert with_foreign_usage[0].row == baseline[0].row
+
+
+def test_候选包含全部通过硬门的质量层级并按分数排序():
+    references = [
+        row(1, confidence="高"),
+        row(2, confidence="中"),
+        row(3, confidence="高", strategy="无特殊要求不优先使用"),
+    ]
+
+    _, candidates = select_top_references(
+        product(), references, OutputRole.HAND_WORN
+    )
+
+    assert {item.row.index for item in candidates} == {1, 2, 3}
+    assert [item.score for item in candidates] == sorted(
+        [item.score for item in candidates], reverse=True
+    )
+
+
+def test_低重复选择即使放宽数量也最多返回三张():
+    candidates = [
+        ScoredReference(row(index), 100, index, (), (), ())
+        for index in range(1, 6)
+    ]
+
+    selected = select_diverse_eligible_references(
+        candidates, OutputRole.HAND_WORN, limit=9
+    )
+
+    assert len(selected) == 3
+
+
+def test_批次候选与输出角色数量不一致时使用中文报错():
+    with pytest.raises(ValueError, match="候选集合与输出角色数量必须一致"):
+        select_batch_diverse_references([[]], [])
+
+
 def test_select_top_references_filters_missing_and_scores_priority():
     selected, candidates = select_top_references(
         product(),
         [row(1), row(2, exists=False), row(3, strategy="无特殊要求不优先使用")],
+        OutputRole.HAND_WORN,
     )
     assert [item.row.index for item in selected] == [1]
-    assert [item.row.index for item in candidates] == [1]
+    assert [item.row.index for item in candidates] == [1, 3]
     assert any("暗调" in reason for reason in selected[0].reason)
 
 
-def test_select_top_references_keeps_hard_filtered_candidates_and_top_three_ranks():
+def test_候选保留全部硬门通过项而选择仅限十分窗口():
     rows = [
         row(1),
         row(2, style_category="清晰自然", scene_keywords="自然光 留白", notes="手腕露出面积足"),
         row(3, recommended_usage="佩戴展示 近景手腕"),
         row(4, style_category="清晰自然", scene_keywords="自然光 留白", notes="手腕露出面积足"),
     ]
-    selected, candidates = select_top_references(product(), rows)
-    assert len(selected) == 3
+    selected, candidates = select_top_references(product(), rows, OutputRole.HAND_WORN)
+    assert len(selected) == 1
     assert len(candidates) == 4
-    assert [item.rank for item in selected] == [1, 2, 3]
+    assert [item.rank for item in selected] == [1]
     assert [item.rank for item in candidates] == [1, 2, 3, 4]
     assert [item.score for item in candidates] == sorted(
         [item.score for item in candidates], reverse=True
@@ -97,7 +316,9 @@ def test_candidate_pool_keeps_clean_rows_and_adds_combined_jewelry_for_batch_div
         recommended_usage="对镜手腕构图",
     )
 
-    selected, candidates = select_top_references(product(), [clean, combined])
+    selected, candidates = select_top_references(
+        product(), [clean, combined], OutputRole.HAND_WORN
+    )
 
     assert {item.row.file_name for item in candidates} == {"clean.jpg", "combined.jpg"}
     assert selected[0].row.file_name == "clean.jpg"
@@ -107,7 +328,7 @@ def test_candidate_pool_keeps_clean_rows_and_adds_combined_jewelry_for_batch_div
     assert combined_candidate.ignored_reference_jewelry
 
 
-def test_select_top_references_diversifies_same_score_shoot_group():
+def test_选择结果稳定且绝不为旧多样性惩罚突破质量窗口():
     rows = [
         row(30, file_name="1（30）.png", style_category="暗调高级/黑衣近景"),
         row(31, file_name="1（31）.png", style_category="暗调高级/黑衣近景"),
@@ -130,13 +351,20 @@ def test_select_top_references_diversifies_same_score_shoot_group():
         ),
     ]
 
-    selected, _ = select_top_references(product(), rows)
+    selected, candidates = select_top_references(
+        product(), rows, OutputRole.HAND_WORN, audit_seed="稳定选择"
+    )
+    repeated, _ = select_top_references(
+        product(), reversed(rows), OutputRole.HAND_WORN, audit_seed="稳定选择"
+    )
 
-    assert selected[0].row.index == 30
-    assert {item.row.index for item in selected[1:]} == {101, 102}
+    assert [item.row.file_name for item in selected] == [
+        item.row.file_name for item in repeated
+    ]
+    assert all(item.score >= candidates[0].score - 10 for item in selected)
 
 
-def test_select_batch_diverse_references_penalizes_reused_files_across_products():
+def test_批次低重复不会越过质量窗口复用唯一合格构图():
     rows = [
         row(30, file_name="1（30）.png", style_category="暗调高级/黑衣近景"),
         row(31, file_name="1（31）.png", style_category="暗调高级/黑衣近景"),
@@ -144,40 +372,45 @@ def test_select_batch_diverse_references_penalizes_reused_files_across_products(
         row(101, file_name="outdoor-101.jpg", style_category="户外自然光"),
         row(102, file_name="mirror-102.jpg", style_category="对镜生活感"),
     ]
-    _, first_candidates = select_top_references(product(), rows)
-    _, second_candidates = select_top_references(product(), rows)
+    _, first_candidates = select_top_references(product(), rows, OutputRole.HAND_WORN)
+    _, second_candidates = select_top_references(product(), rows, OutputRole.HAND_WORN)
 
     first_selected, second_selected = select_batch_diverse_references(
-        [first_candidates, second_candidates]
+        [first_candidates, second_candidates],
+        [OutputRole.HAND_WORN, OutputRole.HAND_WORN],
     )
 
-    assert [item.row.file_name for item in first_selected] != [
+    assert [item.row.file_name for item in first_selected] == [
         item.row.file_name for item in second_selected
     ]
-    assert first_selected[0].row.file_name != second_selected[0].row.file_name
 
 
-def test_select_batch_diverse_references_honors_initial_file_usage():
+def test_批次选择遵循初始构图签名使用次数():
     rows = [
-        row(1, file_name="already-used.jpg", style_category="dark"),
-        row(2, file_name="unused.jpg", style_category="light"),
+        replace(
+            row(1, file_name="already-used.jpg", style_category="dark"),
+            framing="手腕近景",
+        ),
+        replace(
+            row(2, file_name="unused.jpg", style_category="light"),
+            framing="手部中景",
+        ),
     ]
-    _, candidates = select_top_references(product(), rows)
+    _, candidates = select_top_references(product(), rows, OutputRole.HAND_WORN)
 
     [selected] = select_batch_diverse_references(
         [candidates],
+        [OutputRole.HAND_WORN],
         limit=1,
-        initial_usage={
-            "file": {"already-used.jpg": 1},
-            "shoot_group": {},
-            "style_cluster": {},
+        initial_signature_usage={
+            composition_signature_for_row(rows[0], OutputRole.HAND_WORN): 1,
         },
     )
 
     assert [item.row.file_name for item in selected] == ["unused.jpg"]
 
 
-def test_select_batch_diverse_references_uses_lower_score_when_quality_window_is_used():
+def test_批次选择不会为了低重复越过十分质量窗口():
     candidates = [
         ScoredReference(row(1, file_name="already-used.jpg"), 150, 1, (), (), ()),
         ScoredReference(row(2, file_name="lower-unused.jpg"), 80, 2, (), (), ()),
@@ -185,15 +418,14 @@ def test_select_batch_diverse_references_uses_lower_score_when_quality_window_is
 
     [selected] = select_batch_diverse_references(
         [candidates],
+        [OutputRole.HAND_WORN],
         limit=1,
-        initial_usage={
-            "file": {"already-used.jpg": 1},
-            "shoot_group": {},
-            "style_cluster": {},
+        initial_signature_usage={
+            composition_signature_for_row(candidates[0].row, OutputRole.HAND_WORN): 1,
         },
     )
 
-    assert [item.row.file_name for item in selected] == ["lower-unused.jpg"]
+    assert [item.row.file_name for item in selected] == ["already-used.jpg"]
 
 
 def test_select_top_references_relaxes_to_medium_confidence_when_no_high_candidate():
@@ -204,6 +436,7 @@ def test_select_top_references_relaxes_to_medium_confidence_when_no_high_candida
             row(2, exists=False, confidence="高"),
             row(3, confidence="低"),
         ],
+        OutputRole.HAND_WORN,
     )
 
     assert [item.row.index for item in selected] == [1]
@@ -218,6 +451,7 @@ def test_select_top_references_relaxes_to_non_priority_strategy_after_confidence
             row(2, strategy="无特殊要求不优先使用"),
             row(3, strategy="谨慎使用"),
         ],
+        OutputRole.HAND_WORN,
     )
 
     assert [item.row.index for item in selected] == [2]
@@ -234,6 +468,7 @@ def test_select_top_references_relaxes_to_combined_target_jewelry_after_strategy
             row(3, jewelry_type="手链、项链、戒指组合"),
             row(4, jewelry_type="项链"),
         ],
+        OutputRole.HAND_WORN,
     )
 
     assert [item.row.index for item in selected] == [3]
@@ -410,7 +645,7 @@ def test_wearing_display_ignores_pose_and_stacked_purpose_without_usage_signal()
 def test_select_top_references_uses_model_rank_without_bypass():
     rows = [row(10), row(11), row(12), row(13)]
 
-    _, candidates = select_top_references(product(), rows)
+    _, candidates = select_top_references(product(), rows, OutputRole.HAND_WORN)
 
     assert [item.rank for item in candidates] == [1, 2, 3, 4]
 
@@ -452,7 +687,7 @@ def ring_row(index, **overrides):
         "width": 1000,
         "height": 1200,
         "size_mb": 1,
-        "purpose_category": "戒指上手/手部近景参考",
+        "purpose_category": "手部佩戴图",
         "bracelet_applicability": "",
         "default_strategy": "常规可优先使用",
         "style_category": "清透自然光",
@@ -484,6 +719,7 @@ def test_ring_selects_three_eligible_references_and_ignores_original_rings():
     selected, candidates = select_top_references(
         ring_product(),
         [ring_row(401), ring_row(402), ring_row(403), ring_row(404)],
+        OutputRole.HAND_WORN,
     )
 
     assert len(selected) == 3
@@ -495,7 +731,9 @@ def test_ring_hard_filter_removes_ineligible_reference():
     rejected = ring_row(405, visible_fingers="thumb,index,middle")
     valid = [ring_row(406), ring_row(407), ring_row(408)]
 
-    selected, candidates = select_top_references(ring_product(), [rejected, *valid])
+    selected, candidates = select_top_references(
+        ring_product(), [rejected, *valid], OutputRole.HAND_WORN
+    )
     rejected_score = score_reference(ring_product(), rejected)
 
     assert {item.row.index for item in selected} == {406, 407, 408}
@@ -505,15 +743,19 @@ def test_ring_hard_filter_removes_ineligible_reference():
 
 def test_ring_requires_three_eligible_references():
     with pytest.raises(ValueError, match="戒指.*至少 3 张.*当前 2 张"):
-        select_top_references(ring_product(), [ring_row(409), ring_row(410)])
+        select_top_references(
+            ring_product(),
+            [ring_row(409), ring_row(410)],
+            OutputRole.HAND_WORN,
+        )
 
 
-def test_ring_same_hand_side_scores_higher_without_replacing_confirmed_side():
+def test_戒指相反手参考不能进入替换候选():
     same_side = score_reference(ring_product(), ring_row(411, hand_side="left"))
     other_side = score_reference(ring_product(), ring_row(412, hand_side="right"))
 
     assert same_side.score > other_side.score
-    assert not any("不匹配" in risk for risk in other_side.risk)
+    assert any("左右手" in risk and "不匹配" in risk for risk in other_side.risk)
 
 
 def necklace_product(display_mode="worn", length_category="collarbone", layer_count=1):
@@ -548,7 +790,7 @@ def necklace_row(index, **overrides):
         "width": 1000,
         "height": 1200,
         "size_mb": 1,
-        "purpose_category": "真人佩戴构图参考",
+        "purpose_category": "生活场景图",
         "bracelet_applicability": "",
         "default_strategy": "常规可优先使用",
         "style_category": "清透自然光",
@@ -595,7 +837,9 @@ def test_necklace_worn_filter_rejects_wrist_only_reference():
         chest_visibility="低",
         jewelry_type="手链/手串",
     )
-    selected, _ = select_top_references(necklace_product(), [wrist, good])
+    selected, _ = select_top_references(
+        necklace_product(), [wrist, good], OutputRole.LIFESTYLE
+    )
     assert [item.row.index for item in selected] == [102]
 
 
@@ -616,7 +860,9 @@ def test_necklace_worn_filter_rejects_missing_required_annotations(overrides):
     missing = necklace_row(108, **overrides)
     good = necklace_row(109)
 
-    selected, candidates = select_top_references(necklace_product(), [missing, good])
+    selected, candidates = select_top_references(
+        necklace_product(), [missing, good], OutputRole.LIFESTYLE
+    )
 
     assert [item.row.index for item in selected] == [109]
     assert [item.row.index for item in candidates] == [109]
@@ -637,7 +883,9 @@ def test_necklace_worn_filter_rejects_visibility_occlusion_and_crop_risks(
     rejected = necklace_row(110, **overrides)
     good = necklace_row(111)
 
-    selected, candidates = select_top_references(necklace_product(), [rejected, good])
+    selected, candidates = select_top_references(
+        necklace_product(), [rejected, good], OutputRole.LIFESTYLE
+    )
     rejected_score = score_reference(necklace_product(), rejected)
 
     assert [item.row.index for item in selected] == [111]
@@ -648,7 +896,11 @@ def test_necklace_worn_filter_rejects_visibility_occlusion_and_crop_risks(
 def test_long_necklace_filter_rejects_collarbone_crop():
     cropped = necklace_row(104, framing="锁骨特写", chest_visibility="低", crop_risk="高")
     full = necklace_row(105, framing="胸前半身", chest_visibility="高", crop_risk="低")
-    selected, _ = select_top_references(necklace_product(length_category="long"), [cropped, full])
+    selected, _ = select_top_references(
+        necklace_product(length_category="long"),
+        [cropped, full],
+        OutputRole.LIFESTYLE,
+    )
     assert [item.row.index for item in selected] == [105]
 
 
@@ -669,6 +921,7 @@ def test_multi_layer_necklace_requires_vertical_chest_space_and_rewards_it():
     selected, candidates = select_top_references(
         necklace_product(length_category="upper_chest", layer_count=3),
         [tight, spacious],
+        OutputRole.LIFESTYLE,
     )
 
     assert [item.row.index for item in selected] == [113]
@@ -686,7 +939,11 @@ def test_necklace_hand_held_requires_visible_hand_and_mode():
         recommended_usage="项链手持展示，链条可自然垂落",
         notes="手指与链条真实接触，完整链条无裁切",
     )
-    selected, _ = select_top_references(necklace_product(display_mode="hand_held"), [worn, held])
+    selected, _ = select_top_references(
+        necklace_product(display_mode="hand_held"),
+        [worn, held],
+        OutputRole.LIFESTYLE,
+    )
     assert [item.row.index for item in selected] == [107]
 
 
@@ -747,7 +1004,9 @@ def test_necklace_hand_held_filter_rejects_invalid_compositions(
     )
 
     product = necklace_product(display_mode="hand_held")
-    selected, candidates = select_top_references(product, [rejected, good])
+    selected, candidates = select_top_references(
+        product, [rejected, good], OutputRole.LIFESTYLE
+    )
     rejected_score = score_reference(product, rejected)
 
     assert [item.row.index for item in selected] == [115]
@@ -755,7 +1014,7 @@ def test_necklace_hand_held_filter_rejects_invalid_compositions(
     assert any(expected_risk in risk for risk in rejected_score.risk)
 
 
-def test_necklace_diversity_penalizes_repeated_framing_collar_hair_and_orientation():
+def test_项链选择不再使用构图惩罚并保持审计顺序稳定():
     duplicate_profile = {
         "framing": "胸前近景",
         "collar_type": "低领",
@@ -774,12 +1033,20 @@ def test_necklace_diversity_penalizes_repeated_framing_collar_hair_and_orientati
         necklace_row(204, file_name="another-duplicate.jpg", **duplicate_profile),
     ]
 
-    selected, _ = select_top_references(necklace_product(), rows)
+    selected, candidates = select_top_references(
+        necklace_product(), rows, OutputRole.LIFESTYLE, audit_seed="项链稳定选择"
+    )
+    repeated, _ = select_top_references(
+        necklace_product(), reversed(rows), OutputRole.LIFESTYLE, audit_seed="项链稳定选择"
+    )
 
-    assert [item.row.index for item in selected[:2]] == [201, 203]
+    assert [item.row.file_name for item in selected] == [
+        item.row.file_name for item in repeated
+    ]
+    assert all(item.score >= candidates[0].score - 10 for item in selected)
 
 
-def test_hand_held_diversity_penalizes_repeated_holding_method():
+def test_手持选择不再使用持握惩罚并保持审计顺序稳定():
     common = {
         "applicable_display_modes": "hand_held",
         "visible_body_regions": "手指 掌心",
@@ -813,9 +1080,23 @@ def test_hand_held_diversity_penalizes_repeated_holding_method():
         ),
     ]
 
-    selected, _ = select_top_references(necklace_product(display_mode="hand_held"), rows)
+    selected, candidates = select_top_references(
+        necklace_product(display_mode="hand_held"),
+        rows,
+        OutputRole.LIFESTYLE,
+        audit_seed="手持稳定选择",
+    )
+    repeated, _ = select_top_references(
+        necklace_product(display_mode="hand_held"),
+        reversed(rows),
+        OutputRole.LIFESTYLE,
+        audit_seed="手持稳定选择",
+    )
 
-    assert [item.row.index for item in selected[:2]] == [211, 213]
+    assert [item.row.file_name for item in selected] == [
+        item.row.file_name for item in repeated
+    ]
+    assert all(item.score >= candidates[0].score - 10 for item in selected)
 
 
 @pytest.mark.parametrize(
@@ -837,7 +1118,9 @@ def test_necklace_worn_negative_visibility_and_regions_override_bare_keywords(
 ):
     rejected = necklace_row(301, **overrides)
 
-    selected, candidates = select_top_references(necklace_product(), [rejected])
+    selected, candidates = select_top_references(
+        necklace_product(), [rejected], OutputRole.LIFESTYLE
+    )
     scored = score_reference(necklace_product(), rejected)
 
     assert selected == []
@@ -856,7 +1139,9 @@ def test_necklace_hand_visibility_rejects_negated_clear_signal():
     )
     product = necklace_product(display_mode="hand_held")
 
-    selected, candidates = select_top_references(product, [rejected])
+    selected, candidates = select_top_references(
+        product, [rejected], OutputRole.LIFESTYLE
+    )
     scored = score_reference(product, rejected)
 
     assert selected == []
@@ -880,7 +1165,9 @@ def test_necklace_risk_levels_honor_negation_before_risk_keywords(
 ):
     reference = necklace_row(303, **{field_name: value})
 
-    selected, candidates = select_top_references(necklace_product(), [reference])
+    selected, candidates = select_top_references(
+        necklace_product(), [reference], OutputRole.LIFESTYLE
+    )
 
     assert [item.row.index for item in selected] == [303]
     assert [item.row.index for item in candidates] == [303]
@@ -910,7 +1197,9 @@ def test_necklace_hand_held_severe_negative_signals_override_positive_drop(notes
     )
     product = necklace_product(display_mode="hand_held")
 
-    selected, candidates = select_top_references(product, [rejected])
+    selected, candidates = select_top_references(
+        product, [rejected], OutputRole.LIFESTYLE
+    )
     scored = score_reference(product, rejected)
 
     assert selected == []
@@ -925,7 +1214,7 @@ def test_necklace_hand_held_severe_negative_signals_override_positive_drop(notes
 @pytest.mark.parametrize("confidence", ["不高", "中低"])
 def test_bracelet_confidence_rejects_negated_or_ambiguous_levels(confidence):
     selected, candidates = select_top_references(
-        product(), [row(305, confidence=confidence)]
+        product(), [row(305, confidence=confidence)], OutputRole.HAND_WORN
     )
 
     assert selected == []

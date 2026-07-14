@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.category_policies.base import (
@@ -11,6 +13,7 @@ from jewelry_on_hand.category_policies.base import (
     parse_confidence_level,
 )
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
+from jewelry_on_hand.output_roles import OutputRole, require_scene_replacement_role
 from jewelry_on_hand.product_types import ProductType
 
 
@@ -27,28 +30,26 @@ CLOSE_UP_POINTS = 8
 NON_PRIORITY_POINTS = -30
 STILL_OBJECT_EARRING_PURPOSE_POINTS = -50
 CROP_RISK_POINTS = -15
-DIVERSITY_SCORE_WINDOW = 40
-SAME_SHOOT_GROUP_PENALTY = 35
-SAME_STYLE_CLUSTER_PENALTY = 25
-SAME_SCENE_CLUSTER_PENALTY = 12
-SAME_POSE_CLUSTER_PENALTY = 12
-BATCH_SAME_FILE_PENALTY = 1000
-BATCH_SAME_SHOOT_GROUP_PENALTY = 45
-BATCH_SAME_STYLE_CLUSTER_PENALTY = 10
-SAME_FRAMING_PENALTY = 10
-SAME_COLLAR_PENALTY = 8
-SAME_HAIR_POSITION_PENALTY = 8
-SAME_BODY_ORIENTATION_PENALTY = 10
-SAME_HOLDING_METHOD_PENALTY = 10
+DIVERSITY_SCORE_WINDOW = 10
+DEFAULT_AUDIT_SEED = "reference-replacement-v1"
 
 
 def select_top_references(
-    product: ProductAnalysis, rows: Iterable[ReferenceRow]
+    product: ProductAnalysis,
+    rows: Iterable[ReferenceRow],
+    output_role: OutputRole | str,
+    *,
+    signature_usage: Mapping[str, int] | None = None,
+    audit_seed: str = DEFAULT_AUDIT_SEED,
 ) -> tuple[list[ScoredReference], list[ScoredReference]]:
+    role = require_scene_replacement_role(output_role, stage="参考图选择")
     existing_rows = [row for row in rows if row.file_exists]
-    filtered_rows = _filter_reference_rows(
-        product, existing_rows
-    )
+    role_rows = [
+        row for row in existing_rows if row.purpose_category.strip() == role.display_name
+    ]
+    if not role_rows:
+        raise ValueError(f"没有飞书用途分类为{role.display_name}的参考图")
+    filtered_rows = _filter_reference_rows(product, role_rows)
     if product.confirmed_product_type is ProductType.RING and len(filtered_rows) < 3:
         raise ValueError(
             "戒指参考图至少 3 张合格候选，"
@@ -57,41 +58,102 @@ def select_top_references(
     scored = [score_reference(product, row) for row in filtered_rows]
     ordered = sorted(scored, key=lambda item: (-item.score, item.row.index))
     candidates = _rerank(ordered)
-    selected = _select_diverse_top_references(candidates, limit=3)
+    selected = select_diverse_eligible_references(
+        candidates,
+        role,
+        signature_usage=signature_usage,
+        audit_seed=audit_seed,
+    )
     return selected, candidates
 
 
-def select_batch_diverse_references(
-    candidate_sets: Iterable[Sequence[ScoredReference]],
+def composition_signature_for_row(
+    row: ReferenceRow, output_role: OutputRole | str
+) -> str:
+    role = require_scene_replacement_role(output_role, stage="构图签名")
+    profile = _diversity_profile(row)
+    payload = {
+        "输出角色": role.value,
+        "人物取景": _normalized_signature_value(row.framing),
+        "身体区域": _normalized_signature_value(row.visible_body_regions),
+        "姿势": _normalized_signature_value(row.pose_keywords),
+        "镜面关系": _normalized_signature_value(row.mirror_relation),
+        "手侧": _normalized_signature_value(row.hand_side),
+        "手部朝向": _normalized_signature_value(row.hand_orientation),
+        "衣领": _normalized_signature_value(row.collar_type),
+        "头发位置": profile["hair_position"],
+        "身体朝向": profile["body_orientation"],
+        "持握方式": profile["holding_method"],
+        "场景": profile["scene_cluster"],
+    }
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _normalized_signature_value(value: str) -> str:
+    return " ".join(value.strip().lower().split()) or "未标注"
+
+
+def _audit_tie_break(seed: str, signature: str, file_name: str) -> str:
+    payload = f"{seed}\0{signature}\0{file_name}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def select_diverse_eligible_references(
+    candidates: Sequence[ScoredReference],
+    output_role: OutputRole | str,
+    *,
+    signature_usage: Mapping[str, int] | None = None,
+    audit_seed: str = DEFAULT_AUDIT_SEED,
     limit: int = 3,
-    initial_usage: dict[str, dict[str, int]] | None = None,
+) -> list[ScoredReference]:
+    role = require_scene_replacement_role(output_role, stage="低重复参考图选择")
+    if not candidates or limit <= 0:
+        return []
+    usage = signature_usage or {}
+    floor = max(item.score for item in candidates) - DIVERSITY_SCORE_WINDOW
+    pool = [item for item in candidates if item.score >= floor]
+
+    def ordering_key(item: ScoredReference) -> tuple[int, int, str]:
+        signature = composition_signature_for_row(item.row, role)
+        return (
+            usage.get(signature, 0),
+            -item.score,
+            _audit_tie_break(audit_seed, signature, item.row.file_name),
+        )
+
+    return _rerank(sorted(pool, key=ordering_key)[: min(limit, 3)])
+
+
+def select_batch_diverse_references(
+    candidate_sets: Sequence[Sequence[ScoredReference]],
+    output_roles: Sequence[OutputRole | str],
+    *,
+    limit: int = 3,
+    initial_signature_usage: Mapping[str, int] | None = None,
+    audit_seed: str = DEFAULT_AUDIT_SEED,
 ) -> list[list[ScoredReference]]:
-    batch_usage = _copy_batch_usage(initial_usage)
+    if len(candidate_sets) != len(output_roles):
+        raise ValueError("候选集合与输出角色数量必须一致")
+    usage = dict(initial_signature_usage or {})
     selections: list[list[ScoredReference]] = []
-    for candidates in candidate_sets:
-        selected = _select_diverse_top_references(
+    for index, (candidates, role) in enumerate(
+        zip(candidate_sets, output_roles, strict=True)
+    ):
+        selected = select_diverse_eligible_references(
             candidates,
+            role,
+            signature_usage=usage,
+            audit_seed=f"{audit_seed}:{index}",
             limit=limit,
-            batch_usage=batch_usage,
         )
         selections.append(selected)
-        _record_batch_usage(batch_usage, selected)
+        for item in selected:
+            signature = composition_signature_for_row(item.row, role)
+            usage[signature] = usage.get(signature, 0) + 1
     return selections
-
-
-def _copy_batch_usage(
-    initial_usage: dict[str, dict[str, int]] | None = None,
-) -> dict[str, dict[str, int]]:
-    batch_usage: dict[str, dict[str, int]] = {
-        "file": {},
-        "shoot_group": {},
-        "style_cluster": {},
-    }
-    if not initial_usage:
-        return batch_usage
-    for key in batch_usage:
-        batch_usage[key].update(initial_usage.get(key, {}))
-    return batch_usage
 
 
 def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredReference:
@@ -185,139 +247,6 @@ def _rerank(items: Sequence[ScoredReference]) -> list[ScoredReference]:
     ]
 
 
-def _select_diverse_top_references(
-    candidates: Sequence[ScoredReference],
-    limit: int,
-    batch_usage: dict[str, dict[str, int]] | None = None,
-) -> list[ScoredReference]:
-    if len(candidates) <= limit:
-        return list(candidates)
-
-    max_score = candidates[0].score
-    quality_floor = max_score - DIVERSITY_SCORE_WINDOW
-    quality_pool = [item for item in candidates if item.score >= quality_floor] or list(candidates)
-    safe_quality_pool = [
-        item
-        for item in quality_pool
-        if not item.risk and not item.ignored_reference_jewelry
-    ]
-    if safe_quality_pool:
-        quality_pool = safe_quality_pool
-    quality_pool = _prefer_unused_files(quality_pool, candidates, batch_usage)
-    first_item = max(
-        quality_pool,
-        key=lambda item: (
-            _batch_adjusted_score(item, batch_usage),
-            item.score,
-            -item.row.index,
-        ),
-    )
-    selected: list[ScoredReference] = [first_item]
-    remaining = [item for item in candidates if item is not first_item]
-
-    while remaining and len(selected) < limit:
-        eligible = [item for item in remaining if item.score >= quality_floor] or remaining
-        eligible = _prefer_unused_files(eligible, remaining, batch_usage)
-        next_item = max(
-            eligible,
-            key=lambda item: (
-                _diversity_adjusted_score(item, selected, batch_usage),
-                item.score,
-                -item.row.index,
-            ),
-        )
-        selected.append(next_item)
-        remaining.remove(next_item)
-
-    return _rerank(selected)
-
-
-def _prefer_unused_files(
-    primary_pool: Sequence[ScoredReference],
-    fallback_pool: Sequence[ScoredReference],
-    batch_usage: dict[str, dict[str, int]] | None,
-) -> Sequence[ScoredReference]:
-    if not batch_usage:
-        return primary_pool
-    unused_in_primary = [
-        item for item in primary_pool if batch_usage["file"].get(item.row.file_name, 0) == 0
-    ]
-    if unused_in_primary:
-        return unused_in_primary
-    unused_in_fallback = [
-        item for item in fallback_pool if batch_usage["file"].get(item.row.file_name, 0) == 0
-    ]
-    return unused_in_fallback or primary_pool
-
-
-def _diversity_adjusted_score(
-    item: ScoredReference,
-    selected: Sequence[ScoredReference],
-    batch_usage: dict[str, dict[str, int]] | None = None,
-) -> int:
-    penalty = 0
-    item_profile = _diversity_profile(item.row)
-    for selected_item in selected:
-        selected_profile = _diversity_profile(selected_item.row)
-        if item_profile["shoot_group"] == selected_profile["shoot_group"]:
-            penalty += SAME_SHOOT_GROUP_PENALTY
-        if item_profile["style_cluster"] == selected_profile["style_cluster"]:
-            penalty += SAME_STYLE_CLUSTER_PENALTY
-        if item_profile["scene_cluster"] == selected_profile["scene_cluster"]:
-            penalty += SAME_SCENE_CLUSTER_PENALTY
-        if item_profile["pose_cluster"] == selected_profile["pose_cluster"]:
-            penalty += SAME_POSE_CLUSTER_PENALTY
-        if _same_labeled_profile(item_profile, selected_profile, "framing"):
-            penalty += SAME_FRAMING_PENALTY
-        if _same_labeled_profile(item_profile, selected_profile, "collar"):
-            penalty += SAME_COLLAR_PENALTY
-        if _same_labeled_profile(item_profile, selected_profile, "hair_position"):
-            penalty += SAME_HAIR_POSITION_PENALTY
-        if _same_labeled_profile(item_profile, selected_profile, "body_orientation"):
-            penalty += SAME_BODY_ORIENTATION_PENALTY
-        if _same_labeled_profile(item_profile, selected_profile, "holding_method"):
-            penalty += SAME_HOLDING_METHOD_PENALTY
-    return item.score - penalty - _batch_penalty(item_profile, item.row.file_name, batch_usage)
-
-
-def _batch_adjusted_score(
-    item: ScoredReference,
-    batch_usage: dict[str, dict[str, int]] | None,
-) -> int:
-    profile = _diversity_profile(item.row)
-    return item.score - _batch_penalty(profile, item.row.file_name, batch_usage)
-
-
-def _batch_penalty(
-    profile: dict[str, str],
-    file_name: str,
-    batch_usage: dict[str, dict[str, int]] | None,
-) -> int:
-    if not batch_usage:
-        return 0
-    return (
-        batch_usage["file"].get(file_name, 0) * BATCH_SAME_FILE_PENALTY
-        + batch_usage["shoot_group"].get(profile["shoot_group"], 0)
-        * BATCH_SAME_SHOOT_GROUP_PENALTY
-        + batch_usage["style_cluster"].get(profile["style_cluster"], 0)
-        * BATCH_SAME_STYLE_CLUSTER_PENALTY
-    )
-
-
-def _record_batch_usage(
-    batch_usage: dict[str, dict[str, int]], selected: Sequence[ScoredReference]
-) -> None:
-    for item in selected:
-        profile = _diversity_profile(item.row)
-        _increment(batch_usage["file"], item.row.file_name)
-        _increment(batch_usage["shoot_group"], profile["shoot_group"])
-        _increment(batch_usage["style_cluster"], profile["style_cluster"])
-
-
-def _increment(counts: dict[str, int], key: str) -> None:
-    counts[key] = counts.get(key, 0) + 1
-
-
 def _diversity_profile(row: ReferenceRow) -> dict[str, str]:
     return {
         "style_cluster": _style_cluster(row),
@@ -330,12 +259,6 @@ def _diversity_profile(row: ReferenceRow) -> dict[str, str]:
         "body_orientation": _body_orientation_cluster(row),
         "holding_method": _holding_method_cluster(row),
     }
-
-
-def _same_labeled_profile(
-    first: dict[str, str], second: dict[str, str], key: str
-) -> bool:
-    return first[key] != "未标注" and first[key] == second[key]
 
 
 def _hair_position_cluster(row: ReferenceRow) -> str:
@@ -455,31 +378,7 @@ def _filter_reference_rows(
 ) -> list[ReferenceRow]:
     policy = get_category_policy(product.confirmed_product_type)
     evaluated = [(row, policy.evaluate_reference(product, row)) for row in rows]
-    primary = [
-        (row, adaptation)
-        for row, adaptation in evaluated
-        if adaptation.eligible and not adaptation.diversity_candidate
-    ]
-    if primary:
-        best_tier = min(adaptation.selection_tier for _, adaptation in primary)
-        primary_rows = [
-            row for row, adaptation in primary if adaptation.selection_tier == best_tier
-        ]
-    else:
-        primary_rows = []
-    diversity_rows = [
-        row
-        for row, adaptation in evaluated
-        if adaptation.eligible and adaptation.diversity_candidate
-    ]
-    if not primary_rows:
-        return diversity_rows
-
-    primary_indexes = {row.index for row in primary_rows}
-    return [
-        *primary_rows,
-        *(row for row in diversity_rows if row.index not in primary_indexes),
-    ]
+    return [row for row, adaptation in evaluated if adaptation.eligible]
 
 
 def _product_text(product: ProductAnalysis) -> str:

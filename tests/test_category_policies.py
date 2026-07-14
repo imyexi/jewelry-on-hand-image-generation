@@ -210,6 +210,57 @@ def test_ring_policy_reports_hard_filter_risks(overrides, risk_text):
     assert any(risk_text in risk for risk in adaptation.risks)
 
 
+@pytest.mark.parametrize(
+    ("overrides", "risk_text"),
+    [
+        ({"hand_side": "right"}, "左右手"),
+        ({"existing_jewelry": "食指上的戒指"}, "目标手指"),
+    ],
+)
+def test_戒指参考手侧与原戒指指位必须匹配目标(overrides, risk_text):
+    adaptation = get_category_policy(ProductType.RING).evaluate_reference(
+        ring_product(),
+        ring_reference(**overrides),
+    )
+
+    assert not adaptation.eligible
+    assert any(risk_text in risk for risk in adaptation.risks)
+
+
+def test_项链参考含界面或原首饰不可识别时被硬门拒绝():
+    policy = get_category_policy(ProductType.NECKLACE)
+    references = [
+        necklace_reference(notes="颈部完整，但画面含平台界面和状态栏"),
+        necklace_reference(existing_jewelry="原首饰无法完整识别"),
+    ]
+
+    adaptations = [
+        policy.evaluate_reference(necklace_product(), reference)
+        for reference in references
+    ]
+
+    assert all(not adaptation.eligible for adaptation in adaptations)
+    assert any("界面" in risk for risk in adaptations[0].risks)
+    assert any("原首饰" in risk for risk in adaptations[1].risks)
+
+
+def test_戒指参考含界面或原首饰不可识别时被硬门拒绝():
+    policy = get_category_policy(ProductType.RING)
+    references = [
+        ring_reference(notes="手指完整，但画面含平台界面和状态栏"),
+        ring_reference(existing_jewelry="原首饰无法完整识别"),
+    ]
+
+    adaptations = [
+        policy.evaluate_reference(ring_product(), reference)
+        for reference in references
+    ]
+
+    assert all(not adaptation.eligible for adaptation in adaptations)
+    assert any("界面" in risk for risk in adaptations[0].risks)
+    assert any("原首饰" in risk for risk in adaptations[1].risks)
+
+
 def test_pendant_only_policy_explains_current_block():
     policy = get_category_policy(ProductType.PENDANT_ONLY)
     with pytest.raises(ValueError, match="不支持无链独立吊坠"):

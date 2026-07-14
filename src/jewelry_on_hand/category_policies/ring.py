@@ -63,7 +63,7 @@ def _evaluate_ring_reference(
 ) -> ReferenceAdaptation:
     score = 0
     reasons: list[str] = []
-    risks: list[str] = []
+    risks = _replacement_blocking_risks(row)
 
     if _annotation_matches(row.applicable_product_types, {"ring", "戒指", "指环"}):
         score += 30
@@ -130,9 +130,13 @@ def _evaluate_ring_reference(
         risks.append("缺少有效的参考图左右手标注")
     elif normalized_side == product.hand_side.value:
         score += 8
-        reasons.append("参考图左右手与确认指位一致")
+        reasons.append("参考图左右手与确认手侧一致")
     else:
-        reasons.append("参考图为相反手，仅复用姿势且不覆盖确认指位")
+        risks.append("参考图左右手与目标手侧不匹配")
+
+    reference_fingers = _identified_reference_fingers(row.existing_jewelry)
+    if reference_fingers and reference_fingers != {product.finger_position}:
+        risks.append("参考图原戒指指位与目标手指不匹配")
 
     if not row.hand_orientation.strip():
         risks.append("缺少手部朝向标注")
@@ -149,6 +153,43 @@ def _evaluate_ring_reference(
         ignored_reference_jewelry=_ignored_reference_jewelry(row),
         selection_tier=selection_tier or 0,
     )
+
+
+def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
+    text = row.combined_text()
+    risks: list[str] = []
+    if contains_unnegated_any(
+        text, ("平台界面", "手机界面", "网页界面", "状态栏", "操作按钮")
+    ):
+        risks.append("画面含阻断替换的平台界面元素")
+    if contains_any(
+        text,
+        (
+            "原首饰无法完整识别",
+            "原有首饰无法完整识别",
+            "原首饰不可完整识别",
+            "原有首饰不可完整识别",
+            "原首饰无法清除",
+            "原有首饰无法清除",
+        ),
+    ):
+        risks.append("原首饰无法完整识别或安全清除")
+    return risks
+
+
+def _identified_reference_fingers(text: str) -> set[FingerPosition]:
+    aliases = {
+        FingerPosition.THUMB: ("拇指", "大拇指", "thumb"),
+        FingerPosition.INDEX: ("食指", "index_finger"),
+        FingerPosition.MIDDLE: ("中指", "middle_finger"),
+        FingerPosition.RING: ("无名指", "ring_finger"),
+        FingerPosition.LITTLE: ("小指", "尾指", "little_finger"),
+    }
+    return {
+        finger
+        for finger, terms in aliases.items()
+        if contains_any(text, terms)
+    }
 
 
 def _annotation_matches(value: str, aliases: set[str]) -> bool:

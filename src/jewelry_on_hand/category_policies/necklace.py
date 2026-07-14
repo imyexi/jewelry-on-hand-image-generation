@@ -100,7 +100,7 @@ def _evaluate_necklace_reference(
 ) -> ReferenceAdaptation:
     score = 0
     reasons: list[str] = []
-    risks: list[str] = []
+    risks = _replacement_blocking_risks(row)
     product_type_matches = _matches_product_type(product.confirmed_product_type, row)
     display_mode_matches = _matches_display_mode(product.display_mode, row)
 
@@ -154,6 +154,28 @@ def _evaluate_necklace_reference(
         ignored_reference_jewelry=ignored,
         selection_tier=selection_tier or 0,
     )
+
+
+def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
+    text = row.combined_text()
+    risks: list[str] = []
+    if contains_unnegated_any(
+        text, ("平台界面", "手机界面", "网页界面", "状态栏", "操作按钮")
+    ):
+        risks.append("画面含阻断替换的平台界面元素")
+    if contains_any(
+        text,
+        (
+            "原首饰无法完整识别",
+            "原有首饰无法完整识别",
+            "原首饰不可完整识别",
+            "原有首饰不可完整识别",
+            "原首饰无法清除",
+            "原有首饰无法清除",
+        ),
+    ):
+        risks.append("原首饰无法完整识别或安全清除")
+    return risks
 
 
 def _evaluate_worn_reference(

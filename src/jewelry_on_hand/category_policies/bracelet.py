@@ -4,9 +4,12 @@ from jewelry_on_hand.category_policies.base import (
     PromptFragments,
     ReferenceAdaptation,
     SHARED_BASIC_QC_ITEMS,
+    contains_affirmed_any,
     contains_any,
     contains_unnegated_any,
     parse_confidence_level,
+    parse_risk_level,
+    parse_visibility_level,
 )
 from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow
@@ -86,7 +89,13 @@ def _evaluate_bracelet_reference(
     pure_target = has_filter_target and not has_non_target
     combined_target = has_filter_target and has_non_target
     selection_tier = _selection_tier(row)
-    eligible = applicable and selection_tier is not None and (pure_target or combined_target)
+    risks.extend(_replacement_blocking_risks(row))
+    eligible = (
+        applicable
+        and selection_tier is not None
+        and (pure_target or combined_target)
+        and not risks
+    )
     return ReferenceAdaptation(
         eligible=eligible,
         score_adjustment=score,
@@ -96,6 +105,37 @@ def _evaluate_bracelet_reference(
         selection_tier=selection_tier or 0,
         diversity_candidate=combined_target,
     )
+
+
+def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
+    text = row.combined_text()
+    risks: list[str] = []
+    target_text = f"{row.visible_body_regions} {row.recommended_usage} {row.notes}"
+    if not contains_affirmed_any(target_text, ("手腕", "腕部", "前臂")):
+        risks.append("缺少可替换目标所在的手腕或前臂区域")
+    if parse_visibility_level(row.product_visibility) is ControlledLevel.LOW:
+        risks.append("产品预计展示面积过低")
+    if parse_risk_level(row.crop_risk) is ControlledLevel.HIGH:
+        risks.append("目标手腕或首饰区域裁切风险过高")
+    if contains_unnegated_any(text, ("严重遮挡", "大面积遮挡")):
+        risks.append("目标手腕或首饰区域存在严重遮挡")
+    if contains_unnegated_any(
+        text, ("平台界面", "手机界面", "网页界面", "状态栏", "操作按钮")
+    ):
+        risks.append("画面含阻断替换的平台界面元素")
+    if contains_any(
+        text,
+        (
+            "原首饰无法完整识别",
+            "原有首饰无法完整识别",
+            "原首饰不可完整识别",
+            "原有首饰不可完整识别",
+            "原首饰无法清除",
+            "原有首饰无法清除",
+        ),
+    ):
+        risks.append("原首饰无法完整识别或安全清除")
+    return risks
 
 
 def _selection_tier(row: ReferenceRow) -> int | None:
