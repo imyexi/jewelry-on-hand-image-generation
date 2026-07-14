@@ -283,10 +283,7 @@ def build_candidate_snapshot(
     )
     text_or_ui_risk = _parse_text_or_ui_risk(notes)
     unique_selector = _unique_target_selector(source_jewelry)
-    if (
-        _describes_multiple_same_jewelry(source_jewelry)
-        and unique_selector is None
-    ):
+    if not _has_confirmed_unique_target(source_jewelry):
         _prepare_review_error(
             "replacement_target.body_region",
             "多件同类首饰缺少内外、上下或次序选择器，无法确认唯一目标",
@@ -446,8 +443,9 @@ def validate_snapshot_binding(
             "replacement_target.target_product_count",
             "必须是单件目标，值只能为 1",
         )
-    if _describes_multiple_same_jewelry(target.source_jewelry) and not (
-        _has_unique_target_description(target.body_region)
+    if not _has_confirmed_unique_target(
+        target.source_jewelry,
+        target.body_region,
     ):
         _binding_error(
             "replacement_target.body_region",
@@ -693,28 +691,54 @@ def _composition_signature(
 
 
 def _describes_multiple_same_jewelry(text: str) -> bool:
-    return bool(
-        re.search(
-            r"(?:多|两|二|双|2|叠戴|双层).{0,4}(?:件|条|枚|层|个|手链|手串|项链|戒指)",
-            text,
-        )
+    if re.search(
+        r"(?:多\s*(?:件|条|枚|层|个|只|组)|双(?:层|条|枚|件|只)?|叠戴)",
+        text,
+    ):
+        return True
+    count_pattern = re.compile(
+        r"(?P<number>\d+|[一二两三四五六七八九十百]+)\s*"
+        r"(?P<unit>件|条|枚|层|个|只|组)"
     )
+    for match in count_pattern.finditer(text):
+        if re.search(r"第\s*$", text[: match.start()]):
+            continue
+        number = match.group("number")
+        if number.isdigit() and int(number) < 2:
+            continue
+        if number == "一":
+            continue
+        return True
+    return False
 
 
-def _has_unique_target_description(text: str) -> bool:
-    return _unique_target_selector(text) is not None
+def _has_confirmed_unique_target(
+    source_jewelry: str,
+    body_region: str | None = None,
+) -> bool:
+    if not _describes_multiple_same_jewelry(source_jewelry):
+        return True
+    selector = _unique_target_selector(source_jewelry)
+    if selector is None:
+        return False
+    return body_region is None or selector in body_region
 
 
 def _unique_target_selector(text: str) -> str | None:
-    match = re.search(
+    selector_patterns = (
+        r"第\s*(?:[1-9]\d*|[一二两三四五六七八九十百]+)\s*"
+        r"(?:条|件|枚|层|个|只)",
         r"(?:内侧|外侧|内圈|外圈|上方|下方|最上|最下|"
-        r"靠近?(?:手掌|手臂|前臂)|远离(?:手掌|手臂|前臂)|"
-        r"第[一二三四五六七八九\d]+(?:条|件|枚|层|个)?|"
-        r"inner|outer|upper|lower|first|second|third)",
-        text,
-        flags=re.IGNORECASE,
+        r"靠近?(?:手掌|手臂|前臂)|远离(?:手掌|手臂|前臂))"
+        r"(?:的)?(?:那(?:条|件|枚|个|只)|一(?:条|件|枚|个|只)|"
+        r"手链|手串|项链|戒指)",
+        r"(?:拇指|食指|中指|无名指|小指)(?:上?的?)?戒指",
     )
-    return match.group(0) if match is not None else None
+    for pattern in selector_patterns:
+        match = re.search(pattern, text)
+        if match is not None:
+            return match.group(0)
+    return None
 
 
 def _prepare_review_error(field_name: str, detail: str) -> None:

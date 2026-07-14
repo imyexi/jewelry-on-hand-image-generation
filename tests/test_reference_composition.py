@@ -48,6 +48,38 @@ def 手链产品() -> ProductAnalysis:
 
 
 @pytest.fixture
+def 戒指产品() -> ProductAnalysis:
+    return ProductAnalysis.from_dict(
+        {
+            "product_type": "戒指",
+            "detected_product_type": "ring",
+            "confirmed_product_type": "ring",
+            "classification_confidence": "high",
+            "classification_evidence": ["肉眼可见单枚戒指"],
+            "classification_source": "auto_confirmed",
+            "display_mode": "worn",
+            "source_image_type": "worn_source",
+            "wear_position": "左手无名指根部",
+            "visible_appearance": "单枚银色开口戒",
+            "color_family": ["银色"],
+            "style_mood": "暗调闪光",
+            "composition": "手部近景",
+            "product_dimensions": {},
+            "needs_full_front_display": True,
+            "special_requirements": [],
+            "layer_count": 1,
+            "has_pendant": False,
+            "pendant_count": 0,
+            "is_independent_multi_item": False,
+            "ring_count": 1,
+            "hand_side": "left",
+            "finger_position": "ring",
+            "ring_wear_style": "finger_base",
+        }
+    )
+
+
+@pytest.fixture
 def 已评分参考图(参考图文件: Path) -> ScoredReference:
     row = ReferenceRow(
         index=1,
@@ -462,6 +494,133 @@ def test_候选草稿拒绝只有手侧定位的多件同类首饰(
             reference,
             OutputRole.HAND_WORN,
         )
+
+
+def test_绑定校验拒绝用整组裸方位冒充单件选择器(
+    有效快照数据: dict[str, object],
+    参考图文件: Path,
+) -> None:
+    data = _修改嵌套字段(
+        有效快照数据,
+        "replacement_target.source_jewelry",
+        "左手腕上方两条同类手链",
+    )
+    data = _修改嵌套字段(
+        data,
+        "replacement_target.body_region",
+        "左手腕；上方",
+    )
+    snapshot = ReferenceCompositionSnapshot.from_dict(data)
+
+    with pytest.raises(ValueError, match="唯一目标.*prepare-review"):
+        validate_snapshot_binding(
+            snapshot,
+            reference_file=参考图文件,
+            output_role=OutputRole.HAND_WORN,
+            expected_rank=1,
+        )
+
+
+@pytest.mark.parametrize(
+    "existing_jewelry",
+    (
+        "左手腕三条同类手链",
+        "左手腕3条同类手链",
+        "四枚同类戒指",
+        "左手腕十一条同类手链",
+        "左手腕上方两条同类手链",
+    ),
+    ids=(
+        "三条手链",
+        "数字三条手链",
+        "四枚戒指",
+        "十一条手链",
+        "整组上方位置",
+    ),
+)
+def test_候选草稿拒绝未绑定具体单件的多件同类首饰(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+    existing_jewelry: str,
+) -> None:
+    row = replace(
+        已评分参考图.row,
+        existing_jewelry=existing_jewelry,
+    )
+    reference = replace(已评分参考图, row=row)
+
+    with pytest.raises(ValueError, match="唯一目标.*prepare-review"):
+        build_candidate_snapshot(
+            手链产品,
+            reference,
+            OutputRole.HAND_WORN,
+        )
+
+
+@pytest.mark.parametrize(
+    ("existing_jewelry", "selector"),
+    (
+        ("左手腕两条同类手链中的第 2 条", "第 2 条"),
+        ("左手腕两条同类手链中外侧那条", "外侧那条"),
+        ("左手腕第 2 条手链", "第 2 条"),
+    ),
+    ids=("序号绑定单条", "方位绑定单条", "单独序号不是数量"),
+)
+def test_候选草稿接受绑定到具体单件的手链选择器(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+    参考图文件: Path,
+    existing_jewelry: str,
+    selector: str,
+) -> None:
+    row = replace(
+        已评分参考图.row,
+        existing_jewelry=existing_jewelry,
+    )
+    reference = replace(已评分参考图, row=row)
+
+    snapshot = build_candidate_snapshot(
+        手链产品,
+        reference,
+        OutputRole.HAND_WORN,
+    )
+
+    assert selector in snapshot.replacement_target.body_region
+    validate_snapshot_binding(
+        snapshot,
+        reference_file=参考图文件,
+        output_role=OutputRole.HAND_WORN,
+        expected_rank=1,
+    )
+
+
+def test_候选草稿接受具体手指绑定的单枚戒指选择器(
+    戒指产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+    参考图文件: Path,
+) -> None:
+    row = replace(
+        已评分参考图.row,
+        jewelry_type="戒指",
+        existing_jewelry="四枚同类戒指中食指戒指",
+        visible_body_regions="左手、手指",
+        visible_fingers="食指、中指、无名指、小指",
+    )
+    reference = replace(已评分参考图, row=row)
+
+    snapshot = build_candidate_snapshot(
+        戒指产品,
+        reference,
+        OutputRole.HAND_WORN,
+    )
+
+    assert "食指戒指" in snapshot.replacement_target.body_region
+    validate_snapshot_binding(
+        snapshot,
+        reference_file=参考图文件,
+        output_role=OutputRole.HAND_WORN,
+        expected_rank=1,
+    )
 
 
 @pytest.mark.parametrize(
