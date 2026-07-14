@@ -556,11 +556,19 @@ def test_prepare_review_cli_rejects_hero_before_creating_run(tmp_path):
     assert not (output_root / "hero").exists()
 
 
-def test_record_decision_cli_rejects_hero_without_writing_decision(tmp_path, capsys):
+@pytest.mark.parametrize("run_role", ["hand_worn", "lifestyle"])
+def test_record_decision_cli_rejects_explicit_hero_for_valid_run_without_writing_decision(
+    tmp_path,
+    capsys,
+    run_role,
+):
     from jewelry_on_hand.cli import main
 
-    run_root = tmp_path / "runs" / "hero"
-    write_json(run_root / "analysis" / "output_role.json", {"output_role": "hero"})
+    run_root = tmp_path / "runs" / run_role
+    write_json(
+        run_root / "analysis" / "output_role.json",
+        {"output_role": run_role},
+    )
 
     assert main([
         "record-decision", "--run-root", str(run_root), "--action", "rerank",

@@ -3,6 +3,7 @@ from runpy import run_path
 
 import pytest
 
+from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import (
     ProductAnalysis,
     ProductConfirmationSnapshot,
@@ -12,9 +13,11 @@ from jewelry_on_hand.models import (
 )
 from jewelry_on_hand.output_roles import (
     OutputRole,
+    output_role_instruction,
     require_scene_replacement_role,
 )
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
+from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.prompt_builder import build_prompt
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, write_json
@@ -41,6 +44,16 @@ def test_scene_replacement_role_accepts_only_supported_roles(role):
 def test_scene_replacement_role_rejects_missing_or_hero(role):
     with pytest.raises(ValueError, match="主图 Skill|hand_worn|lifestyle"):
         require_scene_replacement_role(role, stage="generate")
+
+
+@pytest.mark.parametrize("role", [OutputRole.HERO, "hero"])
+def test_output_role_instruction_rejects_hero(role):
+    with pytest.raises(ValueError, match="主图 Skill"):
+        output_role_instruction(
+            role,
+            ProductType.BRACELET,
+            DisplayMode.WORN,
+        )
 
 
 def _analysis_payload() -> dict:
