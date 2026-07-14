@@ -157,13 +157,27 @@ def _evaluate_necklace_reference(
 
 
 def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
-    text = row.combined_text()
+    text = (
+        row.combined_text()
+        .replace("不含 blocking", "无blocking")
+        .replace("不存在原首饰", "无原首饰")
+        .replace("不存在原有首饰", "无原有首饰")
+    )
     risks: list[str] = []
     if contains_unnegated_any(
-        text, ("平台界面", "手机界面", "网页界面", "状态栏", "操作按钮")
+        text,
+        (
+            "大面积文字",
+            "blocking",
+            "平台界面",
+            "手机界面",
+            "网页界面",
+            "状态栏",
+            "操作按钮",
+        ),
     ):
         risks.append("画面含阻断替换的平台界面元素")
-    if contains_any(
+    if contains_unnegated_any(
         text,
         (
             "原首饰无法完整识别",

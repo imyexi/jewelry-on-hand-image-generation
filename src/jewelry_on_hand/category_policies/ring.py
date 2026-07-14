@@ -156,13 +156,27 @@ def _evaluate_ring_reference(
 
 
 def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
-    text = row.combined_text()
+    text = (
+        row.combined_text()
+        .replace("不含 blocking", "无blocking")
+        .replace("不存在原首饰", "无原首饰")
+        .replace("不存在原有首饰", "无原有首饰")
+    )
     risks: list[str] = []
     if contains_unnegated_any(
-        text, ("平台界面", "手机界面", "网页界面", "状态栏", "操作按钮")
+        text,
+        (
+            "大面积文字",
+            "blocking",
+            "平台界面",
+            "手机界面",
+            "网页界面",
+            "状态栏",
+            "操作按钮",
+        ),
     ):
         risks.append("画面含阻断替换的平台界面元素")
-    if contains_any(
+    if contains_unnegated_any(
         text,
         (
             "原首饰无法完整识别",
@@ -185,11 +199,21 @@ def _identified_reference_fingers(text: str) -> set[FingerPosition]:
         FingerPosition.RING: ("无名指", "ring_finger"),
         FingerPosition.LITTLE: ("小指", "尾指", "little_finger"),
     }
-    return {
-        finger
-        for finger, terms in aliases.items()
-        if contains_any(text, terms)
-    }
+    identified: set[FingerPosition] = set()
+    clauses = (
+        clause.strip()
+        for clause in re.split(r"[，,。；;]+", text)
+        if clause.strip()
+    )
+    for clause in clauses:
+        if not contains_unnegated_any(clause, ("原戒指", "戒指", "指环")):
+            continue
+        identified.update(
+            finger
+            for finger, terms in aliases.items()
+            if contains_any(clause, terms)
+        )
+    return identified
 
 
 def _annotation_matches(value: str, aliases: set[str]) -> bool:

@@ -108,22 +108,46 @@ def _evaluate_bracelet_reference(
 
 
 def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
-    text = row.combined_text()
+    text = (
+        row.combined_text()
+        .replace("不含 blocking", "无blocking")
+        .replace("不存在原首饰", "无原首饰")
+        .replace("不存在原有首饰", "无原有首饰")
+    )
     risks: list[str] = []
     target_text = f"{row.visible_body_regions} {row.recommended_usage} {row.notes}"
     if not contains_affirmed_any(target_text, ("手腕", "腕部", "前臂")):
         risks.append("缺少可替换目标所在的手腕或前臂区域")
-    if parse_visibility_level(row.product_visibility) is ControlledLevel.LOW:
+    product_visibility = parse_visibility_level(row.product_visibility)
+    if not row.product_visibility.strip():
+        risks.append("缺少产品预计展示面积标注")
+    elif product_visibility is None:
+        risks.append("产品预计展示面积标注无法识别")
+    elif product_visibility is ControlledLevel.LOW:
         risks.append("产品预计展示面积过低")
-    if parse_risk_level(row.crop_risk) is ControlledLevel.HIGH:
+    crop_risk = parse_risk_level(row.crop_risk)
+    if not row.crop_risk.strip():
+        risks.append("缺少目标手腕或首饰区域裁切风险标注")
+    elif crop_risk is None:
+        risks.append("目标手腕或首饰区域裁切风险标注无法识别")
+    elif crop_risk is ControlledLevel.HIGH:
         risks.append("目标手腕或首饰区域裁切风险过高")
     if contains_unnegated_any(text, ("严重遮挡", "大面积遮挡")):
         risks.append("目标手腕或首饰区域存在严重遮挡")
     if contains_unnegated_any(
-        text, ("平台界面", "手机界面", "网页界面", "状态栏", "操作按钮")
+        text,
+        (
+            "大面积文字",
+            "blocking",
+            "平台界面",
+            "手机界面",
+            "网页界面",
+            "状态栏",
+            "操作按钮",
+        ),
     ):
         risks.append("画面含阻断替换的平台界面元素")
-    if contains_any(
+    if contains_unnegated_any(
         text,
         (
             "原首饰无法完整识别",

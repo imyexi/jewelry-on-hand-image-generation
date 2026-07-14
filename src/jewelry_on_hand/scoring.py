@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
-import re
 from collections.abc import Iterable, Mapping, Sequence
 
+from jewelry_on_hand import reference_composition as _reference_composition
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.category_policies.base import (
     ControlledLevel,
@@ -71,29 +70,69 @@ def composition_signature_for_row(
     row: ReferenceRow, output_role: OutputRole | str
 ) -> str:
     role = require_scene_replacement_role(output_role, stage="构图签名")
-    profile = _diversity_profile(row)
-    payload = {
-        "输出角色": role.value,
-        "人物取景": _normalized_signature_value(row.framing),
-        "身体区域": _normalized_signature_value(row.visible_body_regions),
-        "姿势": _normalized_signature_value(row.pose_keywords),
-        "镜面关系": _normalized_signature_value(row.mirror_relation),
-        "手侧": _normalized_signature_value(row.hand_side),
-        "手部朝向": _normalized_signature_value(row.hand_orientation),
-        "衣领": _normalized_signature_value(row.collar_type),
-        "头发位置": profile["hair_position"],
-        "身体朝向": profile["body_orientation"],
-        "持握方式": profile["holding_method"],
-        "场景": profile["scene_cluster"],
-    }
-    serialized = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(serialized).hexdigest()
+    visible_body_regions = _signature_review_values(row.visible_body_regions)
+    pose = _reference_composition.ReferencePose(
+        body=_signature_pose_segment(
+            row.pose_keywords,
+            ("身体", "躯干", "上半身", "全身", "半身", "未入镜"),
+        ),
+        arm=_signature_pose_segment(
+            row.pose_keywords,
+            ("手臂", "前臂", "臂", "胳膊"),
+        ),
+        hand=_signature_value(row.hand_orientation),
+        hand_side=_signature_value(row.hand_side),
+    )
+    source_jewelry = _signature_value(row.existing_jewelry)
+    replacement_target = _reference_composition.ReplacementTarget(
+        body_region=_reference_composition._replacement_body_region(
+            pose.hand_side,
+            visible_body_regions,
+            _reference_composition._unique_target_selector(source_jewelry),
+        ),
+        source_jewelry=source_jewelry,
+        target_product_count=1,
+    )
+    return _reference_composition._composition_signature(
+        output_role=role,
+        framing=_signature_value(row.framing),
+        pose=pose,
+        background=_reference_composition._join_review_values(
+            _signature_value(row.scene_keywords),
+            _signature_value(row.notes),
+        ),
+        lighting=_reference_composition._join_review_values(
+            _signature_value(row.style_category),
+            _signature_value(row.notes),
+        ),
+        replacement_target=replacement_target,
+    )
 
 
-def _normalized_signature_value(value: str) -> str:
-    return " ".join(value.strip().lower().split()) or "未标注"
+def _signature_value(value: str) -> str:
+    return value.strip() or "未标注"
+
+
+def _signature_review_values(value: str) -> tuple[str, ...]:
+    if not value.strip():
+        return ("未标注",)
+    return _reference_composition._split_review_values(
+        value,
+        "visible_body_regions",
+    )
+
+
+def _signature_pose_segment(value: str, markers: Sequence[str]) -> str:
+    if not value.strip():
+        return "未标注"
+    try:
+        return _reference_composition._extract_review_segment(
+            value,
+            markers,
+            "构图签名姿势",
+        )
+    except ValueError:
+        return "未标注"
 
 
 def _audit_tie_break(seed: str, signature: str, file_name: str) -> str:
@@ -245,114 +284,6 @@ def _rerank(items: Sequence[ScoredReference]) -> list[ScoredReference]:
         )
         for rank, item in enumerate(items, start=1)
     ]
-
-
-def _diversity_profile(row: ReferenceRow) -> dict[str, str]:
-    return {
-        "style_cluster": _style_cluster(row),
-        "scene_cluster": _scene_cluster(row),
-        "pose_cluster": _pose_cluster(row),
-        "shoot_group": _shoot_group(row.file_name),
-        "framing": row.framing.strip() or "未标注",
-        "collar": row.collar_type.strip() or "未标注",
-        "hair_position": _hair_position_cluster(row),
-        "body_orientation": _body_orientation_cluster(row),
-        "holding_method": _holding_method_cluster(row),
-    }
-
-
-def _hair_position_cluster(row: ReferenceRow) -> str:
-    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
-    for label, terms in (
-        ("左侧", ("头发左侧", "左侧头发", "头发向左")),
-        ("右侧", ("头发右侧", "右侧头发", "头发向右")),
-        ("后置", ("头发后置", "头发在后", "盘发", "扎发")),
-        ("双侧披发", ("披发", "散发", "头发披肩")),
-    ):
-        if _contains_any(text, terms):
-            return label
-    return "未标注"
-
-
-def _body_orientation_cluster(row: ReferenceRow) -> str:
-    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
-    for label, terms in (
-        ("左侧身", ("左侧身", "身体向左", "左转身")),
-        ("右侧身", ("右侧身", "身体向右", "右转身")),
-        ("侧身", ("侧身", "侧面")),
-        ("背身", ("背身", "背面")),
-        ("正面", ("正面", "面向镜头", "身体朝前")),
-    ):
-        if _contains_any(text, terms):
-            return label
-    return "未标注"
-
-
-def _holding_method_cluster(row: ReferenceRow) -> str:
-    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
-    for label, terms in (
-        ("双手", ("双手持", "双手展示", "双手悬挂")),
-        ("捏持", ("捏持", "指尖夹持", "两指夹持")),
-        ("掌托", ("掌心托住", "手掌托住", "托在掌心")),
-        ("握持", ("握持", "虎口持", "虎口握")),
-        ("悬挂", ("悬挂", "提起链条")),
-    ):
-        if _contains_any(text, terms):
-            return label
-    return "未标注"
-
-
-def _style_cluster(row: ReferenceRow) -> str:
-    style = row.style_category.strip()
-    if style:
-        return style
-    return _keyword_cluster(row.combined_text())
-
-
-def _scene_cluster(row: ReferenceRow) -> str:
-    return _keyword_cluster(f"{row.scene_keywords} {row.notes} {row.recommended_usage}")
-
-
-def _pose_cluster(row: ReferenceRow) -> str:
-    text = f"{row.purpose_category} {row.recommended_usage} {row.notes} {row.pose_keywords}"
-    if _contains_any(text, ("对镜", "镜子", "镜面", "镜中")):
-        return "对镜"
-    if _contains_any(text, ("双手", "交叠")):
-        return "双手"
-    if _contains_any(text, ("掌心", "手掌", "托物")):
-        return "掌心/托物"
-    if _contains_any(text, ("手背", "指背")):
-        return "手背"
-    if _contains_any(text, ("前臂", "手臂")):
-        return "前臂"
-    if _contains_any(text, ("近景", "特写", "close-up", "特近")):
-        return "近景"
-    return "其他姿势"
-
-
-def _keyword_cluster(text: str) -> str:
-    if _contains_any(text, ("对镜", "镜子", "镜面", "镜中", "mirror")):
-        return "对镜"
-    if _contains_any(text, ("车内", "车里", "驾驶")):
-        return "车内"
-    if _contains_any(text, ("户外", "阳光", "室外")):
-        return "户外"
-    if _contains_any(text, ("白衬衫", "白衣", "奶油", "浅色")):
-        return "清透白衣"
-    if _contains_any(text, ("暗调", "暗光", "黑衣", "黑底", "闪光")):
-        return "暗调"
-    if _contains_any(text, ("床", "床品", "被子", "布料")):
-        return "床品"
-    return "其他场景"
-
-
-def _shoot_group(file_name: str) -> str:
-    stem = re.sub(r"\.[^.]+$", "", file_name.strip())
-    grouped = re.sub(r"\s*[（(]\d+[）)]\s*$", "", stem)
-    if grouped != stem:
-        return grouped
-    grouped = re.sub(r"[-_]\d+$", "", stem)
-    return grouped or stem
 
 
 def _make_scored(
