@@ -132,6 +132,7 @@ class FeishuGateway(Protocol):
         record_id: str,
         fields: dict[str, Any],
         required_empty_fields: tuple[str, ...],
+        expected_fields: dict[str, Any],
     ) -> dict[str, Any]: ...
 
 
@@ -290,9 +291,24 @@ class LarkCliGateway:
         file_token: str,
         destination: Path,
     ) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(destination.name + ".download.tmp")
-        temporary.unlink(missing_ok=True)
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise FeishuReferenceError(
+                f"创建飞书附件目录失败：{destination.parent}；"
+                "请检查目录权限和磁盘空间"
+            ) from exc
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            raise FeishuReferenceError(
+                f"清理旧的飞书附件临时文件失败：{temporary}；"
+                "请检查文件占用和目录权限"
+            ) from exc
+
+        primary_error: Exception | None = None
+        primary_cause: OSError | None = None
         try:
             self._run(
                 "base",
@@ -316,14 +332,33 @@ class LarkCliGateway:
                     f"飞书附件下载后临时文件不存在：{temporary}"
                 )
             os.replace(temporary, destination)
-        except FeishuReferenceError:
-            raise
+        except FeishuReferenceError as exc:
+            primary_error = exc
         except OSError as exc:
-            raise FeishuReferenceError(
+            primary_error = FeishuReferenceError(
                 f"无法发布飞书附件 {destination}，请检查目录权限和磁盘空间"
-            ) from exc
-        finally:
+            )
+            primary_cause = exc
+        except Exception as exc:
+            primary_error = exc
+
+        cleanup_error: OSError | None = None
+        try:
             temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            cleanup_error = exc
+
+        if primary_error is not None:
+            if cleanup_error is not None:
+                raise primary_error from cleanup_error
+            if primary_cause is not None:
+                raise primary_error from primary_cause
+            raise primary_error
+        if cleanup_error is not None:
+            raise FeishuReferenceError(
+                f"清理飞书附件临时文件失败：{temporary}；"
+                "附件已发布，请检查文件占用和目录权限"
+            ) from cleanup_error
 
     def create_field(
         self, base_token: str, table_id: str, field: dict[str, Any]
@@ -366,8 +401,16 @@ class LarkCliGateway:
         record_id: str,
         fields: dict[str, Any],
         required_empty_fields: tuple[str, ...],
+        expected_fields: dict[str, Any],
     ) -> dict[str, Any]:
-        del base_token, table_id, record_id, fields, required_empty_fields
+        del (
+            base_token,
+            table_id,
+            record_id,
+            fields,
+            required_empty_fields,
+            expected_fields,
+        )
         raise AtomicConditionalWriteUnsupportedError(
             "当前 lark-cli 网关不支持原子条件写；请改用支持“指定字段仍为空才写入”"
             "的飞书网关后重试"
@@ -674,31 +717,41 @@ def import_enrichment_results(
         raise InvalidEnrichmentError("补齐结果必须是包含 records 数组的 JSON 对象")
 
     results_by_id: dict[str, dict[str, str]] = {}
+    audit_records: list[dict[str, Any]] = []
+    audit_by_id: dict[str, dict[str, Any]] = {}
     for item in submitted["records"]:
         if not isinstance(item, dict):
             raise InvalidEnrichmentError("补齐结果 records 中每项必须是对象")
         record_id = _field_text(item.get("record_id"))
         if record_id not in pending_by_id:
             raise InvalidEnrichmentError(f"记录 {record_id!r} 不在待补齐清单")
-        fields = item.get("fields")
-        if not isinstance(fields, dict):
-            raise InvalidEnrichmentError(f"记录 {record_id} 缺少 fields 对象")
-        missing = [
-            name
-            for name in REQUIRED_AI_FIELD_NAMES
-            if not _field_text(fields.get(name))
-        ]
-        if missing:
-            raise InvalidEnrichmentError(
-                f"记录 {record_id} 缺少必需补齐字段：{'、'.join(missing)}"
-            )
+        if record_id not in audit_by_id:
+            audit_item = _new_audit_item(record_id)
+            audit_records.append(audit_item)
+            audit_by_id[record_id] = audit_item
+            _write_import_audit(root, audit_records)
+        audit_item = audit_by_id[record_id]
+        try:
+            fields = item.get("fields")
+            if not isinstance(fields, dict):
+                raise InvalidEnrichmentError(f"记录 {record_id} 缺少 fields 对象")
+            missing = [
+                name
+                for name in REQUIRED_AI_FIELD_NAMES
+                if not _field_text(fields.get(name))
+            ]
+            if missing:
+                raise InvalidEnrichmentError(
+                    f"记录 {record_id} 缺少必需补齐字段：{'、'.join(missing)}"
+                )
+        except InvalidEnrichmentError as exc:
+            audit_item["status"] = "failed"
+            audit_item["error"] = str(exc)
+            _write_import_audit(root, audit_records)
+            raise
         results_by_id[record_id] = {
             name: _field_text(fields.get(name)) for name in AI_FIELD_NAMES
         }
-
-    audit_records = [_new_audit_item(record_id) for record_id in results_by_id]
-    audit_by_id = {item["record_id"]: item for item in audit_records}
-    _write_import_audit(root, audit_records)
 
     try:
         base_token, table_id = gateway.resolve_source(config)
@@ -757,6 +810,7 @@ def import_enrichment_results(
             )
             patch["AI补齐状态"] = "已完成"
             patch["AI补齐版本"] = ENRICHMENT_VERSION
+            expected_fields = _atomic_expected_fields(current_fields)
             audit_item["patch"] = patch
             conditional_result = gateway.update_record_if_fields_empty(
                 base_token,
@@ -764,13 +818,18 @@ def import_enrichment_results(
                 record_id,
                 patch,
                 tuple(patch),
+                expected_fields,
             )
             if not conditional_result.get("updated"):
                 conflicts = dict(conditional_result.get("conflicts") or {})
                 audit_item["status"] = "conflict"
                 audit_item["details"] = {
                     name: {
-                        "expected": _field_text(patch.get(name)),
+                        "expected": _field_text(
+                            patch[name]
+                            if name in patch
+                            else expected_fields.get(name)
+                        ),
                         "actual": _field_text(actual),
                     }
                     for name, actual in conflicts.items()
@@ -783,23 +842,31 @@ def import_enrichment_results(
                 )
 
             written_fields = dict(written.get("fields") or {})
-            mismatches = {
-                name: {
-                    "expected": _field_text(expected),
-                    "actual": _field_text(written_fields.get(name)),
-                }
-                for name, expected in patch.items()
-                if _field_text(written_fields.get(name)) != _field_text(expected)
-            }
-            if mismatches:
-                audit_item["status"] = "conflict"
-                audit_item["details"] = mismatches
-                continue
-
             verified_values = {
                 name: _field_text(written_fields.get(name))
                 for name in AI_FIELD_NAMES
             }
+            missing_ai_fields = _missing_ai_fields(
+                written_fields, verified_values
+            )
+            mismatches = _conditional_readback_mismatches(
+                written_fields,
+                patch,
+                expected_fields,
+            )
+            if mismatches:
+                audit_item["status"] = "conflict"
+                audit_item["details"] = mismatches
+                if missing_ai_fields:
+                    audit_item["details"]["missing_ai_fields"] = missing_ai_fields
+                continue
+
+            if missing_ai_fields:
+                audit_item["status"] = "conflict"
+                audit_item["details"] = {
+                    "missing_ai_fields": missing_ai_fields,
+                }
+                continue
             source_fields = {
                 name: written_fields.get(name) for name in SOURCE_FIELD_NAMES
             }
@@ -807,9 +874,6 @@ def import_enrichment_results(
                 record_id,
                 source_fields,
                 manifest_item.get("attachment"),
-            )
-            missing_ai_fields = _missing_ai_fields(
-                written_fields, verified_values
             )
         except AtomicConditionalWriteUnsupportedError as exc:
             audit_item["error"] = str(exc)
@@ -1207,6 +1271,38 @@ def _prepare_enrichment_update(
     return current_fields, remote, final_values, patch
 
 
+def _atomic_expected_fields(current_fields: dict[str, Any]) -> dict[str, Any]:
+    names = dict.fromkeys(
+        SOURCE_FIELD_NAMES + AI_FIELD_NAMES + TRACKING_FIELD_NAMES
+    )
+    return {name: current_fields.get(name) for name in names}
+
+
+def _conditional_readback_mismatches(
+    written_fields: dict[str, Any],
+    patch: dict[str, Any],
+    expected_fields: dict[str, Any],
+) -> dict[str, dict[str, str]]:
+    mismatches: dict[str, dict[str, str]] = {}
+    for name, expected in expected_fields.items():
+        if name in patch:
+            continue
+        actual = written_fields.get(name)
+        if actual != expected:
+            mismatches[name] = {
+                "expected": _field_text(expected),
+                "actual": _field_text(actual),
+            }
+    for name, expected in patch.items():
+        actual = written_fields.get(name)
+        if _field_text(actual) != _field_text(expected):
+            mismatches[name] = {
+                "expected": _field_text(expected),
+                "actual": _field_text(actual),
+            }
+    return mismatches
+
+
 def _validate_source_unchanged(
     record_id: str,
     manifest_item: dict[str, Any],
@@ -1530,7 +1626,10 @@ def _commit_import_documents(
             journal_path,
             {"version": 1, "phase": "prepared", "files": entries},
         )
-        _publish_import_transaction(root, {"version": 1, "files": entries})
+        _publish_import_transaction(
+            root,
+            {"version": 1, "phase": "prepared", "files": entries},
+        )
     except FeishuReferenceError:
         raise
     except OSError as exc:
@@ -1557,42 +1656,79 @@ def _recover_import_transaction(root: Path) -> None:
         raise FeishuReferenceError(
             "本地缓存事务 journal 无法读取，缓存状态 damaged；请保留现场并人工处理"
         ) from exc
-    if not isinstance(journal, dict) or journal.get("version") != 1:
-        raise FeishuReferenceError(
-            "本地缓存事务 journal 格式无效，缓存状态 damaged；请保留现场并人工处理"
-        )
     _publish_import_transaction(root, journal)
+
+
+def _validate_import_journal(
+    root: Path,
+    journal: Any,
+) -> list[tuple[Path, Path, str]]:
+    transaction_dir = root / IMPORT_TRANSACTION_DIRECTORY_NAME
+    damaged_message = (
+        "本地缓存事务 journal 或 staged 文件无效，缓存状态 damaged；"
+        "请保留现场并人工处理"
+    )
+    if not isinstance(journal, dict) or set(journal) != {
+        "version",
+        "phase",
+        "files",
+    }:
+        raise FeishuReferenceError(damaged_message)
+    if type(journal["version"]) is not int or journal["version"] != 1:
+        raise FeishuReferenceError(damaged_message)
+    if journal["phase"] != "prepared":
+        raise FeishuReferenceError(damaged_message)
+
+    entries = journal["files"]
+    if not isinstance(entries, list) or len(entries) != len(IMPORT_TRANSACTION_FILES):
+        raise FeishuReferenceError(damaged_message)
+
+    validated: list[tuple[Path, Path, str]] = []
+    try:
+        for expected_name, entry in zip(IMPORT_TRANSACTION_FILES, entries, strict=True):
+            if not isinstance(entry, dict) or set(entry) != {
+                "target",
+                "staged",
+                "sha256",
+            }:
+                raise FeishuReferenceError(damaged_message)
+            if entry["target"] != expected_name:
+                raise FeishuReferenceError(damaged_message)
+
+            staged_name = entry["staged"]
+            expected_sha256 = entry["sha256"]
+            if not isinstance(staged_name, str) or staged_name != f"{expected_name}.new":
+                raise FeishuReferenceError(damaged_message)
+            if not isinstance(expected_sha256, str) or re.fullmatch(
+                r"[0-9a-f]{64}", expected_sha256
+            ) is None:
+                raise FeishuReferenceError(damaged_message)
+
+            relative_staged_path = Path(staged_name)
+            if relative_staged_path.is_absolute() or ".." in relative_staged_path.parts:
+                raise FeishuReferenceError(damaged_message)
+            staged_path = transaction_dir / relative_staged_path
+            if staged_path.resolve().parent != transaction_dir.resolve():
+                raise FeishuReferenceError(damaged_message)
+            if not staged_path.is_file() or _file_sha256(staged_path) != expected_sha256:
+                raise FeishuReferenceError(damaged_message)
+            validated.append((staged_path, root / expected_name, expected_sha256))
+    except FeishuReferenceError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise FeishuReferenceError(damaged_message) from exc
+    return validated
 
 
 def _publish_import_transaction(root: Path, journal: dict[str, Any]) -> None:
     transaction_dir = root / IMPORT_TRANSACTION_DIRECTORY_NAME
     journal_path = root / IMPORT_TRANSACTION_JOURNAL_FILENAME
-    entries = journal.get("files")
-    if not isinstance(entries, list) or len(entries) != len(IMPORT_TRANSACTION_FILES):
-        raise FeishuReferenceError(
-            "本地缓存事务文件清单不完整，缓存状态 damaged；请保留现场并人工处理"
-        )
+    validated = _validate_import_journal(root, journal)
     try:
-        for expected_name, entry in zip(IMPORT_TRANSACTION_FILES, entries, strict=True):
-            if not isinstance(entry, dict) or entry.get("target") != expected_name:
-                raise FeishuReferenceError(
-                    "本地缓存事务文件顺序异常，缓存状态 damaged；请保留现场并人工处理"
-                )
-            staged_path = transaction_dir / _required_text(
-                entry.get("staged"), "事务 staged 文件"
-            )
-            expected_sha256 = _required_text(
-                entry.get("sha256"), "事务 staged 摘要"
-            )
-            if not staged_path.is_file() or _file_sha256(staged_path) != expected_sha256:
-                raise FeishuReferenceError(
-                    f"本地缓存事务 staged 文件损坏：{expected_name}；"
-                    "缓存状态 damaged，请保留现场并人工处理"
-                )
-            target_path = root / expected_name
+        for staged_path, target_path, expected_sha256 in validated:
             if target_path.is_file() and _file_sha256(target_path) == expected_sha256:
                 continue
-            temporary = root / f".{expected_name}.transaction.tmp"
+            temporary = root / f".{target_path.name}.transaction.tmp"
             _write_file_fsync(temporary, staged_path.read_bytes())
             os.replace(temporary, target_path)
             _fsync_directory(root)

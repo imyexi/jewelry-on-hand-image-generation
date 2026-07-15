@@ -20,8 +20,10 @@ from jewelry_on_hand.feishu_reference_source import (
     PendingEnrichmentError,
     RING_REQUIRED_FIELD_NAMES,
     audit_enrichment_readback,
+    build_reference_source_snapshot,
     import_enrichment_results,
     load_cached_reference_rows,
+    sync_and_load_reference_rows,
 )
 
 
@@ -255,6 +257,154 @@ def test_lark_cli_gateway_attachment_success_atomically_replaces_target(
     assert list(tmp_path.glob("*.download.tmp")) == []
 
 
+def test_lark_cli_gateway_attachment_wraps_destination_directory_failure(
+    tmp_path,
+    monkeypatch,
+):
+    gateway = LarkCliGateway("lark-cli")
+    destination = tmp_path / "nested" / "reference.png"
+    real_mkdir = Path.mkdir
+
+    def fail_destination_mkdir(path, *args, **kwargs):
+        if path == destination.parent:
+            raise OSError("测试目录不可写")
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_destination_mkdir)
+
+    with pytest.raises(FeishuReferenceError, match="创建飞书附件目录失败") as exc_info:
+        gateway.download_attachment(
+            "base-token", "table-id", "rec1", "file1", destination
+        )
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+
+def test_lark_cli_gateway_attachment_wraps_initial_temporary_cleanup_failure(
+    tmp_path,
+    monkeypatch,
+):
+    gateway = LarkCliGateway("lark-cli")
+    destination = tmp_path / "reference.png"
+    temporary = destination.with_name(destination.name + ".download.tmp")
+    real_unlink = Path.unlink
+
+    def fail_initial_unlink(path, *, missing_ok=False):
+        if path == temporary:
+            raise OSError("测试旧临时文件不可删除")
+        return real_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_initial_unlink)
+    monkeypatch.setattr(
+        gateway,
+        "_run",
+        lambda *args: pytest.fail("首次临时文件清理失败后不应开始下载"),
+    )
+
+    with pytest.raises(FeishuReferenceError, match="清理旧的飞书附件临时文件失败") as exc_info:
+        gateway.download_attachment(
+            "base-token", "table-id", "rec1", "file1", destination
+        )
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+
+def test_lark_cli_gateway_attachment_preserves_download_error_when_cleanup_fails(
+    tmp_path,
+    monkeypatch,
+):
+    gateway = LarkCliGateway("lark-cli")
+    destination = tmp_path / "reference.png"
+    destination.write_bytes(b"old")
+    temporary = destination.with_name(destination.name + ".download.tmp")
+    real_unlink = Path.unlink
+    temporary_unlinks = 0
+
+    def fail_final_unlink(path, *, missing_ok=False):
+        nonlocal temporary_unlinks
+        if path == temporary:
+            temporary_unlinks += 1
+            if temporary_unlinks == 2:
+                raise OSError("测试 finally 清理失败")
+        return real_unlink(path, missing_ok=missing_ok)
+
+    def fail_after_partial_download(*args):
+        output = Path(args[args.index("--output") + 1])
+        output.write_bytes(b"partial")
+        raise FeishuReferenceError("测试附件下载失败")
+
+    monkeypatch.setattr(Path, "unlink", fail_final_unlink)
+    monkeypatch.setattr(gateway, "_run", fail_after_partial_download)
+
+    with pytest.raises(FeishuReferenceError, match="测试附件下载失败") as exc_info:
+        gateway.download_attachment(
+            "base-token", "table-id", "rec1", "file1", destination
+        )
+
+    assert destination.read_bytes() == b"old"
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert "finally 清理失败" in str(exc_info.value.__cause__)
+
+
+def test_lark_cli_gateway_attachment_wraps_cleanup_failure_after_success(
+    tmp_path,
+    monkeypatch,
+):
+    gateway = LarkCliGateway("lark-cli")
+    destination = tmp_path / "reference.png"
+    destination.write_bytes(b"old")
+    temporary = destination.with_name(destination.name + ".download.tmp")
+    real_unlink = Path.unlink
+    temporary_unlinks = 0
+
+    def fail_final_unlink(path, *, missing_ok=False):
+        nonlocal temporary_unlinks
+        if path == temporary:
+            temporary_unlinks += 1
+            if temporary_unlinks == 2:
+                raise OSError("测试成功后的 finally 清理失败")
+        return real_unlink(path, missing_ok=missing_ok)
+
+    def complete_download(*args):
+        output = Path(args[args.index("--output") + 1])
+        output.write_bytes(b"new")
+        return {"ok": True, "data": {}}
+
+    monkeypatch.setattr(Path, "unlink", fail_final_unlink)
+    monkeypatch.setattr(gateway, "_run", complete_download)
+
+    with pytest.raises(FeishuReferenceError, match="清理飞书附件临时文件失败") as exc_info:
+        gateway.download_attachment(
+            "base-token", "table-id", "rec1", "file1", destination
+        )
+
+    assert destination.read_bytes() == b"new"
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+
+def test_lark_cli_gateway_attachment_unexpected_download_error_still_cleans_temporary(
+    tmp_path,
+    monkeypatch,
+):
+    gateway = LarkCliGateway("lark-cli")
+    destination = tmp_path / "reference.png"
+    temporary = destination.with_name(destination.name + ".download.tmp")
+
+    def fail_unexpectedly_after_partial_download(*args):
+        output = Path(args[args.index("--output") + 1])
+        output.write_bytes(b"partial")
+        raise RuntimeError("测试意外下载异常")
+
+    monkeypatch.setattr(gateway, "_run", fail_unexpectedly_after_partial_download)
+
+    with pytest.raises(RuntimeError, match="测试意外下载异常"):
+        gateway.download_attachment(
+            "base-token", "table-id", "rec1", "file1", destination
+        )
+
+    assert not temporary.exists()
+
+
 PNG_3X2 = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000030000000208020000001216f14d"
     "0000000c49444154789c63606060000000040001f61738550000000049454e44ae426082"
@@ -386,9 +536,18 @@ class FakeGateway:
         record_id,
         fields,
         required_empty_fields,
+        expected_fields=None,
     ):
+        expected_fields = dict(expected_fields or {})
         self.atomic_attempts.append(
-            (base_token, table_id, record_id, dict(fields), tuple(required_empty_fields))
+            (
+                base_token,
+                table_id,
+                record_id,
+                dict(fields),
+                tuple(required_empty_fields),
+                expected_fields,
+            )
         )
         if self.before_update:
             self.before_update(record_id, fields)
@@ -404,6 +563,13 @@ class FakeGateway:
                     for name in required_empty_fields
                     if str(current_fields.get(name) or "").strip()
                 }
+                conflicts.update(
+                    {
+                        name: current_fields.get(name)
+                        for name, expected in expected_fields.items()
+                        if current_fields.get(name) != expected
+                    }
+                )
                 if conflicts:
                     return {
                         "updated": False,
@@ -456,6 +622,45 @@ def write_enrichment_input(tmp_path, records):
         encoding="utf-8",
     )
     return input_path
+
+
+def make_import_transaction_fixture(config):
+    root = config.cache_root
+    transaction_dir = root / ".enrichment-import-transaction"
+    transaction_dir.mkdir(parents=True, exist_ok=True)
+    targets = (
+        "manifest.json",
+        "enrichment.json",
+        "pending_enrichment.json",
+        "enrichment-import-audit.json",
+    )
+    documents = {
+        name: (root / name).read_bytes()
+        if (root / name).is_file()
+        else json.dumps(
+            {
+                "version": 1,
+                "atomic_write_contract": "测试原子条件写",
+                "records": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ).encode("utf-8")
+        for name in targets
+    }
+    entries = []
+    for name in targets:
+        staged = transaction_dir / f"{name}.new"
+        staged.write_bytes(documents[name])
+        entries.append(
+            {
+                "target": name,
+                "staged": staged.name,
+                "sha256": hashlib.sha256(documents[name]).hexdigest(),
+            }
+        )
+    journal = {"version": 1, "phase": "prepared", "files": entries}
+    return transaction_dir, root / ".enrichment-import-transaction.json", journal
 
 
 def legacy_source_fingerprint(item):
@@ -980,6 +1185,159 @@ def test_import_uses_atomic_empty_field_update_without_overwriting_racing_manual
     assert audit["records"][0]["details"]["风格分类"]["actual"] == "竞态人工风格"
 
 
+def test_import_atomic_predicate_rejects_nonpatch_ai_field_cleared_in_write_window(
+    tmp_path,
+):
+    config = make_config(tmp_path)
+    item = record()
+    item["fields"]["风格分类"] = "预读人工风格"
+    gateway = FakeGateway(
+        pages=[{"records": [item], "has_more": False}],
+        downloads={"file1": PNG_3X2},
+    )
+    FeishuReferenceSync(config, gateway).sync()
+
+    def clear_nonpatch_ai_field(_record_id, _fields):
+        item["fields"]["风格分类"] = ""
+
+    gateway.before_update = clear_nonpatch_ai_field
+    input_path = write_enrichment_input(
+        tmp_path,
+        [{"record_id": "rec1", "fields": LEGACY_ENRICHMENT_FIELDS}],
+    )
+
+    result = import_enrichment_results(config, input_path, gateway)
+
+    assert result.updated_records == 0
+    assert result.remaining_pending == 1
+    assert gateway.updates == []
+    audit = json.loads(
+        (config.cache_root / "enrichment-import-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["records"][0]["status"] == "conflict"
+    assert "风格分类" in audit["records"][0]["details"]
+
+
+@pytest.mark.parametrize("changed_dependency", ["关键词", "素材图片"])
+def test_import_atomic_predicate_rejects_source_change_in_write_window(
+    tmp_path,
+    changed_dependency,
+):
+    config = make_config(tmp_path)
+    item = record()
+    gateway = FakeGateway(
+        pages=[{"records": [item], "has_more": False}],
+        downloads={"file1": PNG_3X2},
+    )
+    FeishuReferenceSync(config, gateway).sync()
+
+    def change_source(_record_id, _fields):
+        if changed_dependency == "关键词":
+            item["fields"]["关键词"] = "原子窗口并发关键词"
+        else:
+            item["fields"]["素材图片"] = [
+                {
+                    "file_token": "replacement-token",
+                    "name": "replacement.png",
+                    "size": len(PNG_3X2),
+                }
+            ]
+
+    gateway.before_update = change_source
+    input_path = write_enrichment_input(
+        tmp_path,
+        [{"record_id": "rec1", "fields": LEGACY_ENRICHMENT_FIELDS}],
+    )
+
+    result = import_enrichment_results(config, input_path, gateway)
+
+    assert result.updated_records == 0
+    assert result.remaining_pending == 1
+    assert gateway.updates == []
+    audit = json.loads(
+        (config.cache_root / "enrichment-import-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["records"][0]["status"] == "conflict"
+    assert changed_dependency in audit["records"][0]["details"]
+
+
+@pytest.mark.parametrize("tracking_field", ["AI补齐状态", "AI补齐版本"])
+def test_import_atomic_predicate_rejects_tracking_raw_value_change_in_write_window(
+    tmp_path,
+    tracking_field,
+):
+    config = make_config(tmp_path)
+    item = record()
+    gateway = FakeGateway(
+        pages=[{"records": [item], "has_more": False}],
+        downloads={"file1": PNG_3X2},
+    )
+    FeishuReferenceSync(config, gateway).sync()
+
+    def change_tracking_representation(_record_id, _fields):
+        item["fields"][tracking_field] = []
+
+    gateway.before_update = change_tracking_representation
+    input_path = write_enrichment_input(
+        tmp_path,
+        [{"record_id": "rec1", "fields": LEGACY_ENRICHMENT_FIELDS}],
+    )
+
+    result = import_enrichment_results(config, input_path, gateway)
+
+    assert result.updated_records == 0
+    assert result.remaining_pending == 1
+    assert gateway.updates == []
+    audit = json.loads(
+        (config.cache_root / "enrichment-import-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["records"][0]["status"] == "conflict"
+    assert tracking_field in audit["records"][0]["details"]
+
+
+def test_import_write_readback_missing_ai_fields_stays_pending_and_conflict(
+    tmp_path,
+):
+    config = make_config(tmp_path)
+    item = record()
+
+    def clear_required_field_after_write(_record_id, _fields):
+        item["fields"]["备注"] = ""
+
+    gateway = FakeGateway(
+        pages=[{"records": [item], "has_more": False}],
+        downloads={"file1": PNG_3X2},
+        after_update=clear_required_field_after_write,
+    )
+    FeishuReferenceSync(config, gateway).sync()
+    input_path = write_enrichment_input(
+        tmp_path,
+        [{"record_id": "rec1", "fields": LEGACY_ENRICHMENT_FIELDS}],
+    )
+
+    result = import_enrichment_results(config, input_path, gateway)
+
+    assert result.updated_records == 0
+    assert result.remaining_pending == 1
+    manifest = json.loads(
+        (config.cache_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["records"][0]["pending_enrichment"] is True
+    audit = json.loads(
+        (config.cache_root / "enrichment-import-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["records"][0]["status"] == "conflict"
+    assert "备注" in audit["records"][0]["details"]["missing_ai_fields"]
+
+
 def test_import_with_lark_cli_gateway_fails_closed_before_record_upsert_and_audits(
     tmp_path,
     monkeypatch,
@@ -1364,9 +1722,19 @@ def test_import_fsyncs_pending_audit_before_remote_atomic_write(
     assert fsync_calls
 
 
+@pytest.mark.parametrize(
+    "failed_target",
+    [
+        "manifest.json",
+        "enrichment.json",
+        "pending_enrichment.json",
+        "enrichment-import-audit.json",
+    ],
+)
 def test_import_recovers_four_file_transaction_after_replace_failure(
     tmp_path,
     monkeypatch,
+    failed_target,
 ):
     config = make_config(tmp_path)
     item = record()
@@ -1382,14 +1750,14 @@ def test_import_recovers_four_file_transaction_after_replace_failure(
     real_replace = os.replace
     failed_once = False
 
-    def fail_pending_replace_once(source, destination):
+    def fail_target_replace_once(source, destination):
         nonlocal failed_once
         destination_path = Path(destination)
         journal = config.cache_root / ".enrichment-import-transaction.json"
         if (
             not failed_once
             and journal.is_file()
-            and destination_path.name == "pending_enrichment.json"
+            and destination_path.name == failed_target
         ):
             failed_once = True
             raise OSError("测试事务 replace 失败")
@@ -1397,7 +1765,7 @@ def test_import_recovers_four_file_transaction_after_replace_failure(
 
     monkeypatch.setattr(
         "jewelry_on_hand.feishu_reference_source.os.replace",
-        fail_pending_replace_once,
+        fail_target_replace_once,
     )
 
     with pytest.raises(FeishuReferenceError, match="本地缓存事务发布失败"):
@@ -1434,6 +1802,141 @@ def test_import_recovers_four_file_transaction_after_replace_failure(
         )
     )
     assert final_audit["records"][0]["status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "version_bool",
+        "phase",
+        "schema_extra",
+        "target",
+        "staged_name",
+        "entry_extra",
+        "sha_uppercase",
+        "staged_missing",
+        "digest_mismatch",
+        "absolute_escape",
+        "parent_escape",
+    ],
+)
+def test_transaction_recovery_rejects_invalid_journal_before_any_publish(
+    tmp_path,
+    mutation,
+):
+    config = make_config(tmp_path)
+    gateway = FakeGateway(
+        pages=[{"records": [record()], "has_more": False}],
+        downloads={"file1": PNG_3X2},
+    )
+    FeishuReferenceSync(config, gateway).sync()
+    manifest_path = config.cache_root / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    transaction_dir, journal_path, journal = make_import_transaction_fixture(config)
+    external = tmp_path / "external-stage.json"
+    external.write_text('{"source": {}, "records": []}', encoding="utf-8")
+    external_before = external.read_bytes()
+
+    if mutation == "version_bool":
+        journal["version"] = True
+    elif mutation == "phase":
+        journal["phase"] = "publishing"
+    elif mutation == "schema_extra":
+        journal["unexpected"] = True
+    elif mutation == "target":
+        journal["files"][0]["target"] = "other.json"
+    elif mutation == "staged_name":
+        alternate = transaction_dir / "alternate.new"
+        alternate.write_bytes((transaction_dir / "manifest.json.new").read_bytes())
+        journal["files"][0]["staged"] = alternate.name
+    elif mutation == "entry_extra":
+        journal["files"][0]["unexpected"] = True
+    elif mutation == "sha_uppercase":
+        journal["files"][0]["sha256"] = journal["files"][0]["sha256"].upper()
+    elif mutation == "staged_missing":
+        (transaction_dir / "manifest.json.new").unlink()
+    elif mutation == "digest_mismatch":
+        journal["files"][0]["sha256"] = "0" * 64
+    elif mutation == "absolute_escape":
+        journal["files"][0]["staged"] = str(external.resolve())
+        journal["files"][0]["sha256"] = hashlib.sha256(external_before).hexdigest()
+    elif mutation == "parent_escape":
+        escaped = config.cache_root / "escape-stage.json"
+        escaped.write_bytes(external_before)
+        journal["files"][0]["staged"] = "../escape-stage.json"
+        journal["files"][0]["sha256"] = hashlib.sha256(external_before).hexdigest()
+
+    journal_path.write_text(
+        json.dumps(journal, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FeishuReferenceError, match="damaged"):
+        load_cached_reference_rows(config.cache_root)
+
+    assert manifest_path.read_bytes() == manifest_before
+    assert external.read_bytes() == external_before
+    assert journal_path.is_file()
+
+
+@pytest.mark.parametrize(
+    "entry_name",
+    [
+        "sync",
+        "import",
+        "audit",
+        "snapshot",
+        "load",
+        "sync_and_load",
+    ],
+)
+def test_public_entry_recovers_valid_import_transaction_first(tmp_path, entry_name):
+    config = make_config(tmp_path)
+    item = record()
+    if entry_name in {"load", "sync_and_load"}:
+        item["fields"].update(LEGACY_ENRICHMENT_FIELDS)
+    gateway = FakeGateway(
+        pages=[{"records": [item], "has_more": False}],
+        downloads={"file1": PNG_3X2},
+    )
+    FeishuReferenceSync(config, gateway).sync()
+    if entry_name == "load":
+        rewrite_cache_as_legacy_format(config, item)
+    transaction_dir, journal_path, journal = make_import_transaction_fixture(config)
+    journal_path.write_text(
+        json.dumps(journal, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    if entry_name == "sync":
+        FeishuReferenceSync(config, gateway).sync()
+    elif entry_name == "import":
+        input_path = write_enrichment_input(
+            tmp_path,
+            [{"record_id": "rec1", "fields": LEGACY_ENRICHMENT_FIELDS}],
+        )
+        import_enrichment_results(config, input_path, gateway)
+    elif entry_name == "audit":
+        audit_enrichment_readback(config, gateway)
+    elif entry_name == "snapshot":
+        build_reference_source_snapshot(
+            config.cache_root,
+            ignore_pending_enrichment=True,
+        )
+    elif entry_name == "load":
+        load_cached_reference_rows(
+            config.cache_root,
+            ignore_pending_enrichment=True,
+        )
+    else:
+        sync_and_load_reference_rows(
+            config,
+            gateway,
+            ignore_pending_enrichment=True,
+        )
+
+    assert not journal_path.exists()
+    assert not transaction_dir.exists()
 
 
 def test_import_keeps_postwrite_mismatch_pending_and_audits_conflict(tmp_path):
@@ -1669,6 +2172,45 @@ def test_import_audits_remote_record_disappearance_before_raising(tmp_path):
     )
     assert audit["records"][0]["status"] == "failed"
     assert "已不在当前飞书数据表" in audit["records"][0]["error"]
+
+
+@pytest.mark.parametrize(
+    ("submitted_fields", "expected_error"),
+    [
+        ("不是对象", "缺少 fields 对象"),
+        (
+            {name: value for name, value in LEGACY_ENRICHMENT_FIELDS.items() if name != "备注"},
+            "缺少必需补齐字段：备注",
+        ),
+    ],
+)
+def test_import_input_preflight_failure_is_persisted_after_record_id_is_known(
+    tmp_path,
+    submitted_fields,
+    expected_error,
+):
+    config = make_config(tmp_path)
+    gateway = FakeGateway(
+        pages=[{"records": [record()], "has_more": False}],
+        downloads={"file1": PNG_3X2},
+    )
+    FeishuReferenceSync(config, gateway).sync()
+    input_path = write_enrichment_input(
+        tmp_path,
+        [{"record_id": "rec1", "fields": submitted_fields}],
+    )
+
+    with pytest.raises(InvalidEnrichmentError, match=expected_error):
+        import_enrichment_results(config, input_path, gateway)
+
+    audit = json.loads(
+        (config.cache_root / "enrichment-import-audit.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert audit["records"][0]["record_id"] == "rec1"
+    assert audit["records"][0]["status"] == "failed"
+    assert expected_error in audit["records"][0]["error"]
 
 
 def test_import_rejects_ring_worn_candidate_missing_six_required_fields(tmp_path):
