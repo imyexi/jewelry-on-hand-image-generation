@@ -28,6 +28,7 @@ from jewelry_on_hand.reference_composition import build_candidate_snapshot
 from jewelry_on_hand.review_decision import (
     ReviewGateError,
     require_generation_decision,
+    write_review_bundle,
     write_review_decision,
 )
 from jewelry_on_hand.review_package import (
@@ -88,6 +89,7 @@ def _build_parser() -> argparse.ArgumentParser:
     decision.add_argument("--selected-ranks", action="append")
     decision.add_argument("--manual-reference")
     decision.add_argument("--fidelity-confirmed", action="store_true")
+    decision.add_argument("--reference-snapshot-confirmed", action="store_true")
     decision.add_argument("--fidelity-notes")
     decision.add_argument("--fidelity-constraints-path")
     decision.add_argument("--output-role", choices=[item.value for item in OutputRole])
@@ -183,7 +185,19 @@ def _record_decision(args: argparse.Namespace) -> int:
         data["fidelity_notes"] = args.fidelity_notes
     if args.fidelity_constraints_path:
         data["fidelity_constraints_path"] = args.fidelity_constraints_path
-    write_review_decision(paths, data)
+    generation_actions = {"generate_rank_1", "generate_selected", "generate_multiple"}
+    if args.action in generation_actions:
+        if not args.reference_snapshot_confirmed:
+            raise ValueError(
+                "生成 action 必须显式传入 --reference-snapshot-confirmed"
+            )
+        if args.action == "generate_multiple":
+            raise ValueError(
+                "generate_multiple 仅保留历史读取，不允许记录新的参考快照决策"
+            )
+        write_review_bundle(paths, data)
+    else:
+        write_review_decision(paths, data)
     return 0
 
 

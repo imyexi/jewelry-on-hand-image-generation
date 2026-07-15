@@ -1,5 +1,6 @@
 import json
 import os
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,10 @@ from openpyxl import Workbook
 
 from jewelry_on_hand.models import ReferenceRow, ScoredReference
 from jewelry_on_hand.product_analysis import load_product_analysis
-from jewelry_on_hand.reference_composition import build_candidate_snapshot
+from jewelry_on_hand.reference_composition import (
+    build_candidate_snapshot,
+    reference_composition_sha256,
+)
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
@@ -137,6 +141,71 @@ def declare_scene_output_role(run_root, role="hand_worn"):
         Path(run_root) / "analysis" / "output_role.json",
         {"output_role": role},
     )
+
+
+def prepare_snapshot_decision_run(run_root, *, role="hand_worn"):
+    paths = RunPaths.create(Path(run_root).parent, Path(run_root).name)
+    reference = paths.input_dir / "decision-reference.jpg"
+    reference.write_bytes(b"decision-reference")
+    make_analysis(paths.analysis_dir / "product_analysis.json")
+    make_constraints(paths.analysis_dir / "product_fidelity_constraints.json")
+    declare_scene_output_role(run_root, role)
+    scored = ScoredReference(
+        ReferenceRow(
+            index=1,
+            file_name=reference.name,
+            relative_path=reference.name,
+            absolute_path=reference,
+            width=100,
+            height=200,
+            size_mb=0.1,
+            purpose_category="手部佩戴图",
+            bracelet_applicability="是",
+            default_strategy="常规可优先使用",
+            style_category="暗调闪光",
+            scene_keywords="车内",
+            jewelry_type="手链/手串",
+            recommended_usage="近景手腕",
+            notes="正面视角，主体居中，无文字或 UI",
+            confidence="高",
+            file_exists=True,
+            framing="手部近景",
+            visible_body_regions="左手腕 / 前臂完整露出",
+            product_visibility="展示面积充足，大于 35%",
+            collar_type="无衣领",
+            clothing_occlusion_risk="衣物无遮挡",
+            pose_keywords="身体未入镜，前臂自然抬起",
+            existing_jewelry="左手腕原有手链",
+            crop_risk="裁切风险低",
+            hand_side="左手",
+            hand_orientation="手背朝向镜头",
+        ),
+        99,
+        1,
+        ("匹配",),
+        (),
+        ("原有手链",),
+    )
+    snapshot = build_candidate_snapshot(
+        load_product_analysis(paths.analysis_dir / "product_analysis.json"),
+        scored,
+        role,
+    )
+    review_copy = paths.review_dir / f"rank-1-{reference.name}"
+    review_copy.write_bytes(reference.read_bytes())
+    digest = sha256(reference.read_bytes()).hexdigest()
+    selected = scored.to_dict()
+    selected["selected_reference"] = str(review_copy.resolve())
+    selected["source_sha256"] = digest
+    selected["review_sha256"] = digest
+    selected["metadata"]["source_sha256"] = digest
+    selected["metadata"]["review_sha256"] = digest
+    write_json(paths.analysis_dir / "selected_references.json", [selected])
+    write_json(
+        paths.analysis_dir / "reference_composition_snapshots.json",
+        [snapshot.to_dict()],
+    )
+    return snapshot
 
 
 def test_prepare_review_cli_creates_review_html(tmp_path):
@@ -329,7 +398,7 @@ def test_record_decision_cli_writes_and_normalizes_generate_rank_1(tmp_path):
     from jewelry_on_hand.cli import main
 
     run_root = tmp_path / "runs" / "demo"
-    declare_scene_output_role(run_root)
+    snapshot = prepare_snapshot_decision_run(run_root)
 
     assert (
         main(
@@ -340,6 +409,7 @@ def test_record_decision_cli_writes_and_normalizes_generate_rank_1(tmp_path):
                 "--action",
                 "generate_rank_1",
                 "--fidelity-confirmed",
+                "--reference-snapshot-confirmed",
                 "--output-role",
                 "hand_worn",
             ]
@@ -353,7 +423,59 @@ def test_record_decision_cli_writes_and_normalizes_generate_rank_1(tmp_path):
         "fidelity_confirmed": True,
         "fidelity_constraints_path": "analysis/product_fidelity_constraints.json",
         "output_role": "hand_worn",
+        "reference_snapshot_sha256": reference_composition_sha256(snapshot),
     }
+
+
+def test_记录生成决策缺少参考快照确认旗标时拒绝且不写文件(tmp_path, capsys):
+    from jewelry_on_hand.cli import main
+
+    run_root = tmp_path / "runs" / "missing-confirmation"
+    prepare_snapshot_decision_run(run_root)
+
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_rank_1",
+            "--fidelity-confirmed",
+            "--output-role",
+            "hand_worn",
+        ]
+    ) != 0
+
+    assert "--reference-snapshot-confirmed" in capsys.readouterr().err
+    assert not (run_root / "review" / "review_decision.json").exists()
+
+
+def test_记录新决策拒绝多序位生成动作(tmp_path, capsys):
+    from jewelry_on_hand.cli import main
+
+    run_root = tmp_path / "runs" / "multiple"
+    prepare_snapshot_decision_run(run_root)
+
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_multiple",
+            "--selected-ranks",
+            "1",
+            "--selected-ranks",
+            "2",
+            "--fidelity-confirmed",
+            "--reference-snapshot-confirmed",
+            "--output-role",
+            "hand_worn",
+        ]
+    ) != 0
+
+    assert "generate_multiple" in capsys.readouterr().err
+    assert not (run_root / "review" / "review_decision.json").exists()
 
 
 def test_record_decision_cli_returns_nonzero_for_invalid_selected_rank(tmp_path):
@@ -972,6 +1094,7 @@ def test_准备审核持久化场景输出角色(tmp_path):
             "--action",
             "generate_rank_1",
             "--fidelity-confirmed",
+            "--reference-snapshot-confirmed",
             "--output-role",
             "lifestyle",
         ]
@@ -1011,10 +1134,7 @@ def test_记录决策持久化匹配的输出角色(tmp_path):
     from jewelry_on_hand.cli import main
 
     run_root = tmp_path / "runs" / "scene"
-    write_json(
-        run_root / "analysis" / "output_role.json",
-        {"output_role": "hand_worn"},
-    )
+    prepare_snapshot_decision_run(run_root)
 
     assert main(
         [
@@ -1024,6 +1144,7 @@ def test_记录决策持久化匹配的输出角色(tmp_path):
             "--action",
             "generate_rank_1",
             "--fidelity-confirmed",
+            "--reference-snapshot-confirmed",
             "--output-role",
             "hand_worn",
         ]

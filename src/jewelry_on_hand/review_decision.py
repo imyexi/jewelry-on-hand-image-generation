@@ -8,11 +8,26 @@ from typing import Any
 
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.display_modes import validate_product_mode
-from jewelry_on_hand.models import ProductAnalysis, ProductConfirmationSnapshot, ReviewDecision
+from jewelry_on_hand.models import (
+    ProductAnalysis,
+    ProductConfirmationSnapshot,
+    ReferenceRow,
+    ReviewDecision,
+    ScoredReference,
+)
+from jewelry_on_hand.output_roles import normalize_output_role
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.product_fidelity import (
     load_product_fidelity_constraints,
     require_confirmed_constraints,
+)
+from jewelry_on_hand.reference_composition import (
+    REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
+    REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME,
+    ReferenceCompositionSnapshot,
+    build_candidate_snapshot,
+    reference_composition_sha256,
+    validate_snapshot_binding,
 )
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
@@ -29,6 +44,7 @@ class ReviewGateError(RuntimeError):
 def write_review_decision(paths: RunPaths, data: dict[str, Any]) -> Path:
     try:
         decision = ReviewDecision.from_dict(data)
+        _reject_legacy_generation_write(decision)
         analysis = _load_optional_analysis(paths)
         if analysis is not None:
             validate_decision_against_analysis(decision, analysis)
@@ -53,6 +69,7 @@ def write_analysis_and_review_decision(
         analysis = ProductAnalysis.from_dict(analysis_data)
         validate_confirmed_analysis(analysis)
         decision = ReviewDecision.from_dict(decision_data)
+        _reject_legacy_generation_write(decision)
         validate_decision_against_analysis(decision, analysis)
     except (TypeError, ValueError, ReviewGateError) as exc:
         if isinstance(exc, ReviewGateError):
@@ -79,8 +96,13 @@ def write_review_bundle(
     try:
         normalized_decision_data = dict(decision_data)
         action = normalized_decision_data.get("action")
+        analysis_payload = analysis_data
         constraints_payload: dict[str, Any] | None = None
         if action in _GENERATION_ACTIONS:
+            if action == "generate_multiple":
+                raise ReviewGateError(
+                    "generate_multiple 仅保留历史读取，不允许记录新的参考快照决策"
+                )
             import_source = _constraints_import_source(normalized_decision_data)
             normalized_decision_data["fidelity_constraints_path"] = (
                 CANONICAL_CONSTRAINTS_RELATIVE_PATH
@@ -89,7 +111,14 @@ def write_review_bundle(
             import_source = None
 
         if analysis_data is None:
-            analysis = _load_optional_analysis(paths)
+            analysis_path = paths.analysis_dir / "product_analysis.json"
+            if analysis_path.is_file():
+                persisted_analysis_data = read_json(analysis_path)
+                analysis = ProductAnalysis.from_dict(persisted_analysis_data)
+                if action in _GENERATION_ACTIONS:
+                    analysis_payload = persisted_analysis_data
+            else:
+                analysis = None
         else:
             analysis = ProductAnalysis.from_dict(analysis_data)
             validate_confirmed_analysis(analysis)
@@ -107,6 +136,24 @@ def write_review_bundle(
             constraints_payload = constraints.to_dict()
             if constraints.review_status == "pending":
                 constraints_payload["review_status"] = "confirmed"
+
+            snapshot, selected_reference = _confirmed_reference_snapshot_data(
+                paths,
+                decision,
+            )
+            if analysis is None:
+                raise ReviewGateError("新快照 run 缺少最终 product_analysis.json")
+            _validate_candidate_snapshot_draft(
+                snapshot,
+                selected_reference,
+                analysis,
+            )
+            normalized_decision_data["reference_snapshot_sha256"] = (
+                reference_composition_sha256(snapshot)
+            )
+            decision = ReviewDecision.from_dict(normalized_decision_data)
+        else:
+            snapshot = None
     except (OSError, TypeError, ValueError, ReviewGateError) as exc:
         if isinstance(exc, ReviewGateError):
             raise
@@ -114,14 +161,21 @@ def write_review_bundle(
 
     decision_path = paths.review_dir / DECISION_FILE_NAME
     entries: list[tuple[Path, Any]] = []
-    if analysis_data is not None:
-        entries.append((paths.analysis_dir / "product_analysis.json", analysis_data))
+    if analysis_payload is not None:
+        entries.append((paths.analysis_dir / "product_analysis.json", analysis_payload))
     entries.append((decision_path, _decision_to_dict(decision)))
     if constraints_payload is not None:
         entries.append(
             (
                 paths.root / CANONICAL_CONSTRAINTS_RELATIVE_PATH,
                 constraints_payload,
+            )
+        )
+    if snapshot is not None:
+        entries.append(
+            (
+                paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
+                snapshot.to_dict(),
             )
         )
     _commit_json_transaction(entries)
@@ -238,7 +292,192 @@ def _decision_to_dict(decision: ReviewDecision) -> dict[str, Any]:
         data["confirmation_snapshot"] = decision.confirmation_snapshot.to_dict()
     if decision.output_role is not None:
         data["output_role"] = decision.output_role.value
+    if decision.reference_snapshot_sha256 is not None:
+        data["reference_snapshot_sha256"] = decision.reference_snapshot_sha256
     return data
+
+
+def _confirmed_reference_snapshot(
+    paths: RunPaths,
+    decision: ReviewDecision,
+) -> ReferenceCompositionSnapshot:
+    snapshot, _selected_reference = _confirmed_reference_snapshot_data(paths, decision)
+    return snapshot
+
+
+def _confirmed_reference_snapshot_data(
+    paths: RunPaths,
+    decision: ReviewDecision,
+) -> tuple[ReferenceCompositionSnapshot, dict[str, Any]]:
+    if decision.action == "generate_multiple":
+        raise ReviewGateError(
+            "generate_multiple 仅保留历史读取，不允许记录新的参考快照决策"
+        )
+    if len(decision.selected_ranks) != 1:
+        raise ReviewGateError("新快照 run 必须且只能确认一个 selected rank")
+    rank = decision.selected_ranks[0]
+    snapshots_data = read_json(
+        paths.analysis_dir / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME
+    )
+    if not isinstance(snapshots_data, list):
+        raise ReviewGateError("候选参考构图快照必须是 JSON 列表")
+    matches = [
+        item
+        for item in snapshots_data
+        if isinstance(item, dict) and item.get("rank") == rank
+    ]
+    if len(matches) != 1:
+        raise ReviewGateError(f"selected rank {rank} 必须对应唯一候选构图快照")
+    try:
+        snapshot = ReferenceCompositionSnapshot.from_dict(matches[0])
+    except (TypeError, ValueError) as exc:
+        raise ReviewGateError(f"selected rank {rank} 的候选构图快照无效：{exc}") from exc
+
+    selected_data = read_json(paths.analysis_dir / "selected_references.json")
+    if not isinstance(selected_data, list):
+        raise ReviewGateError("selected_references.json 必须是 JSON 列表")
+    selected_matches = [
+        item
+        for item in selected_data
+        if isinstance(item, dict) and item.get("rank") == rank
+    ]
+    if len(selected_matches) != 1:
+        raise ReviewGateError(f"selected rank {rank} 必须对应唯一参考图")
+    selected = selected_matches[0]
+    selected_reference = _required_selected_path(
+        selected,
+        "selected_reference",
+        rank,
+    )
+    metadata = selected.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ReviewGateError(f"selected rank {rank} 的 metadata 必须是 JSON 对象")
+    source_value = (
+        metadata.get("source_reference")
+        or metadata.get("source_absolute_path")
+        or metadata.get("absolute_path")
+    )
+    if not isinstance(source_value, str) or not source_value.strip():
+        raise ReviewGateError(f"selected rank {rank} 缺少源参考图路径")
+    source_reference = Path(source_value.strip())
+
+    source_sha = _selected_sha256(selected, metadata, "source_sha256", rank)
+    review_sha = _selected_sha256(selected, metadata, "review_sha256", rank)
+    if not source_reference.is_file():
+        raise ReviewGateError(f"selected rank {rank} 的源参考图路径不存在")
+    if not selected_reference.is_file():
+        raise ReviewGateError(f"selected rank {rank} 的审核参考图路径不存在")
+    actual_source_sha = _file_sha256(source_reference)
+    actual_review_sha = _file_sha256(selected_reference)
+    if source_sha != actual_source_sha:
+        raise ReviewGateError(f"selected rank {rank} 的 source_sha256 与源参考图不一致")
+    if review_sha != actual_review_sha:
+        raise ReviewGateError(f"selected rank {rank} 的 review_sha256 与审核参考图不一致")
+    if source_sha != review_sha:
+        raise ReviewGateError(f"selected rank {rank} 的 source_sha256 与 review_sha256 不一致")
+
+    role_path = paths.analysis_dir / "output_role.json"
+    role_data = read_json(role_path)
+    if not isinstance(role_data, dict):
+        raise ReviewGateError("analysis/output_role.json 必须是 JSON 对象")
+    try:
+        run_role = normalize_output_role(role_data.get("output_role"))
+    except ValueError as exc:
+        raise ReviewGateError(f"analysis/output_role.json 的 output_role 无效：{exc}") from exc
+    if decision.output_role is None or decision.output_role is not run_role:
+        raise ReviewGateError("decision output_role 与当前 run 的 output_role 不一致")
+    try:
+        validate_snapshot_binding(
+            snapshot,
+            reference_file=source_reference,
+            output_role=decision.output_role,
+            expected_rank=rank,
+        )
+    except ValueError as exc:
+        if "composition_signature" in str(exc):
+            raise ReviewGateError(
+                "候选参考构图快照不可直接编辑；"
+                "请修订语义源并重新执行 prepare-review"
+            ) from exc
+        raise ReviewGateError(str(exc)) from exc
+    return snapshot, selected
+
+
+def _validate_candidate_snapshot_draft(
+    snapshot: ReferenceCompositionSnapshot,
+    selected: dict[str, Any],
+    analysis: ProductAnalysis,
+) -> None:
+    metadata = selected["metadata"]
+    source_value = (
+        metadata.get("source_reference")
+        or metadata.get("source_absolute_path")
+        or metadata.get("absolute_path")
+    )
+    row_data = dict(metadata)
+    row_data["absolute_path"] = source_value
+    row_data["file_exists"] = True
+    try:
+        scored = ScoredReference(
+            row=ReferenceRow.from_dict(row_data),
+            score=selected.get("score"),
+            rank=selected.get("rank"),
+            reason=selected.get("reason", []),
+            risk=selected.get("risk", []),
+            ignored_reference_jewelry=selected.get("ignored_reference_jewelry", []),
+        )
+        expected = build_candidate_snapshot(analysis, scored, snapshot.output_role)
+    except (TypeError, ValueError) as exc:
+        raise ReviewGateError(
+            "selected 参考图语义字段无法重建候选快照，请重新执行 prepare-review；"
+            f"{exc}"
+        ) from exc
+    actual_data = snapshot.to_dict()
+    expected_data = expected.to_dict()
+    for field_name, expected_value in expected_data.items():
+        if actual_data[field_name] != expected_value:
+            raise ReviewGateError(
+                f"候选参考构图快照字段 {field_name} 不可直接编辑；"
+                "请修订语义源并重新执行 prepare-review"
+            )
+
+
+def _required_selected_path(
+    selected: dict[str, Any],
+    field_name: str,
+    rank: int,
+) -> Path:
+    value = selected.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ReviewGateError(f"selected rank {rank} 缺少参考图路径 {field_name}")
+    return Path(value.strip())
+
+
+def _selected_sha256(
+    selected: dict[str, Any],
+    metadata: dict[str, Any],
+    field_name: str,
+    rank: int,
+) -> str:
+    value = selected.get(field_name)
+    metadata_value = metadata.get(field_name)
+    if value != metadata_value:
+        raise ReviewGateError(
+            f"selected rank {rank} 的顶层与 metadata {field_name} 不一致"
+        )
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ReviewGateError(f"selected rank {rank} 的 {field_name} 必须是 64 位小写十六进制")
+    return value
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _load_optional_analysis(paths: RunPaths) -> ProductAnalysis | None:
@@ -253,6 +492,14 @@ def _is_generation_with_snapshot(decision: ReviewDecision) -> bool:
         decision.action in _GENERATION_ACTIONS
         and decision.confirmation_snapshot is not None
     )
+
+
+def _reject_legacy_generation_write(decision: ReviewDecision) -> None:
+    if decision.action in _GENERATION_ACTIONS:
+        raise ReviewGateError(
+            "旧写入接口不得创建新的生成决策；请使用 write_review_bundle "
+            "原子固化人工确认参考快照"
+        )
 
 
 def _constraints_import_source(decision_data: dict[str, Any]) -> str:
@@ -275,10 +522,7 @@ def _commit_json_transaction(entries: list[tuple[Path, Any]]) -> None:
     }
     staged_entries: list[tuple[Path, Path]] = []
     replaced_targets: list[Path] = []
-    label = {1: "文件", 2: "双文件", 3: "三文件"}.get(
-        len(entries),
-        f"{len(entries)} 文件",
-    )
+    label = f"{len(entries)} 文件"
     try:
         for target, payload in entries:
             staged_entries.append((_stage_json(target, payload), target))
@@ -352,6 +596,7 @@ def _resolve_constraints_path(paths: RunPaths, raw_path: str) -> Path:
 __all__ = [
     "CANONICAL_CONSTRAINTS_RELATIVE_PATH",
     "ReviewGateError",
+    "_confirmed_reference_snapshot",
     "require_generation_decision",
     "validate_confirmed_analysis",
     "validate_decision_against_analysis",

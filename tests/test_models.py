@@ -538,6 +538,28 @@ def test_审核决策解析输出角色():
     assert decision.output_role is OutputRole.LIFESTYLE
 
 
+def test_审核决策参考快照摘要仅接受64位小写十六进制():
+    digest = "a" * 64
+    decision = ReviewDecision.from_dict(
+        {
+            "action": "generate_rank_1",
+            "fidelity_confirmed": True,
+            "reference_snapshot_sha256": digest,
+        }
+    )
+
+    assert decision.reference_snapshot_sha256 == digest
+    for invalid in ("a" * 63, "A" * 64, "g" * 64, 123):
+        with pytest.raises(ValueError, match="reference_snapshot_sha256.*64 位小写十六进制"):
+            ReviewDecision.from_dict(
+                {
+                    "action": "generate_rank_1",
+                    "fidelity_confirmed": True,
+                    "reference_snapshot_sha256": invalid,
+                }
+            )
+
+
 def test_product_confirmation_snapshot_roundtrip_uses_typed_enums():
     snapshot = ProductConfirmationSnapshot.from_dict(_confirmation_snapshot())
 

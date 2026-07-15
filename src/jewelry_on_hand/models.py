@@ -1454,6 +1454,7 @@ class ReviewDecision:
     fidelity_constraints_path: str = "analysis/product_fidelity_constraints.json"
     confirmation_snapshot: ProductConfirmationSnapshot | None = None
     output_role: OutputRole | str | None = None
+    reference_snapshot_sha256: str | None = None
 
     def __post_init__(self) -> None:
         supported_actions = {
@@ -1509,6 +1510,11 @@ class ReviewDecision:
             raise ValueError("confirmation_snapshot 必须是产品确认快照或 null")
         object.__setattr__(self, "confirmation_snapshot", snapshot)
         object.__setattr__(self, "output_role", normalize_output_role(self.output_role))
+        object.__setattr__(
+            self,
+            "reference_snapshot_sha256",
+            self._parse_reference_snapshot_sha256(self.reference_snapshot_sha256),
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ReviewDecision":
@@ -1576,7 +1582,24 @@ class ReviewDecision:
             fidelity_constraints_path=fidelity_constraints_path,
             confirmation_snapshot=confirmation_snapshot,
             output_role=source.get("output_role"),
+            reference_snapshot_sha256=cls._parse_reference_snapshot_sha256(
+                source.get("reference_snapshot_sha256")
+            ),
         )
+
+    @staticmethod
+    def _parse_reference_snapshot_sha256(value: Any) -> str | None:
+        if value is None:
+            return None
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError(
+                "reference_snapshot_sha256 必须是 64 位小写十六进制字符串或 null"
+            )
+        return value
 
     @staticmethod
     def _parse_ranks(value: Any) -> _FrozenList:
