@@ -559,10 +559,10 @@ def _project_product_identity(
         return None
     category = analysis["confirmed_product_type"]
     display_mode = analysis["display_mode"]
-    if category not in ALLOWED_PRODUCT_CATEGORIES:
+    if not isinstance(category, str) or category not in ALLOWED_PRODUCT_CATEGORIES:
         errors.append(f"产品分析 confirmed_product_type 不在允许闭集：{category}")
         return None
-    if display_mode not in ALLOWED_DISPLAY_MODES:
+    if not isinstance(display_mode, str) or display_mode not in ALLOWED_DISPLAY_MODES:
         errors.append(f"产品分析 display_mode 不在允许闭集：{display_mode}")
         return None
     if category in {"bracelet", "ring"} and display_mode != "worn":
@@ -649,14 +649,10 @@ def _project_dimensions(
         item = value[field]
         if item is None:
             continue
-        if isinstance(item, bool):
+        if type(item) not in {int, float}:
             errors.append(f"产品分析 product_dimensions.{field} 必须是有限正数或 null")
             continue
-        try:
-            number = float(item)
-        except (TypeError, ValueError, OverflowError):
-            errors.append(f"产品分析 product_dimensions.{field} 必须是有限正数或 null")
-            continue
+        number = float(item)
         if not math.isfinite(number) or number <= 0:
             errors.append(f"产品分析 product_dimensions.{field} 必须是有限正数或 null")
             continue
@@ -682,7 +678,11 @@ def _project_canonical_constraints(
     if not _require_object_fields(canonical, required, "保真 canonical", errors):
         return None
     status = canonical["review_status"]
-    if status not in {"confirmed", "corrected", "not_applicable"}:
+    if not isinstance(status, str) or status not in {
+        "confirmed",
+        "corrected",
+        "not_applicable",
+    }:
         errors.append("保真 canonical review_status 必须已确认")
     must_not_change = _project_string_list(
         canonical["must_not_change"],
@@ -763,13 +763,12 @@ def _validate_necklace_identity(
         or not 1 <= layer_count <= 3
     ):
         errors.append("产品分析项链 layer_count 必须是 1 至 3 的整数")
-    if identity["length_category"] not in {
-        None,
-        "choker",
-        "collarbone",
-        "upper_chest",
-        "long",
-    }:
+    length_category = identity["length_category"]
+    if length_category is not None and (
+        not isinstance(length_category, str)
+        or length_category
+        not in {"choker", "collarbone", "upper_chest", "long"}
+    ):
         errors.append("产品分析项链 length_category 不在允许闭集")
     for field in (
         "chain_or_strand_type",
@@ -822,9 +821,11 @@ def _validate_ring_identity(
 ) -> None:
     if type(identity["ring_count"]) is not int or identity["ring_count"] != 1:
         errors.append("产品分析戒指 ring_count 必须为整数 1")
-    if identity["hand_side"] not in {"left", "right"}:
+    hand_side = identity["hand_side"]
+    if not isinstance(hand_side, str) or hand_side not in {"left", "right"}:
         errors.append("产品分析戒指 hand_side 必须是 left 或 right")
-    if identity["finger_position"] not in {
+    finger_position = identity["finger_position"]
+    if not isinstance(finger_position, str) or finger_position not in {
         "thumb",
         "index",
         "middle",
@@ -914,7 +915,11 @@ def _validate_snapshot_schema(snapshot: dict[str, object], errors: list[str]) ->
         value = snapshot.get(field)
         if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
             errors.append(f"确认快照 {field} 必须是 64 位小写十六进制摘要")
-    if snapshot.get("output_role") not in {"hand_worn", "lifestyle"}:
+    output_role = snapshot.get("output_role")
+    if not isinstance(output_role, str) or output_role not in {
+        "hand_worn",
+        "lifestyle",
+    }:
         errors.append("确认快照 output_role 必须是 hand_worn 或 lifestyle")
     _validate_string_list(snapshot.get("visible_body_regions"), "visible_body_regions", errors, require_nonempty=True)
     _validate_string_list(snapshot.get("other_jewelry_to_remove"), "other_jewelry_to_remove", errors)
@@ -939,7 +944,11 @@ def _validate_snapshot_schema(snapshot: dict[str, object], errors: list[str]) ->
             errors.append("确认快照 target_product_count 必须是整数 1")
         for field in sorted(set(target) - set(REPLACEMENT_TARGET_FIELDS)):
             errors.append(f"确认快照 replacement_target 包含未知字段：{field}")
-    if snapshot.get("text_or_ui_risk") not in {"none", "small_removable"}:
+    ui_risk = snapshot.get("text_or_ui_risk")
+    if not isinstance(ui_risk, str) or ui_risk not in {
+        "none",
+        "small_removable",
+    }:
         errors.append("确认快照 text_or_ui_risk 必须是 none 或 small_removable，blocking 禁止生成")
     if snapshot.get("product_visibility_sufficient") is not True:
         errors.append("确认快照 product_visibility_sufficient 必须严格为 true")

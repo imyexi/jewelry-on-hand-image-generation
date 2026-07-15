@@ -20,6 +20,14 @@ ALLOWED_CRITICAL_FAILURES = {
     "auto_chain_added",
     "source_person_region_migrated",
     "severe_intersection",
+    "ring_count_mismatch",
+    "hand_side_mismatch",
+    "finger_position_mismatch",
+    "ring_structure_mismatch",
+    "centerpiece_mismatch",
+    "ring_contact_error",
+    "finger_deformation",
+    "source_hand_leakage",
 }
 REJECT_CRITICAL_FAILURES = {
     "category_mismatch",
@@ -27,6 +35,11 @@ REJECT_CRITICAL_FAILURES = {
     "multi_layer_restructured",
     "auto_chain_added",
     "severe_intersection",
+    "ring_count_mismatch",
+    "finger_position_mismatch",
+    "ring_structure_mismatch",
+    "centerpiece_mismatch",
+    "source_hand_leakage",
 }
 SOURCE_WRIST_TERMS = ("原图手腕", "源图手腕", "source wrist", "source-wrist", "粗手腕")
 SOURCE_ARM_TERMS = ("原图手臂", "源图手臂", "source-arm", "source arm", "局部手臂")
@@ -352,7 +365,11 @@ def _expected_runtime_questions(
 ) -> list[str]:
     category = analysis.get("confirmed_product_type")
     mode = analysis.get("display_mode")
-    if category not in CATEGORY_RUNTIME_QUESTIONS or not isinstance(mode, str):
+    if (
+        not isinstance(category, str)
+        or category not in CATEGORY_RUNTIME_QUESTIONS
+        or not isinstance(mode, str)
+    ):
         errors.append("产品分析无法重建 runtime checklist")
         return []
     questions = list(COMMON_RUNTIME_QUESTIONS)
@@ -384,11 +401,28 @@ def _expected_runtime_questions(
 def _validate_modern_fidelity(
     data: dict[str, Any], canonical: dict[str, Any], status: Any, errors: list[str]
 ) -> list[str]:
-    expected = [
-        (item.get("name"), item.get("qc_question"))
-        for item in canonical.get("must_keep", [])
-        if isinstance(item, dict)
-    ]
+    raw_must_keep = canonical.get("must_keep")
+    if not isinstance(raw_must_keep, list):
+        errors.append("canonical.must_keep 必须是列表")
+        raw_must_keep = []
+    expected: list[tuple[str, str]] = []
+    for index, item in enumerate(raw_must_keep):
+        if not isinstance(item, dict):
+            errors.append(f"canonical.must_keep[{index}] 必须是 JSON 对象")
+            continue
+        name = item.get("name")
+        question = item.get("qc_question")
+        valid = True
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"canonical.must_keep[{index}].name 必须是非空字符串")
+            valid = False
+        if not isinstance(question, str) or not question.strip():
+            errors.append(
+                f"canonical.must_keep[{index}].qc_question 必须是非空字符串"
+            )
+            valid = False
+        if valid:
+            expected.append((name, question))
     checks = data.get("fidelity_checks")
     if not isinstance(checks, list):
         errors.append("fidelity_checks 必须完整覆盖 canonical.must_keep")
@@ -408,7 +442,7 @@ def _validate_modern_fidelity(
             continue
         pairs.append((check.get("name"), check.get("question")))
         result = check.get("result")
-        if result not in {"pass", "rerun", "fail"}:
+        if not isinstance(result, str) or result not in {"pass", "rerun", "fail"}:
             errors.append(f"fidelity_checks[{index}].result 无效")
         else:
             results.append(result)
@@ -442,7 +476,7 @@ def _validate_modern_checklist(
             continue
         pairs.append((check.get("id"), check.get("question")))
         result = check.get("result")
-        if result not in {"pass", "rerun", "fail"}:
+        if not isinstance(result, str) or result not in {"pass", "rerun", "fail"}:
             errors.append(f"checklist_checks[{index}].result 无效")
         else:
             results.append(result)
@@ -485,13 +519,16 @@ def _validate_modern_reference(
             errors.append(f"{label}.question 与固定问题不一致")
         result = check.get("result")
         issue = check.get("issue_code")
-        if result not in {"pass", "rerun", "fail"}:
+        if not isinstance(result, str) or result not in {"pass", "rerun", "fail"}:
             errors.append(f"{label}.result 必须是 pass/rerun/fail")
             continue
         results.append(result)
         if result == "pass" and issue is not None:
             errors.append(f"{label} pass 时 issue_code 必须为 null")
-        elif result == "rerun" and issue not in REFERENCE_RERUN_ISSUES.get(name, set()):
+        elif result == "rerun" and (
+            not isinstance(issue, str)
+            or issue not in REFERENCE_RERUN_ISSUES.get(name, set())
+        ):
             errors.append(f"{label} rerun issue_code 未受控")
         elif result == "fail":
             expected_issue = REFERENCE_FAILURE_CODES[name]
@@ -521,13 +558,25 @@ def _validate_modern_reference(
         if name == "source_jewelry_removed":
             visible = evidence.get("source_jewelry_subject_visible")
             scope = evidence.get("residual_scope")
-            if type(visible) is not bool or scope not in {
-                "none", "edge_pixels", "contact_shadow", "subject_or_large_area"
-            }:
+            if (
+                type(visible) is not bool
+                or not isinstance(scope, str)
+                or scope
+                not in {
+                    "none",
+                    "edge_pixels",
+                    "contact_shadow",
+                    "subject_or_large_area",
+                }
+            ):
                 errors.append(f"{label}.evidence 缺少合法原首饰残留 facts")
             if result == "pass" and (visible is not False or scope != "none"):
                 errors.append(f"{label} pass 与残留 facts 不一致")
-            if result == "rerun" and (visible is not False or scope not in {"edge_pixels", "contact_shadow"}):
+            if result == "rerun" and (
+                visible is not False
+                or not isinstance(scope, str)
+                or scope not in {"edge_pixels", "contact_shadow"}
+            ):
                 errors.append(f"{label} rerun 存在明显泄漏，不能伪装为局部修复")
             if result == "fail" and visible is not True:
                 errors.append(f"{label} fail 与残留 facts 不一致")
@@ -557,8 +606,6 @@ def _validate_modern_reference(
         errors.append("reference checks 未全部通过时整体状态不能为 pass")
     if any(result == "fail" for result in results) and status != "reject":
         errors.append("reference fail 时整体状态必须为 reject")
-    if status == "rerun" and not any(result == "rerun" for result in results):
-        errors.append("整体 rerun 必须有结构化 rerun 检查项")
     return results
 
 
@@ -569,7 +616,7 @@ def _validate_modern_qc(path: Path, data: dict[str, Any]) -> list[str]:
     canonical = _fixed_json(generation_dir, "product-fidelity-constraints.json", errors)
     _fixed_json(generation_dir, "reference-composition-snapshot.json", errors)
     status = data.get("status")
-    if status not in ALLOWED_STATUS:
+    if not isinstance(status, str) or status not in ALLOWED_STATUS:
         errors.append("status 必须是 pass/rerun/reject")
     required_fields = {
         "status",
@@ -614,23 +661,55 @@ def _validate_modern_qc(path: Path, data: dict[str, Any]) -> list[str]:
     checklist_results = _validate_modern_checklist(data, questions, status, errors)
     reference_results = _validate_modern_reference(data, status, errors)
     all_results = fidelity_results + checklist_results + reference_results
+    raw_fidelity_checks = data.get("fidelity_checks")
+    if not isinstance(raw_fidelity_checks, list):
+        raw_fidelity_checks = []
+    raw_checklist_checks = data.get("checklist_checks")
+    if not isinstance(raw_checklist_checks, list):
+        raw_checklist_checks = []
     fidelity_by_question = {
         item.get("question"): item.get("result")
-        for item in data.get("fidelity_checks", [])
+        for item in raw_fidelity_checks
         if isinstance(item, dict) and isinstance(item.get("question"), str)
     }
     checklist_by_question = {
         item.get("question"): item.get("result")
-        for item in data.get("checklist_checks", [])
+        for item in raw_checklist_checks
         if isinstance(item, dict) and isinstance(item.get("question"), str)
     }
     for question in fidelity_by_question.keys() & checklist_by_question.keys():
         if fidelity_by_question[question] != checklist_by_question[question]:
             errors.append("fidelity_checks 与 checklist_checks 同一问题的 result 必须一致")
-    if status == "pass" and any(result != "pass" for result in all_results):
-        errors.append("三层结构化 QC 未全部通过时整体状态不能为 pass")
-    if status == "reject" and all_results and not any(result == "fail" for result in all_results):
-        errors.append("整体 reject 必须有结构化 fail 检查项")
+    raw_critical = data.get("critical_failures", [])
+    critical_failures = (
+        [item for item in raw_critical if isinstance(item, str)]
+        if isinstance(raw_critical, list)
+        else []
+    )
+    reject_critical = REJECT_CRITICAL_FAILURES | REFERENCE_FAILURE_SET
+    if status == "pass" and critical_failures:
+        errors.append("存在关键 QC critical_failures 时 overall status 不能为 pass")
+
+    expected_status: str | None
+    if any(result == "fail" for result in all_results) or any(
+        failure in reject_critical for failure in critical_failures
+    ):
+        expected_status = "reject"
+    elif any(result == "rerun" for result in all_results):
+        expected_status = "rerun"
+    elif critical_failures:
+        expected_status = None
+    else:
+        expected_status = "pass"
+    if (
+        expected_status is not None
+        and isinstance(status, str)
+        and status in ALLOWED_STATUS
+        and status != expected_status
+    ):
+        errors.append(
+            f"三层 QC 与 critical_failures 合并后的最高严重度要求 overall status 为 {expected_status}"
+        )
     return errors
 
 

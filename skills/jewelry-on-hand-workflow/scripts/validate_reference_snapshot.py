@@ -131,11 +131,12 @@ def validate_reference_snapshot(
     rank = data["rank"]
     if type(rank) is not int or rank < 1:
         errors.append("rank 必须是大于等于 1 的 JSON 整数，不能使用布尔值")
-    if output_role not in ALLOWED_ROLES:
+    if not isinstance(output_role, str) or output_role not in ALLOWED_ROLES:
         errors.append("output_role 参数只能是 hand_worn 或 lifestyle")
     if data["output_role"] != output_role:
         errors.append("快照 output_role 与请求角色不一致")
-    if data["output_role"] not in ALLOWED_ROLES:
+    snapshot_role = data["output_role"]
+    if not isinstance(snapshot_role, str) or snapshot_role not in ALLOWED_ROLES:
         errors.append("快照 output_role 只能是 hand_worn 或 lifestyle，拒绝 hero")
 
     for field in (
@@ -171,9 +172,10 @@ def validate_reference_snapshot(
         errors.append("product_visibility_sufficient 必须是 JSON 布尔值")
     elif not data["product_visibility_sufficient"]:
         errors.append("产品预计展示面积不足")
-    if data["text_or_ui_risk"] not in ALLOWED_UI_RISKS:
+    ui_risk = data["text_or_ui_risk"]
+    if not isinstance(ui_risk, str) or ui_risk not in ALLOWED_UI_RISKS:
         errors.append("text_or_ui_risk 必须是 none/small_removable/blocking")
-    elif data["text_or_ui_risk"] == "blocking":
+    elif ui_risk == "blocking":
         errors.append("参考图存在阻断性的文字或 UI")
 
     if not reference_path.is_file():
