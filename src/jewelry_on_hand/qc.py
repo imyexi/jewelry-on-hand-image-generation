@@ -259,22 +259,6 @@ def _validate_reference_preservation_coverage(
         raise ValueError(
             "reference_preservation_checks.question 必须与预期问题完全一致"
         )
-    for check in checks:
-        if check.result == "rerun" and check.name != "source_jewelry_removed":
-            raise ValueError(
-                "构图、人物、姿势、服装、背景、光线和替换位置问题不得使用 rerun"
-            )
-        if check.name == "source_jewelry_removed" and check.result == "rerun":
-            if any(
-                term in check.notes
-                for term in ("肉眼可辨", "主体残留", "完整珠体", "明显残留", "大面积")
-            ):
-                raise ValueError(
-                    "肉眼可辨的原首饰主体残留必须使用 "
-                    "reference_jewelry_leakage 并标记 reject"
-                )
-
-
 def _validate_checklist_coverage(
     expected_questions: tuple[QCChecklistItem, ...],
     checks: tuple[Any, ...],

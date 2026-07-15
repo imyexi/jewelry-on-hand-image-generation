@@ -5,6 +5,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from jewelry_on_hand.models import (
+    REFERENCE_EVIDENCE_SOURCES,
+    REFERENCE_FAILURE_CODES,
+    REFERENCE_RERUN_ISSUES,
+)
 from jewelry_on_hand.output_roles import require_scene_replacement_role
 from jewelry_on_hand.reference_composition import (
     ReferenceCompositionSnapshot,
@@ -151,7 +156,10 @@ def _image_column(title: str, path: Path) -> str:
 
 
 __all__ = [
+    "REFERENCE_EVIDENCE_SOURCES",
+    "REFERENCE_FAILURE_CODES",
     "REFERENCE_PRESERVATION_QUESTIONS",
+    "REFERENCE_RERUN_ISSUES",
     "build_reference_preservation_checklist",
     "ensure_qc_review_ready",
     "write_qc_review_page",

@@ -11,7 +11,10 @@ from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
 from jewelry_on_hand.product_analysis import product_analysis_to_dict
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.qc import build_qc_checklist, write_qc_result
-from jewelry_on_hand.qc_review import build_reference_preservation_checklist
+from jewelry_on_hand.qc_review import (
+    REFERENCE_FAILURE_CODES,
+    build_reference_preservation_checklist,
+)
 from jewelry_on_hand.reference_composition import (
     ReferenceCompositionSnapshot,
     ReferencePose,
@@ -636,7 +639,20 @@ def test_modern_qc_pass_requires_complete_three_layer_coverage(tmp_path):
         (lambda checks: checks + [dict(checks[0])], "唯一"),
         (lambda checks: [dict(checks[0], name="unknown")] + checks[1:], "未知|完整"),
         (lambda checks: [dict(checks[0], question="错误问题")] + checks[1:], "question|问题"),
-        (lambda checks: [dict(checks[0], notes="人工 QC 通过")] + checks[1:], "可验证"),
+        (lambda checks: [dict(checks[0], evidence=None)] + checks[1:], "evidence.*必填"),
+        (
+            lambda checks: [
+                dict(
+                    checks[0],
+                    evidence=dict(
+                        checks[0]["evidence"],
+                        comparison_source="product_identity",
+                    ),
+                )
+            ]
+            + checks[1:],
+            "comparison_source",
+        ),
     ],
 )
 def test_modern_qc_rejects_invalid_reference_preservation_checks(
@@ -686,6 +702,86 @@ def test_modern_qc_accepts_complete_three_layer_pass_and_persists_all_layers(tmp
     assert payload["checklist_checks"] == checklist_checks
 
 
+@pytest.mark.parametrize(("check_name", "critical_code"), REFERENCE_FAILURE_CODES.items())
+def test_reference_fail_requires_exact_mapped_critical_code(
+    tmp_path,
+    check_name,
+    critical_code,
+):
+    generation_dir, snapshot, fidelity_checks, checklist_checks = (
+        _modern_qc_generation(tmp_path)
+    )
+    checks = _reference_checks(snapshot)
+    index = next(i for i, check in enumerate(checks) if check["name"] == check_name)
+    checks[index] = dict(
+        checks[index],
+        result="fail",
+        issue_code=critical_code,
+        evidence=_reference_evidence(check_name, result="fail"),
+    )
+
+    wrong_code = next(
+        code for code in set(REFERENCE_FAILURE_CODES.values()) if code != critical_code
+    )
+    for critical_failures in ([], [wrong_code]):
+        with pytest.raises(ValueError, match="critical_failures.*映射|错码|缺少"):
+            write_qc_result(
+                generation_dir,
+                "reject",
+                [],
+                ["参考结构失败"],
+                "人工复核",
+                reference_preservation_checks=checks,
+                fidelity_checks=fidelity_checks,
+                checklist_checks=checklist_checks,
+                critical_failures=critical_failures,
+            )
+
+    path = write_qc_result(
+        generation_dir,
+        "reject",
+        [],
+        ["参考结构失败"],
+        "人工复核",
+        reference_preservation_checks=checks,
+        fidelity_checks=fidelity_checks,
+        checklist_checks=checklist_checks,
+        critical_failures=[critical_code],
+    )
+    assert read_json(path)["critical_failures"] == [critical_code]
+
+
+def test_two_reference_failures_sharing_one_code_are_deduplicated(tmp_path):
+    generation_dir, snapshot, fidelity_checks, checklist_checks = (
+        _modern_qc_generation(tmp_path)
+    )
+    checks = _reference_checks(snapshot)
+    for check_name in (
+        "subject_placement_preserved",
+        "replacement_target_preserved",
+    ):
+        index = next(i for i, check in enumerate(checks) if check["name"] == check_name)
+        checks[index] = dict(
+            checks[index],
+            result="fail",
+            issue_code="replacement_target_changed",
+            evidence=_reference_evidence(check_name, result="fail"),
+        )
+
+    path = write_qc_result(
+        generation_dir,
+        "reject",
+        [],
+        ["主体位置和替换位置均改变"],
+        "人工复核",
+        reference_preservation_checks=checks,
+        fidelity_checks=fidelity_checks,
+        checklist_checks=checklist_checks,
+        critical_failures=["replacement_target_changed"],
+    )
+    assert read_json(path)["critical_failures"] == ["replacement_target_changed"]
+
+
 def test_only_source_jewelry_edge_residue_may_use_reference_rerun(tmp_path):
     generation_dir, snapshot, fidelity_checks, checklist_checks = (
         _modern_qc_generation(tmp_path)
@@ -694,7 +790,15 @@ def test_only_source_jewelry_edge_residue_may_use_reference_rerun(tmp_path):
     checks[-3] = dict(
         checks[-3],
         result="rerun",
+        issue_code="minor_edge_residue",
         notes="放大查看原手串位置，仍有两像素灰色边缘需要局部清理",
+        evidence={
+            "comparison_source": "scene_reference",
+            "region": "左手腕原手串接触边缘",
+            "observation": "仅见两像素灰色边缘，未见完整珠体或原手串主体",
+            "source_jewelry_subject_visible": False,
+            "residual_scope": "edge_pixels",
+        },
     )
 
     path = write_qc_result(
@@ -711,9 +815,15 @@ def test_only_source_jewelry_edge_residue_may_use_reference_rerun(tmp_path):
 
     checks[-3] = dict(
         checks[-3],
-        notes="肉眼可辨原手串主体残留，仍能看出完整珠体",
+        evidence={
+            "comparison_source": "scene_reference",
+            "region": "左手腕原手串区域",
+            "observation": "可见完整珠体轮廓",
+            "source_jewelry_subject_visible": True,
+            "residual_scope": "subject_or_large_area",
+        },
     )
-    with pytest.raises(ValueError, match="reference_jewelry_leakage|reject"):
+    with pytest.raises(ValueError, match="minor_edge_residue|subject_visible|residual_scope"):
         write_qc_result(
             generation_dir,
             "rerun",
@@ -725,9 +835,55 @@ def test_only_source_jewelry_edge_residue_may_use_reference_rerun(tmp_path):
             checklist_checks=checklist_checks,
         )
 
+
+@pytest.mark.parametrize(
+    "issue_code",
+    [
+        "local_blending_artifact",
+        "local_shadow_mismatch",
+        "non_core_texture_mismatch",
+    ],
+)
+def test_replacement_target_allows_only_controlled_local_rerun_issues(
+    tmp_path,
+    issue_code,
+):
+    generation_dir, snapshot, fidelity_checks, checklist_checks = (
+        _modern_qc_generation(tmp_path)
+    )
+    checks = _reference_checks(snapshot)
+    index = next(
+        i
+        for i, check in enumerate(checks)
+        if check["name"] == "replacement_target_preserved"
+    )
+    checks[index] = dict(
+        checks[index],
+        result="rerun",
+        issue_code=issue_code,
+        evidence={
+            "comparison_source": "confirmed_snapshot",
+            "region": "目标产品与手腕接触边缘",
+            "observation": "替换位置不变，仅局部融合细节需要修复",
+        },
+    )
+
+    path = write_qc_result(
+        generation_dir,
+        "rerun",
+        [],
+        ["局部融合需要修复"],
+        "人工复核",
+        reference_preservation_checks=checks,
+        fidelity_checks=fidelity_checks,
+        checklist_checks=checklist_checks,
+    )
+    assert read_json(path)["reference_preservation_checks"][index]["issue_code"] == issue_code
+
     checks[0] = dict(
         checks[0],
         result="rerun",
+        issue_code="local_blending_artifact",
         notes="对照网格确认主体裁切边界发生变化",
     )
     with pytest.raises(ValueError, match="构图|rerun"):
@@ -813,10 +969,41 @@ def _reference_checks(snapshot):
             "name": name,
             "question": question,
             "result": "pass",
+            "issue_code": None,
             "notes": f"对照参考底图网格逐项确认 {name} 保持一致",
+            "evidence": _reference_evidence(name, result="pass"),
         }
         for name, question in build_reference_preservation_checklist(snapshot)
     ]
+
+
+def _reference_evidence(name, *, result):
+    comparison_sources = {
+        "replacement_target_preserved": "confirmed_snapshot",
+        "single_target_product": "product_identity",
+    }
+    evidence = {
+        "comparison_source": comparison_sources.get(name, "scene_reference"),
+        "region": f"{name} 对应画面区域",
+        "observation": f"逐项对照确认 {name} 的可见事实",
+    }
+    if name == "source_jewelry_removed":
+        if result == "pass":
+            evidence.update(
+                source_jewelry_subject_visible=False,
+                residual_scope="none",
+            )
+        elif result == "rerun":
+            evidence.update(
+                source_jewelry_subject_visible=False,
+                residual_scope="edge_pixels",
+            )
+        else:
+            evidence.update(
+                source_jewelry_subject_visible=True,
+                residual_scope="subject_or_large_area",
+            )
+    return evidence
 
 
 @pytest.mark.parametrize(

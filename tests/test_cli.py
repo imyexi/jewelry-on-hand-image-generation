@@ -125,6 +125,40 @@ def test_qc_cli_writes_complete_modern_three_layer_result(tmp_path):
     assert payload["checklist_checks"]
 
 
+def test_qc_cli_rejects_reference_check_without_structured_evidence(
+    tmp_path,
+    capsys,
+):
+    from jewelry_on_hand.cli import main
+
+    generation_dir, fidelity, checklist, reference = _ready_cli_qc_generation(
+        tmp_path
+    )
+    checks = read_json(reference)
+    checks[0].pop("evidence")
+    write_json(reference, checks)
+
+    result = main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--fidelity-checks-json",
+            str(fidelity),
+            "--checklist-checks-json",
+            str(checklist),
+            "--reference-preservation-checks-json",
+            str(reference),
+        ]
+    )
+
+    assert result == 1
+    assert "evidence 必填" in capsys.readouterr().err
+    assert not (generation_dir / "qc.json").exists()
+
+
 def test_qc_cli_rejects_legacy_or_hero_generation_without_writing(tmp_path, capsys):
     from jewelry_on_hand.cli import main
 
@@ -2719,9 +2753,29 @@ def _ready_cli_qc_generation(tmp_path):
                 "name": name,
                 "question": question,
                 "result": "pass",
+                "issue_code": None,
                 "notes": f"对照参考底图网格确认 {name} 保持一致",
+                "evidence": _cli_reference_evidence(name),
             }
             for name, question in build_reference_preservation_checklist(snapshot)
         ],
     )
     return generation_dir, fidelity_path, checklist_path, reference_path
+
+
+def _cli_reference_evidence(name):
+    comparison_sources = {
+        "replacement_target_preserved": "confirmed_snapshot",
+        "single_target_product": "product_identity",
+    }
+    evidence = {
+        "comparison_source": comparison_sources.get(name, "scene_reference"),
+        "region": f"{name} 对应画面区域",
+        "observation": f"逐项对照确认 {name} 的可见事实",
+    }
+    if name == "source_jewelry_removed":
+        evidence.update(
+            source_jewelry_subject_visible=False,
+            residual_scope="none",
+        )
+    return evidence

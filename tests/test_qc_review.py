@@ -3,7 +3,10 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from jewelry_on_hand.models import ReferencePreservationCheck
+from jewelry_on_hand.models import (
+    ReferencePreservationCheck,
+    ReferencePreservationEvidence,
+)
 from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.qc_review import (
     REFERENCE_PRESERVATION_QUESTIONS,
@@ -32,25 +35,31 @@ REFERENCE_CHECK_NAMES = (
 )
 
 
-@pytest.mark.parametrize("generic_notes", ["人工 QC 通过", "人工 QC 通过！", "已确认。"])
-def test_reference_preservation_check_is_immutable_and_requires_verifiable_notes(
-    generic_notes,
-):
+def test_reference_preservation_check_is_immutable_and_requires_structured_evidence():
     check = ReferencePreservationCheck(
         name="framing_preserved",
         question=REFERENCE_PRESERVATION_QUESTIONS["framing_preserved"],
         result="pass",
-        notes="对照参考图确认腕部占画面宽度约三分之一，裁切边界一致",
+        notes="人工 QC 通过，没有问题",
+        evidence=ReferencePreservationEvidence(
+            comparison_source="scene_reference",
+            region="画面四周裁切边界及腕部主体",
+            observation="腕部占画面宽度约三分之一，四边裁切位置与底图一致",
+        ),
     )
 
     with pytest.raises(FrozenInstanceError):
         check.result = "fail"
-    with pytest.raises(ValueError, match="可验证的人工说明"):
+    payload = check.to_dict()
+    assert payload["issue_code"] is None
+    assert payload["evidence"]["comparison_source"] == "scene_reference"
+    assert ReferencePreservationCheck.from_dict(payload) == check
+    with pytest.raises(ValueError, match="evidence.*必填"):
         ReferencePreservationCheck(
             name="framing_preserved",
             question=check.question,
             result="pass",
-            notes=generic_notes,
+            notes="人工 QC 通过，没有问题",
         )
     with pytest.raises(ValueError, match="pass/rerun/fail"):
         ReferencePreservationCheck(
@@ -58,6 +67,71 @@ def test_reference_preservation_check_is_immutable_and_requires_verifiable_notes
             question=check.question,
             result="unknown",
             notes="对照参考图确认裁切边界一致",
+            evidence=check.evidence,
+        )
+
+
+def test_reference_preservation_evidence_requires_controlled_source_region_and_observation():
+    with pytest.raises(ValueError, match="comparison_source"):
+        ReferencePreservationEvidence(
+            comparison_source="manual_guess",
+            region="左手腕",
+            observation="位置一致",
+        )
+    with pytest.raises(ValueError, match="region"):
+        ReferencePreservationEvidence(
+            comparison_source="scene_reference",
+            region="",
+            observation="位置一致",
+        )
+    with pytest.raises(ValueError, match="observation"):
+        ReferencePreservationEvidence(
+            comparison_source="scene_reference",
+            region="左手腕",
+            observation="",
+        )
+
+
+def test_reference_check_rejects_wrong_comparison_source_for_check_name():
+    with pytest.raises(ValueError, match="comparison_source.*framing_preserved"):
+        ReferencePreservationCheck(
+            name="framing_preserved",
+            question=REFERENCE_PRESERVATION_QUESTIONS["framing_preserved"],
+            result="pass",
+            notes="补充说明",
+            evidence=ReferencePreservationEvidence(
+                comparison_source="product_identity",
+                region="画面边界",
+                observation="四边裁切一致",
+            ),
+        )
+
+
+def test_pass_rejects_issue_code_and_source_jewelry_requires_severity_facts():
+    evidence = ReferencePreservationEvidence(
+        comparison_source="scene_reference",
+        region="左手腕原首饰区域",
+        observation="未见原首饰主体",
+    )
+    with pytest.raises(ValueError, match="pass.*issue_code"):
+        ReferencePreservationCheck(
+            name="source_jewelry_removed",
+            question=REFERENCE_PRESERVATION_QUESTIONS["source_jewelry_removed"],
+            result="pass",
+            issue_code="minor_edge_residue",
+            notes="补充说明",
+            evidence=evidence,
+        )
+    with pytest.raises(
+        ValueError,
+        match="source_jewelry_subject_visible|residual_scope",
+    ):
+        ReferencePreservationCheck(
+            name="source_jewelry_removed",
+            question=REFERENCE_PRESERVATION_QUESTIONS["source_jewelry_removed"],
+            result="pass",
+            notes="补充说明",
+            evidence=evidence,
         )
 
 
