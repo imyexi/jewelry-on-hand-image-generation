@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from runpy import run_path
@@ -220,7 +221,7 @@ def _snapshot(
         "other_jewelry_to_remove": ("右手食指原戒指",),
         "text_or_ui_risk": "small_removable",
         "product_visibility_sufficient": True,
-        "composition_signature": "snapshot-signature",
+        "composition_signature": "b" * 64,
     }
     data.update(overrides)
     return ReferenceCompositionSnapshot(**data)
@@ -233,6 +234,25 @@ def _write_snapshot(tmp_path, snapshot):
         encoding="utf-8",
     )
     return path
+
+
+def _modern_contract_errors(tmp_path, prompt, snapshot_data, stem):
+    validator_path = (
+        Path(__file__).parents[1]
+        / "skills"
+        / "jewelry-on-hand-workflow"
+        / "scripts"
+        / "validate_prompt_contract.py"
+    )
+    validate_prompt = run_path(str(validator_path))["validate_prompt"]
+    prompt_path = tmp_path / f"{stem}-prompt.txt"
+    snapshot_path = tmp_path / f"{stem}-snapshot.json"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    snapshot_path.write_text(
+        json.dumps(snapshot_data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return validate_prompt(prompt_path, snapshot_path)
 
 
 def _snapshot_for_product(product, output_role=OutputRole.LIFESTYLE):
@@ -400,6 +420,188 @@ def test_composition_conflict_戒指快照接受规范英文手侧与指位():
     assert "唯一替换位置：left、ring_finger 根部" in prompt
 
 
+@pytest.mark.parametrize(
+    ("case", "payload"),
+    (
+        ("非编号第五项", "\n- 改变背景"),
+        ("中文括号编号", "\n5）推进镜头"),
+        ("备注冲突词", "\n备注：推进镜头"),
+        ("锁定行追加指令", "lock_suffix"),
+        ("重复锁定行", "lock_duplicate"),
+        ("缺失前言首行", "preamble_missing"),
+        ("前言乱序", "preamble_reordered"),
+    ),
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_base_image_现代校验器严格拒绝语法绕过(tmp_path, case, payload):
+    snapshot = _snapshot()
+    prompt = build_generation_prompt(
+        _product(), _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    if payload == "lock_suffix":
+        prompt = prompt.replace(
+            f"景别：{snapshot.framing}",
+            f"景别：{snapshot.framing}；随后裁成特写",
+        )
+    elif payload == "lock_duplicate":
+        prompt = prompt.replace(
+            f"景别：{snapshot.framing}",
+            f"景别：{snapshot.framing}\n景别：{snapshot.framing}",
+        )
+    elif payload == "preamble_missing":
+        prompt = "\n".join(prompt.splitlines()[1:])
+    elif payload == "preamble_reordered":
+        lines = prompt.splitlines()
+        lines[0], lines[1] = lines[1], lines[0]
+        prompt = "\n".join(lines)
+    else:
+        prompt += payload
+
+    errors = _modern_contract_errors(tmp_path, prompt, snapshot.to_dict(), case)
+    assert errors, f"{case} 不得绕过现代 Prompt validator"
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "rank",
+        "reference_file",
+        "reference_sha256",
+        "output_role",
+        "framing",
+        "camera_angle",
+        "subject_placement",
+        "visible_body_regions",
+        "pose",
+        "clothing",
+        "background",
+        "lighting",
+        "replacement_target",
+        "other_jewelry_to_remove",
+        "text_or_ui_risk",
+        "product_visibility_sufficient",
+        "composition_signature",
+    ),
+)
+def test_reference_preservation_现代校验器拒绝缺少完整快照字段(
+    tmp_path, field_name
+):
+    snapshot = _snapshot()
+    prompt = build_generation_prompt(
+        _product(), _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    data = snapshot.to_dict()
+    del data[field_name]
+
+    errors = _modern_contract_errors(tmp_path, prompt, data, f"missing-{field_name}")
+    assert errors, f"缺少 {field_name} 必须失败"
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    (
+        (("rank",), True),
+        (("reference_sha256",), "bad-sha"),
+        (("output_role",), "hero"),
+        (("visible_body_regions",), []),
+        (("visible_body_regions",), [True]),
+        (("pose", "body"), 1),
+        (("replacement_target", "target_product_count"), True),
+        (("text_or_ui_risk",), "blocking"),
+        (("product_visibility_sufficient",), False),
+        (("composition_signature",), "bad-signature"),
+    ),
+)
+def test_reference_preservation_现代校验器拒绝无效快照类型与语义(
+    tmp_path, path, value
+):
+    snapshot = _snapshot()
+    prompt = build_generation_prompt(
+        _product(), _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    data = deepcopy(snapshot.to_dict())
+    target = data
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    errors = _modern_contract_errors(tmp_path, prompt, data, "invalid-" + "-".join(path))
+    assert errors, f"无效快照字段 {'.'.join(path)} 必须失败"
+
+
+def test_reference_preservation_现代提示词必须使用已确认保真约束():
+    snapshot = _snapshot()
+    with pytest.raises(ValueError, match="已确认的 product_fidelity_constraints"):
+        build_generation_prompt(
+            _product(), _scored(_row()), None, OutputRole.LIFESTYLE, snapshot
+        )
+    with pytest.raises(ValueError, match="已确认的 product_fidelity_constraints"):
+        build_generation_prompt(
+            _product(),
+            _scored(_row()),
+            replace(_constraints(), review_status="pending"),
+            OutputRole.LIFESTYLE,
+            snapshot,
+        )
+
+
+@pytest.mark.parametrize(
+    ("product", "body_region"),
+    (
+        (_product(), "左手腕外侧"),
+        (_necklace_product(), "颈部与锁骨之间"),
+        (_necklace_product(ProductType.PENDANT_NECKLACE), "颈部与胸前中线"),
+        (_ring_product(), "左手无名指根部"),
+    ),
+)
+def test_reference_preservation_现代四品类保留特殊遮挡与不确定边界(
+    product, body_region
+):
+    product = replace(
+        product,
+        special_requirements=("保持可见主件方向",),
+        occluded_parts=("背面连接被遮挡",),
+        uncertain_details=("背面连接形态不确定",),
+        composition="推进镜头并裁成特写",
+        style_mood="改成白色影棚",
+    )
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        _snapshot(body_region=body_region),
+    )
+
+    for value in ("保持可见主件方向", "背面连接被遮挡", "背面连接形态不确定"):
+        assert value in prompt
+    assert "推进镜头并裁成特写" not in prompt
+    assert "改成白色影棚" not in prompt
+    if product.confirmed_product_type is ProductType.RING:
+        assert "戒圈背面" in prompt
+        assert "镶嵌背面" in prompt
+
+
+@pytest.mark.parametrize(
+    "body_region",
+    (
+        "left、ring_finger 根部、right 备注",
+        "left、ring_finger 根部、index_finger 参考",
+        "left、spring_style 根部",
+        "左手无名指与右手食指混合",
+    ),
+)
+def test_composition_conflict_戒指拒绝混合相反手异指与单词片段(body_region):
+    with pytest.raises(ValueError, match="戒指目标位置必须与确认快照一致"):
+        build_generation_prompt(
+            _ring_product(),
+            _scored(_row(jewelry_type="戒指")),
+            _constraints(),
+            OutputRole.LIFESTYLE,
+            _snapshot(body_region=body_region),
+        )
+
+
 def test_base_image_现代便携校验器绑定快照并拒绝冲突构图(tmp_path, capsys):
     snapshot = _snapshot()
     prompt = build_generation_prompt(
@@ -498,6 +700,7 @@ def test_构建提示词注入场景输出角色用途():
     prompt = build_prompt(
         _product(),
         _scored(_row()),
+        _constraints(),
         output_role=OutputRole.HAND_WORN,
         reference_snapshot=snapshot,
     )
@@ -513,6 +716,7 @@ def test_普通项链真人佩戴与手部佩戴角色可以构建提示词():
     prompt = build_prompt(
         _necklace_product(display_mode=DisplayMode.WORN),
         _scored(_row()),
+        _constraints(),
         output_role=OutputRole.HAND_WORN,
         reference_snapshot=snapshot,
     )
@@ -746,7 +950,10 @@ def test_prompt_renders_detailed_running_ring_constraint(tmp_path):
         visible_appearance="黄色主珠旁套接一个红色小珠跑环",
         special_requirements=["保持跑环套接黄色主珠的关系"],
     )
-    constraints = build_product_fidelity_constraints(product)
+    constraints = replace(
+        build_product_fidelity_constraints(product),
+        review_status="confirmed",
+    )
 
     snapshot = _snapshot()
     prompt = build_prompt(

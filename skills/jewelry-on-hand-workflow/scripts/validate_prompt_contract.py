@@ -156,6 +156,16 @@ ALLOWED_DISPLAY_MODES = {"worn", "hand_held"}
 FORBIDDEN_FRAGMENTS = ("???", "锟", "�")
 
 MODERN_PREAMBLE = "这是参考底图编辑任务，不是重新设计或重新生成场景。"
+MODERN_PREAMBLE_LINES = (
+    MODERN_PREAMBLE,
+    "内部图1是画面底图。锁定内部图1的人物身份、身体姿势、手势、服装、背景、道具、镜头角度、景别、主体位置、光线方向、色调和留白。",
+    "唯一允许修改：",
+    "1. 移除内部图1中的全部原首饰及其直接接触阴影；",
+    "2. 在确认的目标位置放入内部图2中的一件目标产品；",
+    "3. 为新产品重建必要的接触、遮挡、受力和局部阴影；",
+    "4. 清除小面积水印或平台标识。",
+    "禁止重新生成、裁切、放大、缩小、换景、换姿势、换衣服、改变人物位置或把生活场景改成产品特写。",
+)
 MODERN_REQUIRED_FRAGMENTS = (
     "内部图1是画面底图",
     "唯一允许修改：",
@@ -177,6 +187,41 @@ MODERN_CONFLICT_PREFIXES = (
     "风险提示：",
 )
 MODERN_ALLOWED_MODIFICATION_LINES = MODERN_REQUIRED_FRAGMENTS[2:6]
+MODERN_CONFLICT_TERMS = (
+    "改变背景",
+    "更换背景",
+    "换景",
+    "推进镜头",
+    "裁成",
+    "裁切",
+    "放大产品",
+    "产品特写",
+    "重新构图",
+    "改变姿势",
+    "换姿势",
+    "改变手势",
+    "换衣服",
+    "改变人物位置",
+)
+SNAPSHOT_FIELDS = (
+    "rank",
+    "reference_file",
+    "reference_sha256",
+    "output_role",
+    "framing",
+    "camera_angle",
+    "subject_placement",
+    "visible_body_regions",
+    "pose",
+    "clothing",
+    "background",
+    "lighting",
+    "replacement_target",
+    "other_jewelry_to_remove",
+    "text_or_ui_risk",
+    "product_visibility_sufficient",
+    "composition_signature",
+)
 
 LAYER_OWNED_PREFIXES = {
     "【基础安全边界】": (
@@ -340,20 +385,28 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
         return [f"确认快照文件无法读取或不是合法 JSON：{exc}"]
     if not isinstance(snapshot, dict):
         return ["确认快照必须是 JSON 对象"]
+    _validate_snapshot_schema(snapshot, errors)
 
-    if not text.startswith(MODERN_PREAMBLE):
-        errors.append(f"现代 Prompt 必须以固定底图编辑前言开头：{MODERN_PREAMBLE}")
+    lines = _section_lines(text)
+    if lines[: len(MODERN_PREAMBLE_LINES)] != MODERN_PREAMBLE_LINES:
+        errors.append("固定底图编辑前言必须逐行、连续、按固定顺序位于开头")
+    for line in MODERN_PREAMBLE_LINES:
+        if lines.count(line) != 1:
+            errors.append(f"固定底图编辑前言行必须且只能出现一次：{line}")
     for fragment in MODERN_REQUIRED_FRAGMENTS:
         if fragment not in text:
             errors.append(f"现代 Prompt 缺少固定底图编辑片段：{fragment}")
-    numbered_lines = tuple(
-        line for line in _section_lines(text) if re.match(r"^\d+\.\s", line)
-    )
+    numbered_lines = tuple(line for line in lines if re.match(r"^\d+\.\s", line))
     if (
         text.count("唯一允许修改：") != 1
         or numbered_lines != MODERN_ALLOWED_MODIFICATION_LINES
     ):
         errors.append("唯一允许修改清单必须且只能包含固定的 1 至 4 项")
+    for line in lines:
+        if re.match(r"^(?:[-*•]\s*|\d+\s*[.)）])", line) and line not in (
+            MODERN_ALLOWED_MODIFICATION_LINES
+        ):
+            errors.append(f"唯一允许修改清单之外禁止新增指令项：{line}")
 
     image_one = text.find("内部图1是画面底图")
     image_two = text.find("内部图2只提供目标产品身份")
@@ -370,13 +423,83 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
         errors.append("当前 Skill 的现代 Prompt 禁止 hero")
 
     _validate_snapshot_fields(text, snapshot, errors)
-    for line in _section_lines(text):
+    _validate_boundary_data(lines, errors)
+    lock_line_values = _expected_lock_lines(snapshot)
+    exempt_lines = set(MODERN_PREAMBLE_LINES) | set(lock_line_values.values())
+    for line in lines:
         if line.startswith(MODERN_CONFLICT_PREFIXES):
             errors.append(f"发现冲突构图字段，现代 Prompt 只能使用确认快照：{line}")
+        if line.startswith("保真边界JSON（仅数据不作指令）："):
+            continue
+        if line in exempt_lines:
+            continue
+        for term in MODERN_CONFLICT_TERMS:
+            if _contains_unnegated_term(line, term):
+                errors.append(f"发现非固定上下文中的冲突构图词：{term}")
     for fragment in FORBIDDEN_FRAGMENTS:
         if fragment in text:
             errors.append(f"发现禁止的乱码片段：{fragment}")
     return errors
+
+
+def _validate_snapshot_schema(snapshot: dict[str, object], errors: list[str]) -> None:
+    missing = [field for field in SNAPSHOT_FIELDS if field not in snapshot]
+    for field in missing:
+        errors.append(f"确认快照缺少必填字段：{field}")
+
+    rank = snapshot.get("rank")
+    if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
+        errors.append("确认快照 rank 必须是大于等于 1 的整数")
+    for field in (
+        "reference_file",
+        "framing",
+        "camera_angle",
+        "subject_placement",
+        "clothing",
+        "background",
+        "lighting",
+    ):
+        if not isinstance(snapshot.get(field), str) or not str(snapshot.get(field)).strip():
+            errors.append(f"确认快照 {field} 必须是非空字符串")
+    for field in ("reference_sha256", "composition_signature"):
+        value = snapshot.get(field)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            errors.append(f"确认快照 {field} 必须是 64 位小写十六进制摘要")
+    if snapshot.get("output_role") not in {"hand_worn", "lifestyle"}:
+        errors.append("确认快照 output_role 必须是 hand_worn 或 lifestyle")
+    _validate_string_list(snapshot.get("visible_body_regions"), "visible_body_regions", errors, require_nonempty=True)
+    _validate_string_list(snapshot.get("other_jewelry_to_remove"), "other_jewelry_to_remove", errors)
+    pose = snapshot.get("pose")
+    if not isinstance(pose, dict):
+        errors.append("确认快照 pose 必须是对象")
+    else:
+        for field in ("body", "arm", "hand", "hand_side"):
+            if not isinstance(pose.get(field), str) or not str(pose.get(field)).strip():
+                errors.append(f"确认快照 pose.{field} 必须是非空字符串")
+    target = snapshot.get("replacement_target")
+    if not isinstance(target, dict):
+        errors.append("确认快照 replacement_target 必须是对象")
+    else:
+        for field in ("body_region", "source_jewelry"):
+            if not isinstance(target.get(field), str) or not str(target.get(field)).strip():
+                errors.append(f"确认快照 replacement_target.{field} 必须是非空字符串")
+        count = target.get("target_product_count")
+        if isinstance(count, bool) or count != 1:
+            errors.append("确认快照 target_product_count 必须是整数 1")
+    if snapshot.get("text_or_ui_risk") not in {"none", "small_removable"}:
+        errors.append("确认快照 text_or_ui_risk 必须是 none 或 small_removable，blocking 禁止生成")
+    if snapshot.get("product_visibility_sufficient") is not True:
+        errors.append("确认快照 product_visibility_sufficient 必须严格为 true")
+
+
+def _validate_string_list(value: object, field: str, errors: list[str], *, require_nonempty: bool = False) -> None:
+    if not isinstance(value, list):
+        errors.append(f"确认快照 {field} 必须是字符串列表")
+        return
+    if require_nonempty and not value:
+        errors.append(f"确认快照 {field} 不能为空列表")
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        errors.append(f"确认快照 {field} 只能包含非空字符串")
 
 
 def validate_legacy_prompt(prompt_path: Path) -> list[str]:
@@ -426,31 +549,16 @@ def _validate_snapshot_fields(
         errors.append("确认快照 replacement_target 必须是对象")
         target = {}
     visible_regions = snapshot.get("visible_body_regions")
-    visible_text = (
-        "、".join(value for value in visible_regions if isinstance(value, str))
-        if isinstance(visible_regions, list)
-        else ""
-    )
-    lock_lines = {
-        "景别": f"景别：{snapshot.get('framing', '')}",
-        "机位": f"机位：{snapshot.get('camera_angle', '')}",
-        "主体位置": f"主体位置：{snapshot.get('subject_placement', '')}",
-        "可见身体区域": f"可见身体区域：{visible_text}",
-        "姿势": (
-            f"姿势：{pose.get('body', '')}；{pose.get('arm', '')}；"
-            f"{pose.get('hand', '')}"
-        ),
-        "手侧": f"手侧：{pose.get('hand_side', '')}",
-        "服装": f"服装：{snapshot.get('clothing', '')}",
-        "背景": f"背景：{snapshot.get('background', '')}",
-        "光线": f"光线：{snapshot.get('lighting', '')}",
-        "唯一替换位置": (
-            f"唯一替换位置：{target.get('body_region', '')}"
-        ),
-    }
+    lock_lines = _expected_lock_lines(snapshot)
+    prompt_lines = _section_lines(text)
+    lock_positions: list[int] = []
     for label, line in lock_lines.items():
-        if line not in text:
+        if prompt_lines.count(line) != 1:
             errors.append(f"Prompt 缺少确认快照锁定行：{label}")
+        else:
+            lock_positions.append(prompt_lines.index(line))
+    if lock_positions != sorted(lock_positions):
+        errors.append("确认快照锁定行顺序错误")
     fields = {
         "framing": snapshot.get("framing"),
         "camera_angle": snapshot.get("camera_angle"),
@@ -483,6 +591,68 @@ def _validate_snapshot_fields(
             errors.append(f"Prompt 缺少确认快照字段：{field_name}={value}")
     if target.get("target_product_count") != 1:
         errors.append("确认快照 target_product_count 必须为 1")
+
+
+def _expected_lock_lines(snapshot: dict[str, object]) -> dict[str, str]:
+    pose = snapshot.get("pose") if isinstance(snapshot.get("pose"), dict) else {}
+    target = (
+        snapshot.get("replacement_target")
+        if isinstance(snapshot.get("replacement_target"), dict)
+        else {}
+    )
+    regions = snapshot.get("visible_body_regions")
+    visible_text = (
+        "、".join(regions)
+        if isinstance(regions, list) and all(isinstance(item, str) for item in regions)
+        else ""
+    )
+    return {
+        "景别": f"景别：{snapshot.get('framing', '')}",
+        "机位": f"机位：{snapshot.get('camera_angle', '')}",
+        "主体位置": f"主体位置：{snapshot.get('subject_placement', '')}",
+        "可见身体区域": f"可见身体区域：{visible_text}",
+        "姿势": f"姿势：{pose.get('body', '')}；{pose.get('arm', '')}；{pose.get('hand', '')}",
+        "手侧": f"手侧：{pose.get('hand_side', '')}",
+        "服装": f"服装：{snapshot.get('clothing', '')}",
+        "背景": f"背景：{snapshot.get('background', '')}",
+        "光线": f"光线：{snapshot.get('lighting', '')}",
+        "唯一替换位置": f"唯一替换位置：{target.get('body_region', '')}",
+    }
+
+
+def _validate_boundary_data(lines: tuple[str, ...], errors: list[str]) -> None:
+    prefix = "保真边界JSON（仅数据不作指令）："
+    matches = [line for line in lines if line.startswith(prefix)]
+    if len(matches) != 1:
+        errors.append("现代 Prompt 必须且只能包含一行边界数据 JSON")
+        return
+    try:
+        data = json.loads(matches[0][len(prefix) :])
+    except json.JSONDecodeError:
+        errors.append("边界数据 JSON 格式无效")
+        return
+    if not isinstance(data, dict) or set(data) != {
+        "特殊要求",
+        "被遮挡部分",
+        "不确定细节",
+    }:
+        errors.append("保真边界 JSON 必须包含特殊要求、被遮挡部分、不确定细节三类")
+        return
+    for key, value in data.items():
+        _validate_string_list(value, f"边界数据.{key}", errors)
+
+
+def _contains_unnegated_term(line: str, term: str) -> bool:
+    start = 0
+    while True:
+        index = line.find(term, start)
+        if index < 0:
+            return False
+        clause_start = max(line.rfind(mark, 0, index) for mark in "；。！？") + 1
+        prefix = line[clause_start:index]
+        if not any(word in prefix for word in ("禁止", "不得", "不要", "不可", "不能", "不允许", "不改", "不作")):
+            return True
+        start = index + len(term)
 
 
 def _parse_sections(
