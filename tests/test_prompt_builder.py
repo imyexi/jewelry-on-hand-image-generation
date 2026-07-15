@@ -423,13 +423,22 @@ def test_composition_conflict_戒指快照接受规范英文手侧与指位():
 @pytest.mark.parametrize(
     ("case", "payload"),
     (
-        ("非编号第五项", "\n- 改变背景"),
-        ("中文括号编号", "\n5）推进镜头"),
+        ("非编号第五项", "\n- 附加说明"),
+        ("中文括号编号", "\n5）附加说明"),
+        ("顿号编号", "\n5、附加说明"),
+        ("全角点编号", "\n5．附加说明"),
         ("备注冲突词", "\n备注：推进镜头"),
+        ("双重否定冲突词", "\n备注：不得不推进镜头"),
+        ("同句反转冲突词", "\n提示：禁止保持原景，然后推进镜头"),
+        ("非固定否定行", "\n说明：不得推进镜头"),
         ("锁定行追加指令", "lock_suffix"),
         ("重复锁定行", "lock_duplicate"),
+        ("锁定行首尾空格", "lock_whitespace"),
         ("缺失前言首行", "preamble_missing"),
         ("前言乱序", "preamble_reordered"),
+        ("前言插入空行", "preamble_blank"),
+        ("前言首行前导空格", "preamble_leading_space"),
+        ("前言行尾空格", "preamble_trailing_space"),
     ),
     ids=lambda value: value if isinstance(value, str) else None,
 )
@@ -448,11 +457,26 @@ def test_base_image_现代校验器严格拒绝语法绕过(tmp_path, case, payl
             f"景别：{snapshot.framing}",
             f"景别：{snapshot.framing}\n景别：{snapshot.framing}",
         )
+    elif payload == "lock_whitespace":
+        prompt = prompt.replace(
+            f"景别：{snapshot.framing}",
+            f" 景别：{snapshot.framing} ",
+        )
     elif payload == "preamble_missing":
         prompt = "\n".join(prompt.splitlines()[1:])
     elif payload == "preamble_reordered":
         lines = prompt.splitlines()
         lines[0], lines[1] = lines[1], lines[0]
+        prompt = "\n".join(lines)
+    elif payload == "preamble_blank":
+        lines = prompt.splitlines()
+        lines.insert(1, "")
+        prompt = "\n".join(lines)
+    elif payload == "preamble_leading_space":
+        prompt = " " + prompt
+    elif payload == "preamble_trailing_space":
+        lines = prompt.splitlines()
+        lines[1] += " "
         prompt = "\n".join(lines)
     else:
         prompt += payload
@@ -507,6 +531,7 @@ def test_reference_preservation_现代校验器拒绝缺少完整快照字段(
         (("visible_body_regions",), [True]),
         (("pose", "body"), 1),
         (("replacement_target", "target_product_count"), True),
+        (("replacement_target", "target_product_count"), 1.0),
         (("text_or_ui_risk",), "blocking"),
         (("product_visibility_sufficient",), False),
         (("composition_signature",), "bad-signature"),

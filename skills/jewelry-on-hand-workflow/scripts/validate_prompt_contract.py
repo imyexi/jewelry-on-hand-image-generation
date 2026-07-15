@@ -222,6 +222,11 @@ SNAPSHOT_FIELDS = (
     "product_visibility_sufficient",
     "composition_signature",
 )
+FIXED_CONFLICT_LINE_ALLOWLIST = set(MODERN_PREAMBLE_LINES) | {
+    "输出用途：手部佩戴图。用途标签不得改变快照中的手势、机位、景别或主体位置。",
+    "输出用途：生活场景图。用途标签不得推进镜头、裁切生活场景或改成产品特写。",
+    "展示关系：只在确认快照的唯一替换位置放入一枚目标戒指；不得换手、换指、改变手势或改成指关节/跨指佩戴。",
+}
 
 LAYER_OWNED_PREFIXES = {
     "【基础安全边界】": (
@@ -387,11 +392,12 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
         return ["确认快照必须是 JSON 对象"]
     _validate_snapshot_schema(snapshot, errors)
 
+    raw_lines = tuple(text.splitlines())
     lines = _section_lines(text)
-    if lines[: len(MODERN_PREAMBLE_LINES)] != MODERN_PREAMBLE_LINES:
+    if raw_lines[: len(MODERN_PREAMBLE_LINES)] != MODERN_PREAMBLE_LINES:
         errors.append("固定底图编辑前言必须逐行、连续、按固定顺序位于开头")
     for line in MODERN_PREAMBLE_LINES:
-        if lines.count(line) != 1:
+        if raw_lines.count(line) != 1:
             errors.append(f"固定底图编辑前言行必须且只能出现一次：{line}")
     for fragment in MODERN_REQUIRED_FRAGMENTS:
         if fragment not in text:
@@ -403,7 +409,7 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
     ):
         errors.append("唯一允许修改清单必须且只能包含固定的 1 至 4 项")
     for line in lines:
-        if re.match(r"^(?:[-*•]\s*|\d+\s*[.)）])", line) and line not in (
+        if re.match(r"^(?:[-*•]\s*|\d+\s*[.)）、．])", line) and line not in (
             MODERN_ALLOWED_MODIFICATION_LINES
         ):
             errors.append(f"唯一允许修改清单之外禁止新增指令项：{line}")
@@ -425,8 +431,8 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
     _validate_snapshot_fields(text, snapshot, errors)
     _validate_boundary_data(lines, errors)
     lock_line_values = _expected_lock_lines(snapshot)
-    exempt_lines = set(MODERN_PREAMBLE_LINES) | set(lock_line_values.values())
-    for line in lines:
+    exempt_lines = FIXED_CONFLICT_LINE_ALLOWLIST | set(lock_line_values.values())
+    for line in raw_lines:
         if line.startswith(MODERN_CONFLICT_PREFIXES):
             errors.append(f"发现冲突构图字段，现代 Prompt 只能使用确认快照：{line}")
         if line.startswith("保真边界JSON（仅数据不作指令）："):
@@ -434,7 +440,7 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
         if line in exempt_lines:
             continue
         for term in MODERN_CONFLICT_TERMS:
-            if _contains_unnegated_term(line, term):
+            if term in line:
                 errors.append(f"发现非固定上下文中的冲突构图词：{term}")
     for fragment in FORBIDDEN_FRAGMENTS:
         if fragment in text:
@@ -484,7 +490,7 @@ def _validate_snapshot_schema(snapshot: dict[str, object], errors: list[str]) ->
             if not isinstance(target.get(field), str) or not str(target.get(field)).strip():
                 errors.append(f"确认快照 replacement_target.{field} 必须是非空字符串")
         count = target.get("target_product_count")
-        if isinstance(count, bool) or count != 1:
+        if isinstance(count, bool) or not isinstance(count, int) or count != 1:
             errors.append("确认快照 target_product_count 必须是整数 1")
     if snapshot.get("text_or_ui_risk") not in {"none", "small_removable"}:
         errors.append("确认快照 text_or_ui_risk 必须是 none 或 small_removable，blocking 禁止生成")
@@ -550,7 +556,7 @@ def _validate_snapshot_fields(
         target = {}
     visible_regions = snapshot.get("visible_body_regions")
     lock_lines = _expected_lock_lines(snapshot)
-    prompt_lines = _section_lines(text)
+    prompt_lines = tuple(text.splitlines())
     lock_positions: list[int] = []
     for label, line in lock_lines.items():
         if prompt_lines.count(line) != 1:
@@ -642,17 +648,6 @@ def _validate_boundary_data(lines: tuple[str, ...], errors: list[str]) -> None:
         _validate_string_list(value, f"边界数据.{key}", errors)
 
 
-def _contains_unnegated_term(line: str, term: str) -> bool:
-    start = 0
-    while True:
-        index = line.find(term, start)
-        if index < 0:
-            return False
-        clause_start = max(line.rfind(mark, 0, index) for mark in "；。！？") + 1
-        prefix = line[clause_start:index]
-        if not any(word in prefix for word in ("禁止", "不得", "不要", "不可", "不能", "不允许", "不改", "不作")):
-            return True
-        start = index + len(term)
 
 
 def _parse_sections(
