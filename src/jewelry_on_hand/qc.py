@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Set
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,6 @@ from jewelry_on_hand.run_paths import write_json
 
 
 _ALLOWED_STATUS = {"pass", "rerun", "reject"}
-_ZERO_WIDTH_TRANSLATION = str.maketrans({"\u200b": None, "\ufeff": None})
 _PENDANT_TERMS = ("吊坠", "主吊坠", "链坠", "流苏", "坠子")
 
 _COMMON_QC_ITEMS = (
@@ -42,9 +41,11 @@ def _normalize_question(question: str) -> str:
     if not isinstance(question, str):
         raise ValueError("QC 问题必须是非空字符串")
     normalized = unicodedata.normalize("NFKC", question)
-    normalized = normalized.translate(_ZERO_WIDTH_TRANSLATION)
     normalized = " ".join(normalized.split())
-    if not normalized:
+    if not normalized or all(
+        character.isspace() or unicodedata.category(character) == "Cf"
+        for character in normalized
+    ):
         raise ValueError("QC 问题必须是非空字符串")
     return normalized
 
@@ -68,9 +69,7 @@ class QCChecklistItem(str):
 def build_qc_checklist(
     product_type: ProductType | None = None,
     display_mode: DisplayMode | None = None,
-    must_keep: (
-        tuple[MustKeepConstraint, ...] | list[MustKeepConstraint] | None
-    ) = None,
+    must_keep: Iterable[MustKeepConstraint] | None = None,
     *,
     product_analysis: ProductAnalysis | None = None,
     fidelity_constraints: ProductFidelityConstraints | None = None,
@@ -211,11 +210,18 @@ def _normalize_critical_failures(value: Any) -> list[Any]:
 
 
 def _normalize_must_keep(
-    must_keep: tuple[MustKeepConstraint, ...] | list[MustKeepConstraint],
+    must_keep: Iterable[MustKeepConstraint],
 ) -> tuple[MustKeepConstraint, ...]:
-    if not isinstance(must_keep, (tuple, list)):
+    if isinstance(must_keep, (str, bytes, bytearray, Mapping)):
         raise ValueError("must_keep 必须是 MustKeepConstraint 列表")
-    items = tuple(must_keep)
+    if isinstance(must_keep, Set):
+        raise ValueError(
+            "must_keep 必须是有序的 MustKeepConstraint 列表，不接受无序集合"
+        )
+    try:
+        items = tuple(must_keep)
+    except TypeError as exc:
+        raise ValueError("must_keep 必须是 MustKeepConstraint 列表") from exc
     if any(not isinstance(item, MustKeepConstraint) for item in items):
         raise ValueError("must_keep 只能包含 MustKeepConstraint")
     return items

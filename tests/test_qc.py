@@ -201,7 +201,7 @@ def test_build_qc_checklist_includes_ring_position_structure_and_contact_checks(
 
 
 def test_qc_check_id_is_stable_for_normalized_question_text():
-    first = qc_module.qc_check_id(" \ufeff 产品\u200b结构\n是否完整  ")
+    first = qc_module.qc_check_id("  产品结构\n是否完整  ")
     second = qc_module.qc_check_id("产品结构 是否完整")
 
     assert first == second
@@ -211,11 +211,31 @@ def test_qc_check_id_is_stable_for_normalized_question_text():
 
 @pytest.mark.parametrize(
     "question",
-    ["", " \t\n", "\u200b\ufeff", None, 1, True],
+    [
+        "",
+        " \t\n",
+        " \u200b ",
+        "\ufeff",
+        "\u200c",
+        "\u200d",
+        "\u2060",
+        "\u00ad",
+        None,
+        1,
+        True,
+    ],
 )
 def test_qc_check_id_rejects_empty_or_non_string_question(question):
     with pytest.raises(ValueError, match="QC 问题必须是非空字符串"):
         qc_module.qc_check_id(question)
+
+
+def test_qc_check_id_preserves_format_character_inside_normal_text():
+    plain = qc_module.qc_check_id("产品结构")
+    with_joiner = qc_module.qc_check_id(" 产品\u200b结构 ")
+
+    assert with_joiner == qc_module.qc_check_id("产品\u200b结构")
+    assert with_joiner != plain
 
 
 def test_qc_checklist_deduplicates_by_normalized_question_and_keeps_stable_id():
@@ -259,7 +279,7 @@ def test_qc_checklist_items_are_immutable_string_compatible_records():
         item.question = "篡改问题"
 
 
-@pytest.mark.parametrize("must_keep", ["", b"", bytearray(), {}, iter(())])
+@pytest.mark.parametrize("must_keep", ["", b"", bytearray(), {}, set(), frozenset()])
 def test_legacy_qc_rejects_falsey_or_non_sequence_must_keep(must_keep):
     with pytest.raises(ValueError, match="must_keep.*列表"):
         build_qc_checklist(
@@ -267,6 +287,27 @@ def test_legacy_qc_rejects_falsey_or_non_sequence_must_keep(must_keep):
             DisplayMode.WORN,
             must_keep,
         )
+
+
+def test_legacy_qc_generator_matches_tuple_checklist_and_ids():
+    must_keep = (
+        _qc_must_keep("主吊坠是否保留原位置"),
+        _qc_must_keep("主吊坠是否保留原朝向"),
+    )
+
+    tuple_items = build_qc_checklist(
+        ProductType.PENDANT_NECKLACE,
+        DisplayMode.WORN,
+        must_keep,
+    )
+    generator_items = build_qc_checklist(
+        ProductType.PENDANT_NECKLACE,
+        DisplayMode.WORN,
+        (item for item in must_keep),
+    )
+
+    assert generator_items == tuple_items
+    assert [item.id for item in generator_items] == [item.id for item in tuple_items]
 
 
 def test_qc_checklist_rejects_visually_empty_must_keep_question():
