@@ -330,12 +330,18 @@ def test_product_fidelity_constraints_rejects_not_applicable_with_must_keep_item
             "presence": "absent",
             "count": 0,
             "layer": None,
+            "position": None,
+            "orientation": None,
+            "connection": None,
             "creation_policy": "forbid",
         },
         {
             "presence": "present",
             "count": 1,
             "layer": 2,
+            "position": "front_center",
+            "orientation": "front_facing",
+            "connection": "metal_bail",
             "creation_policy": "forbid",
         },
     ],
@@ -355,11 +361,66 @@ def test_pendant_semantics_roundtrip_is_frozen(payload):
         ({"presence": "absent", "count": True, "layer": None, "creation_policy": "forbid"}, "count"),
         ({"presence": "absent", "count": 0.0, "layer": None, "creation_policy": "forbid"}, "count"),
         ({"presence": "absent", "count": 1, "layer": None, "creation_policy": "forbid"}, "absent"),
-        ({"presence": "present", "count": 0, "layer": 1, "creation_policy": "forbid"}, "present"),
-        ({"presence": "present", "count": 1, "layer": True, "creation_policy": "forbid"}, "layer"),
-        ({"presence": "present", "count": 1, "layer": 0, "creation_policy": "forbid"}, "layer"),
-        ({"presence": "present", "count": 1, "layer": 4, "creation_policy": "forbid"}, "layer"),
-        ({"presence": "present", "count": 1, "layer": None, "creation_policy": "forbid"}, "present"),
+        (
+            {
+                "presence": "present",
+                "count": 0,
+                "layer": 1,
+                "position": "front_center",
+                "orientation": "front_facing",
+                "connection": "metal_bail",
+                "creation_policy": "forbid",
+            },
+            "present",
+        ),
+        (
+            {
+                "presence": "present",
+                "count": 1,
+                "layer": True,
+                "position": "front_center",
+                "orientation": "front_facing",
+                "connection": "metal_bail",
+                "creation_policy": "forbid",
+            },
+            "layer",
+        ),
+        (
+            {
+                "presence": "present",
+                "count": 1,
+                "layer": 0,
+                "position": "front_center",
+                "orientation": "front_facing",
+                "connection": "metal_bail",
+                "creation_policy": "forbid",
+            },
+            "layer",
+        ),
+        (
+            {
+                "presence": "present",
+                "count": 1,
+                "layer": 4,
+                "position": "front_center",
+                "orientation": "front_facing",
+                "connection": "metal_bail",
+                "creation_policy": "forbid",
+            },
+            "layer",
+        ),
+        (
+            {
+                "presence": "present",
+                "count": 1,
+                "layer": None,
+                "position": "front_center",
+                "orientation": "front_facing",
+                "connection": "metal_bail",
+                "creation_policy": "forbid",
+            },
+            "present",
+        ),
         ({"presence": "absent", "count": 0, "layer": None, "creation_policy": "allow"}, "creation_policy"),
     ],
 )
@@ -371,11 +432,150 @@ def test_pendant_semantics_rejects_invalid_enum_count_and_layer_boundaries(
         PendantSemantics.from_dict(payload)
 
 
+def _pendant_semantics_data(**overrides):
+    payload = {
+        "presence": "present",
+        "count": 1,
+        "layer": 2,
+        "position": "front_center",
+        "orientation": "front_facing",
+        "connection": "metal_bail",
+        "creation_policy": "forbid",
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize("product_type", ["bracelet", "ring", "necklace"])
+def test_v2_non_pendant_product_types_reject_present_pendant_semantics(product_type):
+    payload = _constraints_data(
+        schema_version=2,
+        source=_constraints_data()["source"] | {"product_type": product_type},
+        pendant_semantics=_pendant_semantics_data(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"source\.product_type.*pendant_semantics\.presence.*absent",
+    ):
+        ProductFidelityConstraints.from_dict(payload)
+
+
+def test_v2_pendant_necklace_rejects_absent_pendant_semantics():
+    payload = _constraints_data(
+        schema_version=2,
+        source=_constraints_data()["source"] | {"product_type": "pendant_necklace"},
+        pendant_semantics={
+            "presence": "absent",
+            "count": 0,
+            "layer": None,
+            "position": None,
+            "orientation": None,
+            "connection": None,
+            "creation_policy": "forbid",
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"source\.product_type.*pendant_semantics\.presence.*present",
+    ):
+        ProductFidelityConstraints.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("position", None),
+        ("position", "   "),
+        ("position", True),
+        ("orientation", None),
+        ("orientation", ""),
+        ("orientation", 1),
+        ("connection", None),
+        ("connection", "\t"),
+        ("connection", []),
+    ],
+)
+def test_present_pendant_semantics_requires_non_empty_structural_strings(
+    field,
+    invalid,
+):
+    payload = _pendant_semantics_data(**{field: invalid})
+
+    with pytest.raises(ValueError, match=rf"pendant_semantics\.{field}"):
+        PendantSemantics.from_dict(payload)
+
+
+@pytest.mark.parametrize("field", ["position", "orientation", "connection"])
+def test_absent_pendant_semantics_rejects_residual_structural_fields(field):
+    payload = {
+        "presence": "absent",
+        "count": 0,
+        "layer": None,
+        "position": None,
+        "orientation": None,
+        "connection": None,
+        "creation_policy": "forbid",
+    }
+    payload[field] = "不应保留的吊坠结构"
+
+    with pytest.raises(ValueError, match=rf"pendant_semantics\.{field}"):
+        PendantSemantics.from_dict(payload)
+
+
+def test_present_pendant_semantics_strips_open_canonical_descriptions():
+    semantics = PendantSemantics.from_dict(
+        _pendant_semantics_data(
+            position="  第二层胸前中线  ",
+            orientation="  正面朝向镜头  ",
+            connection="  吊环连接第二层链条  ",
+        )
+    )
+
+    assert semantics.position == "第二层胸前中线"
+    assert semantics.orientation == "正面朝向镜头"
+    assert semantics.connection == "吊环连接第二层链条"
+
+
+@pytest.mark.parametrize(("field", "invalid"), [("count", True), ("layer", True)])
+def test_pendant_semantics_integer_fields_reject_bool_with_full_field_path(
+    field,
+    invalid,
+):
+    with pytest.raises(ValueError, match=rf"pendant_semantics\.{field}"):
+        PendantSemantics.from_dict(_pendant_semantics_data(**{field: invalid}))
+
+
 @pytest.mark.parametrize(
     ("product_type", "schema_version", "pendant_semantics"),
     [
-        ("bracelet", 1, None),
-        ("ring", 1, None),
+        (
+            "bracelet",
+            2,
+            {
+                "presence": "absent",
+                "count": 0,
+                "layer": None,
+                "position": None,
+                "orientation": None,
+                "connection": None,
+                "creation_policy": "forbid",
+            },
+        ),
+        (
+            "ring",
+            2,
+            {
+                "presence": "absent",
+                "count": 0,
+                "layer": None,
+                "position": None,
+                "orientation": None,
+                "connection": None,
+                "creation_policy": "forbid",
+            },
+        ),
         (
             "necklace",
             2,
@@ -383,6 +583,9 @@ def test_pendant_semantics_rejects_invalid_enum_count_and_layer_boundaries(
                 "presence": "absent",
                 "count": 0,
                 "layer": None,
+                "position": None,
+                "orientation": None,
+                "connection": None,
                 "creation_policy": "forbid",
             },
         ),
@@ -393,6 +596,9 @@ def test_pendant_semantics_rejects_invalid_enum_count_and_layer_boundaries(
                 "presence": "present",
                 "count": 1,
                 "layer": 2,
+                "position": "front_center",
+                "orientation": "front_facing",
+                "connection": "metal_bail",
                 "creation_policy": "forbid",
             },
         ),
@@ -416,15 +622,18 @@ def test_product_fidelity_constraints_four_categories_roundtrip_without_pendant_
     assert serialized == payload
     if product_type == "pendant_necklace":
         assert constraints.pendant_semantics == PendantSemantics(
-            "present", 1, 2, "forbid"
+            "present",
+            1,
+            2,
+            "forbid",
+            "front_center",
+            "front_facing",
+            "metal_bail",
         )
-    elif product_type == "necklace":
+    else:
         assert constraints.pendant_semantics == PendantSemantics(
             "absent", 0, None, "forbid"
         )
-    else:
-        assert constraints.pendant_semantics is None
-        assert "pendant_semantics" not in serialized
 
 
 def test_reference_row_full_construction_and_combined_text():

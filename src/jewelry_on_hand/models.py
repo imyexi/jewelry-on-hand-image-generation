@@ -654,6 +654,9 @@ class PendantSemantics:
     count: int
     layer: int | None
     creation_policy: PendantCreationPolicy
+    position: str | None = None
+    orientation: str | None = None
+    connection: str | None = None
 
     def __post_init__(self) -> None:
         if self.presence not in {"present", "absent"}:
@@ -678,6 +681,19 @@ class PendantSemantics:
             self.count != 1 or self.layer is None
         ):
             raise ValueError("presence=present 时 count 必须为 1 且 layer 必须为 1 至 3")
+        for field_name in ("position", "orientation", "connection"):
+            value = getattr(self, field_name)
+            field_path = f"pendant_semantics.{field_name}"
+            if self.presence == "present":
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _required_string_value(value, field_path),
+                )
+            elif value is not None:
+                raise ValueError(
+                    f"presence=absent 时 {field_path} 必须为 null"
+                )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "PendantSemantics":
@@ -686,11 +702,18 @@ class PendantSemantics:
             raise ValueError("pendant_semantics.layer 必填；absent 时必须显式为 null")
         return cls(
             presence=_required_string(source, "presence"),  # type: ignore[arg-type]
-            count=_json_int(source.get("count"), "count"),  # type: ignore[arg-type]
-            layer=_json_int(source["layer"], "layer", allow_none=True),
+            count=_json_int(  # type: ignore[arg-type]
+                source.get("count"), "pendant_semantics.count"
+            ),
+            layer=_json_int(
+                source["layer"], "pendant_semantics.layer", allow_none=True
+            ),
             creation_policy=_required_string(  # type: ignore[arg-type]
                 source, "creation_policy"
             ),
+            position=source.get("position"),
+            orientation=source.get("orientation"),
+            connection=source.get("connection"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -698,6 +721,9 @@ class PendantSemantics:
             "presence": self.presence,
             "count": self.count,
             "layer": self.layer,
+            "position": self.position,
+            "orientation": self.orientation,
+            "connection": self.connection,
             "creation_policy": self.creation_policy,
         }
 
@@ -793,6 +819,30 @@ class ProductFidelityConstraints:
                 )
         source = _ensure_mapping(self.source, "source")
         object.__setattr__(self, "source", dict(source))
+        if self.schema_version == 2:
+            product_type = normalize_product_type(source.get("product_type"))
+            if product_type not in {
+                ProductType.BRACELET,
+                ProductType.RING,
+                ProductType.NECKLACE,
+                ProductType.PENDANT_NECKLACE,
+            }:
+                raise ValueError(
+                    "v2 的 source.product_type 必须是 bracelet/ring/necklace/"
+                    "pendant_necklace"
+                )
+            assert self.pendant_semantics is not None
+            expected_presence = (
+                "present"
+                if product_type is ProductType.PENDANT_NECKLACE
+                else "absent"
+            )
+            if self.pendant_semantics.presence != expected_presence:
+                raise ValueError(
+                    f"source.product_type={product_type.value} 时 "
+                    "pendant_semantics.presence 必须为 "
+                    f"{expected_presence}"
+                )
         object.__setattr__(
             self,
             "detected_keywords",
