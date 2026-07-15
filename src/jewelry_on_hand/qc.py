@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -7,9 +9,17 @@ from typing import Any
 
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.display_modes import DisplayMode
-from jewelry_on_hand.models import MustKeepConstraint, QcResult
+from jewelry_on_hand.models import (
+    MustKeepConstraint,
+    ProductAnalysis,
+    ProductFidelityConstraints,
+    QcResult,
+)
+from jewelry_on_hand.product_fidelity import (
+    load_product_fidelity_constraints,
+    validate_product_fidelity_constraints,
+)
 from jewelry_on_hand.product_types import ProductType
-from jewelry_on_hand.product_fidelity import load_product_fidelity_constraints
 from jewelry_on_hand.run_paths import write_json
 
 
@@ -26,16 +36,76 @@ _COMMON_QC_ITEMS = (
 )
 
 def build_qc_checklist(
-    product_type: ProductType,
-    display_mode: DisplayMode,
-    must_keep: Iterable[MustKeepConstraint] = (),
+    product_type: ProductType | None = None,
+    display_mode: DisplayMode | None = None,
+    must_keep: Iterable[MustKeepConstraint] | None = None,
+    *,
+    product_analysis: ProductAnalysis | None = None,
+    fidelity_constraints: ProductFidelityConstraints | None = None,
 ) -> tuple[str, ...]:
+    modern_call = product_analysis is not None or fidelity_constraints is not None
+    pendant_questions: tuple[str, ...] = ()
+    if modern_call:
+        if product_analysis is None or fidelity_constraints is None:
+            raise ValueError(
+                "现代 QC 必须同时提供 product_analysis 与 fidelity_constraints"
+            )
+        validate_product_fidelity_constraints(
+            product_analysis,
+            fidelity_constraints,
+        )
+        if not fidelity_constraints.is_confirmed_for_generation():
+            raise ValueError(
+                "产品保真约束 review_status 尚未确认，不得用于生成 QC"
+            )
+
+        analysis_product_type = product_analysis.normalized_product_type
+        if product_type is not None and product_type is not analysis_product_type:
+            raise ValueError("QC 参数 product_type 与 ProductAnalysis 品类不一致")
+        if display_mode is not None and display_mode is not product_analysis.display_mode:
+            raise ValueError("QC 参数 display_mode 与 ProductAnalysis 展示模式不一致")
+
+        canonical_must_keep = fidelity_constraints.must_keep
+        if must_keep is not None:
+            provided_must_keep = _normalize_must_keep(must_keep)
+            if provided_must_keep != canonical_must_keep:
+                raise ValueError("QC 参数 must_keep 与产品保真约束不一致")
+        product_type = analysis_product_type
+        display_mode = product_analysis.display_mode
+        must_keep_items = canonical_must_keep
+        pendant_questions = _structured_pendant_questions(
+            product_type,
+            fidelity_constraints,
+        )
+    else:
+        if product_type is None or display_mode is None:
+            raise ValueError("兼容 QC 必须提供 product_type 与 display_mode")
+        must_keep_items = _normalize_must_keep(must_keep or ())
+
+    if not isinstance(product_type, ProductType):
+        raise ValueError("产品品类必须使用 ProductType 枚举")
     if not isinstance(display_mode, DisplayMode):
         raise ValueError("展示模式必须使用 DisplayMode 枚举")
     policy = get_category_policy(product_type)
     policy_items = policy.qc_items_for_mode(display_mode)
-    questions = _must_keep_questions(must_keep)
-    return tuple(dict.fromkeys(_COMMON_QC_ITEMS + policy_items + questions))
+    if modern_call and product_type is not ProductType.PENDANT_NECKLACE:
+        policy_items = tuple(item for item in policy_items if "吊坠" not in item)
+    questions = _must_keep_questions(must_keep_items)
+    return tuple(
+        dict.fromkeys(
+            _COMMON_QC_ITEMS + policy_items + questions + pendant_questions
+        )
+    )
+
+
+def qc_check_id(question: str) -> str:
+    if not isinstance(question, str):
+        raise ValueError("QC 问题必须是非空字符串")
+    normalized = " ".join(unicodedata.normalize("NFKC", question).split())
+    if not normalized:
+        raise ValueError("QC 问题必须是非空字符串")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"qc-{digest}"
 
 
 def write_qc_result(
@@ -113,17 +183,38 @@ def _normalize_critical_failures(value: Any) -> list[Any]:
     return value
 
 
+def _normalize_must_keep(
+    must_keep: Iterable[MustKeepConstraint],
+) -> tuple[MustKeepConstraint, ...]:
+    if isinstance(must_keep, (str, bytes, bytearray, Mapping)):
+        raise ValueError("must_keep 必须是 MustKeepConstraint 列表")
+    items = tuple(must_keep)
+    if any(not isinstance(item, MustKeepConstraint) for item in items):
+        raise ValueError("must_keep 只能包含 MustKeepConstraint")
+    return items
+
+
 def _must_keep_questions(
     must_keep: Iterable[MustKeepConstraint],
 ) -> tuple[str, ...]:
-    if isinstance(must_keep, (str, bytes, bytearray, Mapping)):
-        raise ValueError("must_keep 必须是 MustKeepConstraint 列表")
-    questions: list[str] = []
-    for item in must_keep:
-        if not isinstance(item, MustKeepConstraint):
-            raise ValueError("must_keep 只能包含 MustKeepConstraint")
-        questions.append(item.qc_question)
-    return tuple(questions)
+    return tuple(item.qc_question for item in _normalize_must_keep(must_keep))
+
+
+def _structured_pendant_questions(
+    product_type: ProductType,
+    constraints: ProductFidelityConstraints,
+) -> tuple[str, ...]:
+    if product_type is not ProductType.PENDANT_NECKLACE:
+        return ()
+    semantics = constraints.pendant_semantics
+    if semantics is None or semantics.presence != "present":
+        raise ValueError("带链吊坠 QC 缺少可用的主吊坠结构")
+    return (
+        f"现有主吊坠数量是否仍为 {semantics.count} 颗，所属层仍为第 "
+        f"{semantics.layer} 层，位置仍为{semantics.position}，朝向仍为"
+        f"{semantics.orientation}，连接仍为{semantics.connection}",
+        "是否禁止新增第二颗吊坠",
+    )
 
 
 def _constraints_path_for_generation_dir(generation_dir: Path) -> Path | None:
@@ -155,3 +246,10 @@ def _validate_must_keep_coverage(
     expected_pairs = {(item.name, item.qc_question) for item in must_keep}
     if set(actual_pairs) != expected_pairs:
         raise ValueError("fidelity_checks 的 name/question 对应关系与 must_keep 不一致")
+
+
+__all__ = [
+    "build_qc_checklist",
+    "qc_check_id",
+    "write_qc_result",
+]

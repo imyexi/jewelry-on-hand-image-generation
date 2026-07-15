@@ -1,7 +1,12 @@
+import re
+from dataclasses import replace
+
 import pytest
 
+import jewelry_on_hand.qc as qc_module
 from jewelry_on_hand.display_modes import DisplayMode
-from jewelry_on_hand.models import MustKeepConstraint
+from jewelry_on_hand.models import MustKeepConstraint, ProductAnalysis
+from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.qc import build_qc_checklist, write_qc_result
 from jewelry_on_hand.run_paths import read_json, write_json
@@ -184,6 +189,159 @@ def test_build_qc_checklist_includes_hand_held_necklace_checks():
     assert "吊坠和关键结构没有被不合理遮挡" in items
     assert "产品比例合理，没有因近景明显放大或缩小" in items
     assert "没有虚构佩戴链路、自动补链或补充不存在的结构" in items
+
+
+def test_build_qc_checklist_includes_ring_position_structure_and_contact_checks():
+    items = build_qc_checklist(ProductType.RING, DisplayMode.WORN)
+
+    assert "画面中只有一枚目标戒指" in items
+    assert "戒指位于确认后的左右手和目标手指根部" in items
+    assert "戒圈自然环绕手指且前后遮挡、接触和阴影真实" in items
+
+
+def test_qc_check_id_is_stable_for_normalized_question_text():
+    first = qc_module.qc_check_id("  产品结构\n是否完整  ")
+    second = qc_module.qc_check_id("产品结构 是否完整")
+
+    assert first == second
+    assert re.fullmatch(r"qc-[0-9a-f]{16}", first)
+    assert qc_module.qc_check_id("产品结构是否完整") != first
+
+
+@pytest.mark.parametrize("question", ["", " \t\n", None, 1, True])
+def test_qc_check_id_rejects_empty_or_non_string_question(question):
+    with pytest.raises(ValueError, match="QC 问题必须是非空字符串"):
+        qc_module.qc_check_id(question)
+
+
+@pytest.mark.parametrize(
+    "product_type",
+    [
+        ProductType.BRACELET,
+        ProductType.NECKLACE,
+        ProductType.PENDANT_NECKLACE,
+        ProductType.RING,
+    ],
+)
+def test_modern_qc_checklist_is_stable_and_covers_canonical_must_keep(product_type):
+    analysis = _qc_analysis_for_category(product_type)
+    constraints = _confirmed_qc_constraints(analysis)
+
+    first = build_qc_checklist(
+        product_analysis=analysis,
+        fidelity_constraints=constraints,
+    )
+    second = build_qc_checklist(
+        product_analysis=analysis,
+        fidelity_constraints=constraints,
+    )
+
+    assert first == second
+    assert first
+    assert all(isinstance(question, str) and question.strip() for question in first)
+    assert set(item.qc_question for item in constraints.must_keep).issubset(first)
+    ids = [qc_module.qc_check_id(question) for question in first]
+    assert len(ids) == len(set(ids))
+
+
+def test_modern_pendant_qc_covers_structured_identity_and_forbids_second_pendant():
+    analysis = _qc_analysis_for_category(ProductType.PENDANT_NECKLACE)
+    constraints = _confirmed_qc_constraints(analysis)
+
+    questions = build_qc_checklist(
+        product_analysis=analysis,
+        fidelity_constraints=constraints,
+    )
+    combined = "\n".join(questions)
+
+    assert "1 颗" in combined
+    assert "第 2 层" in combined
+    assert "第二层中央" in combined
+    assert "正面向前" in combined
+    assert "吊环连接第二层链条" in combined
+    assert "禁止新增第二颗吊坠" in combined
+
+
+@pytest.mark.parametrize(
+    "product_type",
+    [ProductType.BRACELET, ProductType.NECKLACE, ProductType.RING],
+)
+def test_non_pendant_modern_qc_has_no_structured_main_pendant_questions(product_type):
+    analysis = _qc_analysis_for_category(product_type)
+    constraints = _confirmed_qc_constraints(analysis)
+
+    questions = build_qc_checklist(
+        product_analysis=analysis,
+        fidelity_constraints=constraints,
+    )
+
+    assert not any("吊坠" in question for question in questions)
+
+
+def test_modern_qc_requires_analysis_and_constraints_together():
+    analysis = _qc_analysis_for_category(ProductType.BRACELET)
+    constraints = _confirmed_qc_constraints(analysis)
+
+    with pytest.raises(ValueError, match="必须同时提供"):
+        build_qc_checklist(product_analysis=analysis)
+    with pytest.raises(ValueError, match="必须同时提供"):
+        build_qc_checklist(fidelity_constraints=constraints)
+
+
+def test_modern_qc_rejects_unconfirmed_fidelity_constraints():
+    analysis = _qc_analysis_for_category(ProductType.BRACELET)
+    constraints = build_product_fidelity_constraints(analysis)
+    assert constraints.review_status == "pending"
+
+    with pytest.raises(ValueError, match="review_status.*生成"):
+        build_qc_checklist(
+            product_analysis=analysis,
+            fidelity_constraints=constraints,
+        )
+
+
+def test_modern_qc_rejects_explicit_category_or_must_keep_bypass():
+    analysis = _qc_analysis_for_category(ProductType.PENDANT_NECKLACE)
+    constraints = _confirmed_qc_constraints(analysis)
+
+    with pytest.raises(ValueError, match="品类不一致"):
+        build_qc_checklist(
+            ProductType.BRACELET,
+            analysis.display_mode,
+            constraints.must_keep,
+            product_analysis=analysis,
+            fidelity_constraints=constraints,
+        )
+    with pytest.raises(ValueError, match="must_keep.*不一致"):
+        build_qc_checklist(
+            analysis.normalized_product_type,
+            analysis.display_mode,
+            (),
+            product_analysis=analysis,
+            fidelity_constraints=constraints,
+        )
+
+
+def test_modern_qc_rejects_analysis_digest_or_canonical_structure_mismatch():
+    analysis = _qc_analysis_for_category(ProductType.PENDANT_NECKLACE)
+    constraints = _confirmed_qc_constraints(analysis)
+
+    changed_analysis = replace(analysis, style_mood="已被修改")
+    with pytest.raises(ValueError, match="product_analysis_sha256.*不一致"):
+        build_qc_checklist(
+            product_analysis=changed_analysis,
+            fidelity_constraints=constraints,
+        )
+
+    changed_constraints = replace(
+        constraints,
+        must_not_change=(*constraints.must_not_change, "额外结构改写"),
+    )
+    with pytest.raises(ValueError, match="canonical.must_not_change.*不一致"):
+        build_qc_checklist(
+            product_analysis=analysis,
+            fidelity_constraints=changed_constraints,
+        )
 
 
 @pytest.mark.parametrize(
@@ -374,3 +532,111 @@ def _constraints_with_must_keep():
         "detail_crop_recommended": False,
         "review_status": "confirmed",
     }
+
+
+def _confirmed_qc_constraints(analysis):
+    constraints = build_product_fidelity_constraints(analysis)
+    if constraints.review_status == "pending":
+        return replace(constraints, review_status="confirmed")
+    return constraints
+
+
+def _qc_analysis_for_category(product_type):
+    if product_type in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}:
+        has_pendant = product_type is ProductType.PENDANT_NECKLACE
+        return ProductAnalysis.from_dict(
+            {
+                "product_type": product_type.value,
+                "detected_product_type": product_type.value,
+                "confirmed_product_type": product_type.value,
+                "classification_confidence": "high",
+                "classification_evidence": ["肉眼可见结构"],
+                "classification_source": "manual_override",
+                "display_mode": "worn",
+                "source_image_type": "worn_source",
+                "wear_position": "颈部",
+                "visible_appearance": (
+                    "双层细链，第二层中央有水滴形吊坠"
+                    if has_pendant
+                    else "同一条连续海蓝宝微珠长链绕颈形成上下双圈"
+                ),
+                "color_family": ["海蓝"],
+                "style_mood": "清透",
+                "composition": "真人佩戴正面构图",
+                "product_dimensions": {},
+                "needs_full_front_display": True,
+                "special_requirements": [],
+                "layer_count": 2,
+                "length_category": "long",
+                "chain_or_strand_type": "连续微珠链",
+                "has_pendant": has_pendant,
+                "pendant_count": 1 if has_pendant else 0,
+                "pendant_layer": 2 if has_pendant else None,
+                "pendant_position": "第二层中央" if has_pendant else None,
+                "pendant_orientation": "正面向前" if has_pendant else None,
+                "connection_structure": (
+                    "吊环连接第二层链条" if has_pendant else None
+                ),
+                "symmetry": "沿身体中线对称",
+                "is_independent_multi_item": False,
+            }
+        )
+    if product_type is ProductType.BRACELET:
+        return ProductAnalysis.from_dict(
+            {
+                "product_type": "bracelet",
+                "detected_product_type": "bracelet",
+                "confirmed_product_type": "bracelet",
+                "classification_confidence": "high",
+                "classification_evidence": ["手腕处可见闭合珠串"],
+                "classification_source": "manual_override",
+                "display_mode": "worn",
+                "source_image_type": "worn_source",
+                "wear_position": "手腕",
+                "visible_appearance": "圆珠手链主珠右侧有一颗透明随形",
+                "color_family": ["海蓝", "透明"],
+                "style_mood": "清透",
+                "composition": "真人手腕近景",
+                "product_dimensions": {"bead_diameter_mm": 8.0},
+                "needs_full_front_display": True,
+                "special_requirements": ["保持可见珠序"],
+                "layer_count": 1,
+                "has_pendant": False,
+                "pendant_count": 0,
+                "pendant_layer": None,
+                "is_independent_multi_item": False,
+            }
+        )
+    if product_type is ProductType.RING:
+        return ProductAnalysis.from_dict(
+            {
+                "product_type": "ring",
+                "detected_product_type": "ring",
+                "confirmed_product_type": "ring",
+                "classification_confidence": "high",
+                "classification_evidence": ["左手无名指根部可见单枚戒指"],
+                "classification_source": "manual_override",
+                "display_mode": "worn",
+                "source_image_type": "worn_source",
+                "wear_position": "左手无名指根部",
+                "visible_appearance": "单枚银色开口戒指，椭圆戒面中央有透明主石",
+                "color_family": ["银色", "透明"],
+                "style_mood": "克制",
+                "composition": "真人手部近景",
+                "product_dimensions": {"width_mm": 9.0},
+                "needs_full_front_display": True,
+                "special_requirements": ["保持开口端点方向"],
+                "layer_count": 1,
+                "has_pendant": False,
+                "pendant_count": 0,
+                "pendant_layer": None,
+                "occluded_parts": ["戒圈背面"],
+                "uncertain_details": ["镶嵌背面结构"],
+                "is_independent_multi_item": False,
+                "ring_count": 1,
+                "hand_side": "left",
+                "finger_position": "ring",
+                "ring_wear_style": "finger_base",
+            }
+        )
+    raise AssertionError(f"未覆盖 QC 测试品类：{product_type}")
