@@ -409,9 +409,7 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
     ):
         errors.append("唯一允许修改清单必须且只能包含固定的 1 至 4 项")
     for line in lines:
-        if re.match(r"^(?:[-*•]\s*|\d+\s*[.)）、．])", line) and line not in (
-            MODERN_ALLOWED_MODIFICATION_LINES
-        ):
+        if _has_list_prefix(line) and line not in MODERN_ALLOWED_MODIFICATION_LINES:
             errors.append(f"唯一允许修改清单之外禁止新增指令项：{line}")
 
     image_one = text.find("内部图1是画面底图")
@@ -557,14 +555,26 @@ def _validate_snapshot_fields(
     visible_regions = snapshot.get("visible_body_regions")
     lock_lines = _expected_lock_lines(snapshot)
     prompt_lines = tuple(text.splitlines())
-    lock_positions: list[int] = []
+    expected_block = tuple(lock_lines.values())
+    block_starts = [
+        index
+        for index in range(len(prompt_lines) - len(expected_block) + 1)
+        if prompt_lines[index : index + len(expected_block)] == expected_block
+    ]
+    if len(block_starts) != 1:
+        errors.append("确认快照锁定段必须作为唯一、固定、连续语法块出现")
+    block_indexes = (
+        set(range(block_starts[0], block_starts[0] + len(expected_block)))
+        if len(block_starts) == 1
+        else set()
+    )
     for label, line in lock_lines.items():
         if prompt_lines.count(line) != 1:
             errors.append(f"Prompt 缺少确认快照锁定行：{label}")
-        else:
-            lock_positions.append(prompt_lines.index(line))
-    if lock_positions != sorted(lock_positions):
-        errors.append("确认快照锁定行顺序错误")
+    labels = tuple(f"{label}：" for label in lock_lines)
+    for index, line in enumerate(prompt_lines):
+        if line.lstrip().startswith(labels) and index not in block_indexes:
+            errors.append(f"确认快照锁定标签只能位于固定锁定块：{line.strip()}")
     fields = {
         "framing": snapshot.get("framing"),
         "camera_angle": snapshot.get("camera_angle"),
@@ -646,6 +656,18 @@ def _validate_boundary_data(lines: tuple[str, ...], errors: list[str]) -> None:
         return
     for key, value in data.items():
         _validate_string_list(value, f"边界数据.{key}", errors)
+
+
+def _has_list_prefix(line: str) -> bool:
+    return re.match(
+        r"^\s*(?:"
+        r"[-+*•●○▪▫■□◆◇▶►‣⁃]\s*|"
+        r"[①-⑳]\s*|"
+        r"[（(]?\s*(?:[0-9０-９]+|[一二三四五六七八九十百零〇]+)"
+        r"\s*[)）.．、]\s*"
+        r")",
+        line,
+    ) is not None
 
 
 

@@ -427,6 +427,13 @@ def test_composition_conflict_戒指快照接受规范英文手侧与指位():
         ("中文括号编号", "\n5）附加说明"),
         ("顿号编号", "\n5、附加说明"),
         ("全角点编号", "\n5．附加说明"),
+        ("全角括号数字", "\n（5）附加说明"),
+        ("半角括号数字", "\n(5) 附加说明"),
+        ("带圈数字", "\n⑤ 附加说明"),
+        ("加号列表", "\n+ 附加说明"),
+        ("中文数字顿号", "\n五、附加说明"),
+        ("中文数字全角点", "\n五．附加说明"),
+        ("菱形列表", "\n◆ 附加说明"),
         ("备注冲突词", "\n备注：推进镜头"),
         ("双重否定冲突词", "\n备注：不得不推进镜头"),
         ("同句反转冲突词", "\n提示：禁止保持原景，然后推进镜头"),
@@ -434,6 +441,11 @@ def test_composition_conflict_戒指快照接受规范英文手侧与指位():
         ("锁定行追加指令", "lock_suffix"),
         ("重复锁定行", "lock_duplicate"),
         ("锁定行首尾空格", "lock_whitespace"),
+        ("锁定块前同标签", "lock_extra_before"),
+        ("锁定块后同标签", "lock_extra_after"),
+        ("全文末尾同标签", "lock_extra_end"),
+        ("缩进同标签", "lock_extra_indented"),
+        ("锁定块被中断", "lock_interrupted"),
         ("缺失前言首行", "preamble_missing"),
         ("前言乱序", "preamble_reordered"),
         ("前言插入空行", "preamble_blank"),
@@ -461,6 +473,25 @@ def test_base_image_现代校验器严格拒绝语法绕过(tmp_path, case, payl
         prompt = prompt.replace(
             f"景别：{snapshot.framing}",
             f" 景别：{snapshot.framing} ",
+        )
+    elif payload == "lock_extra_before":
+        prompt = prompt.replace(
+            "【确认快照锁定】\n",
+            "【确认快照锁定】\n景别：全身景\n",
+        )
+    elif payload == "lock_extra_after":
+        prompt = prompt.replace(
+            f"唯一替换位置：{snapshot.replacement_target.body_region}",
+            f"唯一替换位置：{snapshot.replacement_target.body_region}\n背景：户外",
+        )
+    elif payload == "lock_extra_end":
+        prompt += "\n景别：全身景"
+    elif payload == "lock_extra_indented":
+        prompt += "\n  背景：户外"
+    elif payload == "lock_interrupted":
+        prompt = prompt.replace(
+            f"景别：{snapshot.framing}\n机位：",
+            f"景别：{snapshot.framing}\n备注：保持原值\n机位：",
         )
     elif payload == "preamble_missing":
         prompt = "\n".join(prompt.splitlines()[1:])
