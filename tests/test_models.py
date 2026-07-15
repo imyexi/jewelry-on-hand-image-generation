@@ -6,6 +6,7 @@ import pytest
 from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
 from jewelry_on_hand.models import (
     FidelityCheck,
+    PendantSemantics,
     ProductConfirmationSnapshot,
     ProductFidelityConstraints,
     ProductAnalysis,
@@ -136,6 +137,17 @@ def _reference_row():
     )
 
 
+def test_reference_row_metadata_roundtrip_preserves_every_policy_input_field():
+    row = _reference_row()
+
+    metadata = row.metadata_dict()
+
+    assert ReferenceRow.from_dict(metadata) == row
+    assert metadata["file_exists"] is True
+    assert metadata["bracelet_applicability"] == row.bracelet_applicability
+    assert metadata["default_strategy"] == row.default_strategy
+
+
 def test_product_analysis_happy_path_supports_bracelet_and_tuple_snapshot():
     analysis = ProductAnalysis.from_dict(_analysis_data())
 
@@ -145,6 +157,18 @@ def test_product_analysis_happy_path_supports_bracelet_and_tuple_snapshot():
     assert analysis.color_family == ("深红", "茶金", "透明")
     assert isinstance(analysis.color_family, tuple)
     assert analysis.needs_full_front_display is True
+
+
+def test_review_decision_parses_output_role():
+    decision = ReviewDecision.from_dict(
+        {
+            "action": "generate_rank_1",
+            "fidelity_confirmed": True,
+            "output_role": "lifestyle",
+        }
+    )
+
+    assert decision.output_role is OutputRole.LIFESTYLE
 
 
 def test_product_analysis_requires_non_empty_required_strings():
@@ -299,6 +323,110 @@ def test_product_fidelity_constraints_rejects_not_applicable_with_must_keep_item
         ProductFidelityConstraints.from_dict(_constraints_data(review_status="not_applicable"))
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "presence": "absent",
+            "count": 0,
+            "layer": None,
+            "creation_policy": "forbid",
+        },
+        {
+            "presence": "present",
+            "count": 1,
+            "layer": 2,
+            "creation_policy": "forbid",
+        },
+    ],
+)
+def test_pendant_semantics_roundtrip_is_frozen(payload):
+    semantics = PendantSemantics.from_dict(payload)
+
+    assert semantics.to_dict() == payload
+    with pytest.raises((AttributeError, TypeError)):
+        semantics.count = 2
+
+
+@pytest.mark.parametrize(
+    ("payload", "error_field"),
+    [
+        ({"presence": "unknown", "count": 0, "layer": None, "creation_policy": "forbid"}, "presence"),
+        ({"presence": "absent", "count": True, "layer": None, "creation_policy": "forbid"}, "count"),
+        ({"presence": "absent", "count": 0.0, "layer": None, "creation_policy": "forbid"}, "count"),
+        ({"presence": "absent", "count": 1, "layer": None, "creation_policy": "forbid"}, "absent"),
+        ({"presence": "present", "count": 0, "layer": 1, "creation_policy": "forbid"}, "present"),
+        ({"presence": "present", "count": 1, "layer": True, "creation_policy": "forbid"}, "layer"),
+        ({"presence": "present", "count": 1, "layer": 0, "creation_policy": "forbid"}, "layer"),
+        ({"presence": "present", "count": 1, "layer": 4, "creation_policy": "forbid"}, "layer"),
+        ({"presence": "present", "count": 1, "layer": None, "creation_policy": "forbid"}, "present"),
+        ({"presence": "absent", "count": 0, "layer": None, "creation_policy": "allow"}, "creation_policy"),
+    ],
+)
+def test_pendant_semantics_rejects_invalid_enum_count_and_layer_boundaries(
+    payload,
+    error_field,
+):
+    with pytest.raises(ValueError, match=error_field):
+        PendantSemantics.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("product_type", "schema_version", "pendant_semantics"),
+    [
+        ("bracelet", 1, None),
+        ("ring", 1, None),
+        (
+            "necklace",
+            2,
+            {
+                "presence": "absent",
+                "count": 0,
+                "layer": None,
+                "creation_policy": "forbid",
+            },
+        ),
+        (
+            "pendant_necklace",
+            2,
+            {
+                "presence": "present",
+                "count": 1,
+                "layer": 2,
+                "creation_policy": "forbid",
+            },
+        ),
+    ],
+)
+def test_product_fidelity_constraints_four_categories_roundtrip_without_pendant_pollution(
+    product_type,
+    schema_version,
+    pendant_semantics,
+):
+    payload = _constraints_data(
+        schema_version=schema_version,
+        source=_constraints_data()["source"] | {"product_type": product_type},
+    )
+    if pendant_semantics is not None:
+        payload["pendant_semantics"] = pendant_semantics
+
+    constraints = ProductFidelityConstraints.from_dict(payload)
+    serialized = constraints.to_dict()
+
+    assert serialized == payload
+    if product_type == "pendant_necklace":
+        assert constraints.pendant_semantics == PendantSemantics(
+            "present", 1, 2, "forbid"
+        )
+    elif product_type == "necklace":
+        assert constraints.pendant_semantics == PendantSemantics(
+            "absent", 0, None, "forbid"
+        )
+    else:
+        assert constraints.pendant_semantics is None
+        assert "pendant_semantics" not in serialized
+
+
 def test_reference_row_full_construction_and_combined_text():
     row = _reference_row()
 
@@ -408,13 +536,32 @@ def test_scored_reference_to_dict_contains_required_top_level_and_metadata_field
             "source_absolute_path": str(row.absolute_path),
             "source_relative_path": "references/ref.jpg",
             "source_file_name": "ref.jpg",
+            "width": 1024,
+            "宽度": 1024,
+            "height": 768,
+            "高度": 768,
+            "size_mb": 1.25,
+            "大小MB": 1.25,
+            "purpose_category": "上手参考",
             "用途分类": "上手参考",
+            "bracelet_applicability": "适合手串",
+            "手链手串适用性": "适合手串",
+            "default_strategy": "优先使用",
+            "默认使用策略": "优先使用",
+            "style_category": "暗调",
             "风格分类": "暗调",
+            "scene_keywords": "手腕 室内",
             "场景关键词": "手腕 室内",
+            "jewelry_type": "手串",
             "饰品类型": "手串",
+            "recommended_usage": "生成构图参考",
             "推荐使用方式": "生成构图参考",
+            "notes": "适合深色珠子",
             "备注": "适合深色珠子",
+            "confidence": "高",
             "判断置信度": "高",
+            "file_exists": True,
+            "文件存在": True,
         },
     }
 
@@ -526,38 +673,80 @@ def test_review_decision_generate_rank_1_defaults_only_for_missing_or_empty_list
             ReviewDecision.from_dict({"action": "generate_rank_1", "selected_ranks": invalid, "fidelity_confirmed": True})
 
 
-def test_审核决策解析输出角色():
-    decision = ReviewDecision.from_dict(
-        {
-            "action": "generate_rank_1",
-            "fidelity_confirmed": True,
-            "output_role": "lifestyle",
-        }
-    )
-
-    assert decision.output_role is OutputRole.LIFESTYLE
-
-
-def test_审核决策参考快照摘要仅接受64位小写十六进制():
+def test_review_decision_reference_snapshot_digest_roundtrip():
     digest = "a" * 64
-    decision = ReviewDecision.from_dict(
-        {
-            "action": "generate_rank_1",
-            "fidelity_confirmed": True,
-            "reference_snapshot_sha256": digest,
-        }
-    )
+    payload = {
+        "action": "generate_rank_1",
+        "selected_ranks": [1],
+        "fidelity_confirmed": True,
+        "fidelity_constraints_path": "analysis/product_fidelity_constraints.json",
+        "output_role": "hand_worn",
+        "reference_snapshot_sha256": digest,
+    }
+
+    decision = ReviewDecision.from_dict(payload)
 
     assert decision.reference_snapshot_sha256 == digest
-    for invalid in ("a" * 63, "A" * 64, "g" * 64, 123):
-        with pytest.raises(ValueError, match="reference_snapshot_sha256.*64 位小写十六进制"):
-            ReviewDecision.from_dict(
-                {
-                    "action": "generate_rank_1",
-                    "fidelity_confirmed": True,
-                    "reference_snapshot_sha256": invalid,
-                }
-            )
+    assert decision.to_dict() == payload
+
+
+def test_modern_review_decision_requires_reference_snapshot_digest():
+    with pytest.raises(
+        ValueError,
+        match="reference_snapshot_sha256.*非空 64 位小写十六进制",
+    ):
+        ReviewDecision.from_dict(
+            {
+                "action": "generate_rank_1",
+                "fidelity_confirmed": True,
+                "output_role": "hand_worn",
+            },
+            require_reference_snapshot_sha256=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "invalid_digest",
+    [None, "", 123, "A" * 64, "g" * 64, "a" * 63, "a" * 65],
+)
+def test_modern_review_decision_rejects_invalid_reference_snapshot_digest(
+    invalid_digest,
+):
+    with pytest.raises(
+        ValueError,
+        match="reference_snapshot_sha256.*非空 64 位小写十六进制",
+    ):
+        ReviewDecision.from_dict(
+            {
+                "action": "generate_rank_1",
+                "fidelity_confirmed": True,
+                "output_role": "hand_worn",
+                "reference_snapshot_sha256": invalid_digest,
+            },
+            require_reference_snapshot_sha256=True,
+        )
+
+
+def test_legacy_review_decision_without_digest_is_read_only():
+    legacy = ReviewDecision.from_dict(
+        {
+            "action": "generate_rank_1",
+            "fidelity_confirmed": True,
+        }
+    )
+
+    assert legacy.reference_snapshot_sha256 is None
+    with pytest.raises(
+        ValueError,
+        match="reference_snapshot_sha256.*非空 64 位小写十六进制",
+    ):
+        legacy.to_dict()
+
+
+def test_non_generation_review_decision_does_not_require_snapshot_digest_to_serialize():
+    decision = ReviewDecision.from_dict({"action": "rerank"})
+
+    assert decision.to_dict() == {"action": "rerank", "selected_ranks": []}
 
 
 def test_product_confirmation_snapshot_roundtrip_uses_typed_enums():
@@ -594,6 +783,24 @@ def test_product_confirmation_snapshot_rejects_each_missing_field():
 def test_product_confirmation_snapshot_requires_json_integer_layer_count():
     with pytest.raises(ValueError, match="layer_count.*JSON 整数"):
         ProductConfirmationSnapshot.from_dict(_confirmation_snapshot(layer_count="2"))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("pendant_position", ""),
+        ("pendant_orientation", True),
+        ("connection_structure", 1),
+    ],
+)
+def test_pendant_snapshot_rejects_invalid_position_orientation_and_connection(
+    field_name,
+    invalid_value,
+):
+    with pytest.raises(ValueError, match=field_name):
+        ProductConfirmationSnapshot.from_dict(
+            _confirmation_snapshot(**{field_name: invalid_value})
+        )
 
 
 def test_legacy_necklace_snapshot_defaults_ring_fields_to_not_applicable():

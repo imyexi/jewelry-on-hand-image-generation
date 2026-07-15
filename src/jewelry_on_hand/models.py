@@ -644,6 +644,62 @@ class ProductAnalysis:
 
 
 FidelityReviewStatus = Literal["pending", "confirmed", "corrected", "not_applicable"]
+PendantPresence = Literal["present", "absent"]
+PendantCreationPolicy = Literal["forbid"]
+
+
+@dataclass(frozen=True)
+class PendantSemantics:
+    presence: PendantPresence
+    count: int
+    layer: int | None
+    creation_policy: PendantCreationPolicy
+
+    def __post_init__(self) -> None:
+        if self.presence not in {"present", "absent"}:
+            raise ValueError("pendant_semantics.presence 必须是 present/absent")
+        if isinstance(self.count, bool) or not isinstance(self.count, int):
+            raise ValueError("pendant_semantics.count 必须是整数 0 或 1")
+        if self.count not in {0, 1}:
+            raise ValueError("pendant_semantics.count 第一阶段只能是 0 或 1")
+        if self.layer is not None and (
+            isinstance(self.layer, bool)
+            or not isinstance(self.layer, int)
+            or not 1 <= self.layer <= 3
+        ):
+            raise ValueError("pendant_semantics.layer 必须是 null 或 1 至 3")
+        if self.creation_policy != "forbid":
+            raise ValueError("pendant_semantics.creation_policy 必须为 forbid")
+        if self.presence == "absent" and (
+            self.count != 0 or self.layer is not None
+        ):
+            raise ValueError("presence=absent 时 count 必须为 0 且 layer 必须为 null")
+        if self.presence == "present" and (
+            self.count != 1 or self.layer is None
+        ):
+            raise ValueError("presence=present 时 count 必须为 1 且 layer 必须为 1 至 3")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "PendantSemantics":
+        source = _ensure_mapping(data, "pendant_semantics")
+        if "layer" not in source:
+            raise ValueError("pendant_semantics.layer 必填；absent 时必须显式为 null")
+        return cls(
+            presence=_required_string(source, "presence"),  # type: ignore[arg-type]
+            count=_json_int(source.get("count"), "count"),  # type: ignore[arg-type]
+            layer=_json_int(source["layer"], "layer", allow_none=True),
+            creation_policy=_required_string(  # type: ignore[arg-type]
+                source, "creation_policy"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "presence": self.presence,
+            "count": self.count,
+            "layer": self.layer,
+            "creation_policy": self.creation_policy,
+        }
 
 
 @dataclass(frozen=True)
@@ -714,10 +770,27 @@ class ProductFidelityConstraints:
     needs_user_review: bool
     detail_crop_recommended: bool
     review_status: FidelityReviewStatus
+    pendant_semantics: PendantSemantics | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
-            raise ValueError("schema_version 必须为 1")
+        if isinstance(self.schema_version, bool) or not isinstance(
+            self.schema_version, int
+        ):
+            raise ValueError("schema_version 必须为 1 或 2")
+        if self.schema_version not in {1, 2}:
+            raise ValueError("schema_version 必须为 1 或 2")
+        if self.schema_version == 1:
+            if self.pendant_semantics is not None:
+                raise ValueError("v1 的 pendant_semantics 必须为 null 或缺失")
+        else:
+            if self.pendant_semantics is None:
+                raise ValueError("v2 的 pendant_semantics 必填")
+            if not isinstance(self.pendant_semantics, PendantSemantics):
+                object.__setattr__(
+                    self,
+                    "pendant_semantics",
+                    PendantSemantics.from_dict(self.pendant_semantics),
+                )
         source = _ensure_mapping(self.source, "source")
         object.__setattr__(self, "source", dict(source))
         object.__setattr__(
@@ -763,9 +836,26 @@ class ProductFidelityConstraints:
     def from_dict(cls, data: dict[str, Any] | None) -> "ProductFidelityConstraints":
         source = _ensure_mapping(data, "ProductFidelityConstraints")
         if "schema_version" not in source:
-            raise ValueError("schema_version 必须为 1")
+            raise ValueError("schema_version 必须为 1 或 2")
+        raw_schema_version = source.get("schema_version")
+        if (
+            isinstance(raw_schema_version, bool)
+            or not isinstance(raw_schema_version, int)
+            or raw_schema_version not in {1, 2}
+        ):
+            raise ValueError("schema_version 必须为 1 或 2")
+        schema_version = _required_int(raw_schema_version, "schema_version")
+        if schema_version == 1 and source.get("pendant_semantics") is not None:
+            raise ValueError("v1 的 pendant_semantics 必须为 null 或缺失")
+        if schema_version == 2 and "pendant_semantics" not in source:
+            raise ValueError("v2 的 pendant_semantics 必填")
+        pendant_semantics = (
+            PendantSemantics.from_dict(source.get("pendant_semantics"))
+            if schema_version == 2
+            else None
+        )
         return cls(
-            schema_version=_required_int(source.get("schema_version"), "schema_version"),
+            schema_version=schema_version,
             source=_ensure_mapping(source.get("source"), "source"),
             detected_keywords=_string_list(source.get("detected_keywords"), "detected_keywords"),
             must_keep=tuple(
@@ -778,10 +868,11 @@ class ProductFidelityConstraints:
                 source.get("detail_crop_recommended"), "detail_crop_recommended"
             ),
             review_status=_required_string(source, "review_status"),  # type: ignore[arg-type]
+            pendant_semantics=pendant_semantics,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "source": dict(self.source),
             "detected_keywords": list(self.detected_keywords),
@@ -791,6 +882,10 @@ class ProductFidelityConstraints:
             "detail_crop_recommended": self.detail_crop_recommended,
             "review_status": self.review_status,
         }
+        if self.schema_version == 2:
+            assert self.pendant_semantics is not None
+            payload["pendant_semantics"] = self.pendant_semantics.to_dict()
+        return payload
 
     def is_confirmed_for_generation(self) -> bool:
         return self.review_status in {"confirmed", "corrected", "not_applicable"}
@@ -1048,13 +1143,32 @@ class ReferenceRow:
             "source_absolute_path": str(self.absolute_path),
             "source_relative_path": self.relative_path,
             "source_file_name": self.file_name,
+            "width": self.width,
+            "宽度": self.width,
+            "height": self.height,
+            "高度": self.height,
+            "size_mb": self.size_mb,
+            "大小MB": self.size_mb,
+            "purpose_category": self.purpose_category,
             "用途分类": self.purpose_category,
+            "bracelet_applicability": self.bracelet_applicability,
+            "手链手串适用性": self.bracelet_applicability,
+            "default_strategy": self.default_strategy,
+            "默认使用策略": self.default_strategy,
+            "style_category": self.style_category,
             "风格分类": self.style_category,
+            "scene_keywords": self.scene_keywords,
             "场景关键词": self.scene_keywords,
+            "jewelry_type": self.jewelry_type,
             "饰品类型": self.jewelry_type,
+            "recommended_usage": self.recommended_usage,
             "推荐使用方式": self.recommended_usage,
+            "notes": self.notes,
             "备注": self.notes,
+            "confidence": self.confidence,
             "判断置信度": self.confidence,
+            "file_exists": self.file_exists,
+            "文件存在": self.file_exists,
         }
         generic_values = (
             self.applicable_product_types,
@@ -1513,11 +1627,19 @@ class ReviewDecision:
         object.__setattr__(
             self,
             "reference_snapshot_sha256",
-            self._parse_reference_snapshot_sha256(self.reference_snapshot_sha256),
+            self._parse_reference_snapshot_sha256(
+                self.reference_snapshot_sha256,
+                allow_none=True,
+            ),
         )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "ReviewDecision":
+    def from_dict(
+        cls,
+        data: dict[str, Any] | None,
+        *,
+        require_reference_snapshot_sha256: bool = False,
+    ) -> "ReviewDecision":
         source = _ensure_mapping(data, "ReviewDecision")
         action = _required_string(source, "action")
         supported_actions = {
@@ -1583,23 +1705,62 @@ class ReviewDecision:
             confirmation_snapshot=confirmation_snapshot,
             output_role=source.get("output_role"),
             reference_snapshot_sha256=cls._parse_reference_snapshot_sha256(
-                source.get("reference_snapshot_sha256")
+                source.get("reference_snapshot_sha256"),
+                allow_none=not require_reference_snapshot_sha256,
             ),
         )
 
     @staticmethod
-    def _parse_reference_snapshot_sha256(value: Any) -> str | None:
+    def _parse_reference_snapshot_sha256(
+        value: Any,
+        *,
+        allow_none: bool,
+    ) -> str | None:
         if value is None:
-            return None
+            if allow_none:
+                return None
+            raise ValueError(
+                "reference_snapshot_sha256 必须是非空 64 位小写十六进制字符串"
+            )
         if (
             not isinstance(value, str)
             or len(value) != 64
             or any(character not in "0123456789abcdef" for character in value)
         ):
             raise ValueError(
-                "reference_snapshot_sha256 必须是 64 位小写十六进制字符串或 null"
+                "reference_snapshot_sha256 必须是非空 64 位小写十六进制字符串"
             )
         return value
+
+    def to_dict(self) -> dict[str, Any]:
+        is_generation_action = self.action in {
+            "generate_rank_1",
+            "generate_selected",
+            "generate_multiple",
+        }
+        data: dict[str, Any] = {
+            "action": self.action,
+            "selected_ranks": list(self.selected_ranks),
+        }
+        if self.manual_reference is not None:
+            data["manual_reference"] = self.manual_reference
+        if is_generation_action:
+            data["fidelity_confirmed"] = self.fidelity_confirmed
+            data["fidelity_constraints_path"] = self.fidelity_constraints_path
+        if self.fidelity_notes is not None:
+            data["fidelity_notes"] = self.fidelity_notes
+        if self.confirmation_snapshot is not None:
+            data["confirmation_snapshot"] = self.confirmation_snapshot.to_dict()
+        if self.output_role is not None:
+            data["output_role"] = self.output_role.value
+        if is_generation_action:
+            data["reference_snapshot_sha256"] = self._parse_reference_snapshot_sha256(
+                self.reference_snapshot_sha256,
+                allow_none=False,
+            )
+        elif self.reference_snapshot_sha256 is not None:
+            data["reference_snapshot_sha256"] = self.reference_snapshot_sha256
+        return data
 
     @staticmethod
     def _parse_ranks(value: Any) -> _FrozenList:
@@ -1630,6 +1791,14 @@ QcCriticalFailure = Literal[
     "auto_chain_added",
     "source_person_region_migrated",
     "severe_intersection",
+    "ring_count_mismatch",
+    "hand_side_mismatch",
+    "finger_position_mismatch",
+    "ring_structure_mismatch",
+    "centerpiece_mismatch",
+    "ring_contact_error",
+    "finger_deformation",
+    "source_hand_leakage",
 ]
 
 _QC_CRITICAL_FAILURES = {
@@ -1643,6 +1812,14 @@ _QC_CRITICAL_FAILURES = {
     "auto_chain_added",
     "source_person_region_migrated",
     "severe_intersection",
+    "ring_count_mismatch",
+    "hand_side_mismatch",
+    "finger_position_mismatch",
+    "ring_structure_mismatch",
+    "centerpiece_mismatch",
+    "ring_contact_error",
+    "finger_deformation",
+    "source_hand_leakage",
 }
 
 _QC_REJECT_FAILURES = {
@@ -1651,6 +1828,11 @@ _QC_REJECT_FAILURES = {
     "multi_layer_restructured",
     "auto_chain_added",
     "severe_intersection",
+    "ring_count_mismatch",
+    "finger_position_mismatch",
+    "ring_structure_mismatch",
+    "centerpiece_mismatch",
+    "source_hand_leakage",
 }
 
 _QC_REJECT_FAILURE_TERMS = (
@@ -1664,6 +1846,12 @@ _QC_REJECT_FAILURE_TERMS = (
     "凭空补链",
     "严重穿模",
     "严重穿透",
+    "戒指数量错误",
+    "佩戴手指错误",
+    "戒指结构错误",
+    "戒面错误",
+    "主石错误",
+    "产品图手部迁移",
 )
 
 
@@ -1674,6 +1862,7 @@ class QcResult:
     failed: tuple[str, ...]
     notes: str
     fidelity_checks: tuple["FidelityCheck", ...] = field(default_factory=tuple)
+    checklist_checks: tuple["QcChecklistCheck", ...] = field(default_factory=tuple)
     critical_failures: tuple[QcCriticalFailure, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -1689,6 +1878,11 @@ class QcResult:
         checks = _parse_fidelity_checks(self.fidelity_checks)
         if self.status == "pass" and any(check.result != "pass" for check in checks):
             raise ValueError("must_keep 关键识别点失败时不得标记为 pass")
+        checklist_checks = _parse_qc_checklist_checks(self.checklist_checks)
+        if self.status == "pass" and any(
+            check.result != "pass" for check in checklist_checks
+        ):
+            raise ValueError("checklist_checks 存在未通过项时不得标记为 pass")
         critical_failures = _parse_qc_critical_failures(self.critical_failures)
         if self.status == "pass" and critical_failures:
             raise ValueError("存在关键 QC 失败时不得标记为 pass")
@@ -1698,6 +1892,7 @@ class QcResult:
         ):
             raise ValueError("品类、结构、自动补链或严重穿模错误必须标记为 reject")
         object.__setattr__(self, "fidelity_checks", checks)
+        object.__setattr__(self, "checklist_checks", checklist_checks)
         object.__setattr__(self, "critical_failures", critical_failures)
 
 
@@ -1745,6 +1940,47 @@ class FidelityCheck:
         }
 
 
+@dataclass(frozen=True)
+class QcChecklistCheck:
+    id: str
+    question: str
+    result: FidelityCheckResult
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "id", _required_string_value(self.id, "id"))
+        object.__setattr__(
+            self,
+            "question",
+            _required_string_value(self.question, "question"),
+        )
+        if self.result not in {"pass", "rerun", "fail"}:
+            raise ValueError("checklist_checks.result 必须是 pass/rerun/fail")
+        if not isinstance(self.notes, str):
+            raise ValueError("checklist_checks.notes 必须是字符串")
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "QcChecklistCheck":
+        source = _ensure_mapping(data, "QcChecklistCheck")
+        notes = source.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            raise ValueError("checklist_checks.notes 必须是字符串或 null")
+        return cls(
+            id=_required_string(source, "id"),
+            question=_required_string(source, "question"),
+            result=_required_string(source, "result"),  # type: ignore[arg-type]
+            notes="" if notes is None else notes,
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "id": self.id,
+            "question": self.question,
+            "result": self.result,
+            "notes": self.notes,
+        }
+
+
 def _parse_fidelity_checks(value: Any) -> tuple[FidelityCheck, ...]:
     if value is None:
         return ()
@@ -1756,6 +1992,20 @@ def _parse_fidelity_checks(value: Any) -> tuple[FidelityCheck, ...]:
             checks.append(item)
         else:
             checks.append(FidelityCheck.from_dict(item))
+    return tuple(checks)
+
+
+def _parse_qc_checklist_checks(value: Any) -> tuple[QcChecklistCheck, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("checklist_checks 必须是列表")
+    checks: list[QcChecklistCheck] = []
+    for item in value:
+        if isinstance(item, QcChecklistCheck):
+            checks.append(item)
+        else:
+            checks.append(QcChecklistCheck.from_dict(item))
     return tuple(checks)
 
 
