@@ -23,7 +23,7 @@ from jewelry_on_hand.product_fidelity import (
 
 
 PENDANT_TERMS = ("吊坠", "主吊坠", "链坠", "流苏", "坠子")
-SEMANTIC_FIELD_PATHS = (
+CONSTRAINT_SEMANTIC_FIELD_PATHS = (
     "detected_keywords[0]",
     "must_not_change[0]",
     "must_keep[0].name",
@@ -34,6 +34,12 @@ SEMANTIC_FIELD_PATHS = (
     "must_keep[0].relationship",
     "must_keep[0].forbid[0]",
     "must_keep[0].qc_question",
+)
+SEMANTIC_FIELD_PATHS = (
+    *CONSTRAINT_SEMANTIC_FIELD_PATHS,
+    "pendant_semantics.position",
+    "pendant_semantics.orientation",
+    "pendant_semantics.connection",
 )
 PRESENT_PENDANT_CONFLICT_PHRASES = (
     "无吊坠",
@@ -206,6 +212,18 @@ def _tampered_copy(
     return copied
 
 
+def _tampered_pendant_constraints(
+    product: ProductAnalysis,
+    field_name: str,
+    value: object,
+) -> ProductFidelityConstraints:
+    constraints = build_product_fidelity_constraints(product)
+    assert constraints.pendant_semantics is not None
+    semantics = replace(constraints.pendant_semantics)
+    object.__setattr__(semantics, field_name, value)
+    return _tampered_copy(constraints, "pendant_semantics", semantics)
+
+
 def _safe_item() -> MustKeepConstraint:
     return MustKeepConstraint(
         name="微珠链整体结构",
@@ -244,6 +262,14 @@ def _inject_semantic_text(
 def _inject_present_semantic_text(
     constraints: ProductFidelityConstraints, field_path: str, text: str
 ) -> ProductFidelityConstraints:
+    if field_path.startswith("pendant_semantics."):
+        assert constraints.pendant_semantics is not None
+        field_name = field_path.removeprefix("pendant_semantics.")
+        semantics = replace(
+            constraints.pendant_semantics,
+            **{field_name: text},
+        )
+        return replace(constraints, pendant_semantics=semantics)
     if field_path == "detected_keywords[0]":
         return replace(constraints, detected_keywords=(text,))
     if field_path == "must_not_change[0]":
@@ -662,7 +688,7 @@ def test_v2_validator_rejects_multiple_pendants_when_builder_is_bypassed() -> No
 
 
 @pytest.mark.parametrize("term", PENDANT_TERMS)
-@pytest.mark.parametrize("field_path", SEMANTIC_FIELD_PATHS)
+@pytest.mark.parametrize("field_path", CONSTRAINT_SEMANTIC_FIELD_PATHS)
 def test_absent_v2_rejects_pendant_term_in_every_free_text_field(
     term: str, field_path: str
 ) -> None:
@@ -741,6 +767,49 @@ def test_present_v2_accepts_forbid_second_pendant_protection() -> None:
     )
 
     assert validate_product_fidelity_constraints(product, constraints) is constraints
+
+
+@pytest.mark.parametrize(
+    ("has_pendant", "field_name", "invalid_value"),
+    [
+        (True, "presence", True),
+        (True, "presence", " present "),
+        (True, "count", True),
+        (True, "count", 1.0),
+        (True, "count", 0),
+        (True, "layer", True),
+        (True, "layer", 2.0),
+        (True, "layer", None),
+        (True, "creation_policy", True),
+        (True, "creation_policy", "allow"),
+        (True, "creation_policy", " forbid "),
+        (True, "position", 1),
+        (True, "position", ""),
+        (True, "orientation", False),
+        (True, "orientation", "   "),
+        (True, "connection", 1.0),
+        (True, "connection", "\t"),
+        (False, "count", 1),
+        (False, "layer", 1),
+        (False, "position", "中央"),
+        (False, "orientation", "正面向前"),
+        (False, "connection", "吊环连接"),
+    ],
+)
+def test_validator_strictly_rejects_tampered_pendant_runtime_fields(
+    has_pendant: bool,
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    product = _necklace_analysis(pendant=has_pendant)
+    constraints = _tampered_pendant_constraints(
+        product,
+        field_name,
+        invalid_value,
+    )
+
+    with pytest.raises(ValueError, match=f"pendant_semantics.{field_name}"):
+        validate_product_fidelity_constraints(product, constraints)
 
 
 def test_product_analysis_sha256_uses_canonical_product_analysis_projection(

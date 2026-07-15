@@ -579,6 +579,49 @@ def _validate_constraint_runtime_types(
     elif constraints.schema_version == 2:
         if not isinstance(constraints.pendant_semantics, PendantSemantics):
             raise ValueError("canonical v2 pendant_semantics 必须是 PendantSemantics")
+        _validate_pendant_semantics_runtime(constraints.pendant_semantics)
+
+
+def _validate_pendant_semantics_runtime(semantics: PendantSemantics) -> None:
+    if type(semantics.presence) is not str or semantics.presence not in {
+        "present",
+        "absent",
+    }:
+        raise ValueError(
+            "pendant_semantics.presence 必须是 present/absent 字符串"
+        )
+    if type(semantics.count) is not int or semantics.count not in {0, 1}:
+        raise ValueError("pendant_semantics.count 必须是整数 0 或 1")
+    if semantics.layer is not None and (
+        type(semantics.layer) is not int or not 1 <= semantics.layer <= 3
+    ):
+        raise ValueError("pendant_semantics.layer 必须是 null 或整数 1 至 3")
+    if type(semantics.creation_policy) is not str or (
+        semantics.creation_policy != "forbid"
+    ):
+        raise ValueError("pendant_semantics.creation_policy 必须是 forbid 字符串")
+
+    if semantics.presence == "absent":
+        if semantics.count != 0:
+            raise ValueError("presence=absent 时 pendant_semantics.count 必须为 0")
+        if semantics.layer is not None:
+            raise ValueError("presence=absent 时 pendant_semantics.layer 必须为 null")
+    else:
+        if semantics.count != 1:
+            raise ValueError("presence=present 时 pendant_semantics.count 必须为 1")
+        if semantics.layer is None:
+            raise ValueError(
+                "presence=present 时 pendant_semantics.layer 必须为整数 1 至 3"
+            )
+
+    for field_name in ("position", "orientation", "connection"):
+        value = getattr(semantics, field_name)
+        field_path = f"pendant_semantics.{field_name}"
+        if semantics.presence == "present":
+            if type(value) is not str or not value.strip() or value != value.strip():
+                raise ValueError(f"{field_path} 必须是无首尾空白的非空字符串")
+        elif value is not None:
+            raise ValueError(f"presence=absent 时 {field_path} 必须为 null")
 
 
 def _validate_canonical_projection(
@@ -643,6 +686,22 @@ def _validate_v2_pendant_semantics(
             f"canonical={constraints.pendant_semantics.to_dict()}；"
             "请新建 run 并重新执行 prepare-review"
         )
+    if constraints.pendant_semantics.presence == "absent":
+        for field_path, text in _iter_constraint_semantic_fields(constraints):
+            for term in ("吊坠", "主吊坠", "链坠", "流苏", "坠子"):
+                if term in text:
+                    raise ValueError(
+                        f"v2 无吊坠 canonical 的 {field_path} "
+                        f"不得包含敏感词：{term}"
+                    )
+    else:
+        for field_path, text in _iter_constraint_semantic_fields(constraints):
+            for phrase in _PRESENT_PENDANT_CONFLICT_PHRASES:
+                if phrase in text:
+                    raise ValueError(
+                        f"{field_path} 与 present canonical 冲突：{phrase}"
+                    )
+
     expected = (
         PendantSemantics(
             presence="present",
@@ -670,23 +729,8 @@ def _validate_v2_pendant_semantics(
             f"canonical={constraints.pendant_semantics.to_dict()}；"
             "请新建 run 并重新执行 prepare-review"
         )
-
     if constraints.pendant_semantics.presence == "absent":
-        for field_path, text in _iter_constraint_semantic_fields(constraints):
-            for term in ("吊坠", "主吊坠", "链坠", "流苏", "坠子"):
-                if term in text:
-                    raise ValueError(
-                        f"v2 无吊坠 canonical 的 {field_path} "
-                        f"不得包含敏感词：{term}"
-                    )
         return
-
-    for field_path, text in _iter_constraint_semantic_fields(constraints):
-        for phrase in _PRESENT_PENDANT_CONFLICT_PHRASES:
-            if phrase in text:
-                raise ValueError(
-                    f"{field_path} 与 present canonical 冲突：{phrase}"
-                )
 
     pendant_items = [
         item
@@ -714,6 +758,11 @@ def _constraints_semantic_text(
 def _iter_constraint_semantic_fields(
     constraints: ProductFidelityConstraints,
 ) -> Iterator[tuple[str, str]]:
+    if constraints.pendant_semantics is not None:
+        for field_name in ("position", "orientation", "connection"):
+            text = getattr(constraints.pendant_semantics, field_name)
+            if type(text) is str and text:
+                yield f"pendant_semantics.{field_name}", text
     for index, keyword in enumerate(constraints.detected_keywords):
         yield f"detected_keywords[{index}]", keyword
     for index, text in enumerate(constraints.must_not_change):
