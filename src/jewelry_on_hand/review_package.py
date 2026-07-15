@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import os
 import shutil
+from hashlib import sha256
 from html import escape
-from urllib.parse import quote
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import quote
 
-from jewelry_on_hand.models import ProductFidelityConstraints
-from jewelry_on_hand.product_fidelity import CONSTRAINTS_FILE_NAME, load_product_fidelity_constraints
-from jewelry_on_hand.models import ScoredReference
-from jewelry_on_hand.run_paths import RunPaths, write_json
+from jewelry_on_hand.models import ProductFidelityConstraints, ScoredReference
+from jewelry_on_hand.product_fidelity import (
+    CONSTRAINTS_FILE_NAME,
+    load_product_fidelity_constraints,
+)
+from jewelry_on_hand.reference_composition import (
+    REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME,
+    ReferenceCompositionSnapshot,
+    validate_snapshot_binding,
+)
+from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
 def write_review_package(
@@ -18,27 +26,56 @@ def write_review_package(
     product_image: str | Path,
     selected: Sequence[ScoredReference],
     candidates: Sequence[ScoredReference],
+    *,
+    composition_snapshots: Sequence[ReferenceCompositionSnapshot],
 ) -> Path:
     selected_items = list(selected)
     candidate_items = list(candidates)
+    snapshot_items = list(composition_snapshots)
     product_path = _validate_product_image(paths, product_image)
     _validate_selected_targets(paths.review_dir, selected_items)
+    snapshots_by_rank = _validate_composition_snapshots(
+        selected_items,
+        snapshot_items,
+    )
 
+    copied_references = _copy_selected_references(paths.review_dir, selected_items)
+    reference_hashes = _validate_copied_reference_hashes(
+        selected_items,
+        copied_references,
+        snapshots_by_rank,
+    )
     write_json(
         paths.analysis_dir / "reference_candidates.json",
         [item.to_dict() for item in candidate_items],
     )
-
-    copied_references = _copy_selected_references(paths.review_dir, selected_items)
     write_json(
         paths.analysis_dir / "selected_references.json",
-        [_selected_item_to_dict(item, copied_references[item.rank]) for item in selected_items],
+        [
+            _selected_item_to_dict(
+                item,
+                copied_references[item.rank],
+                *reference_hashes[item.rank],
+            )
+            for item in selected_items
+        ],
+    )
+    write_json(
+        paths.analysis_dir / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME,
+        [snapshot.to_dict() for snapshot in snapshot_items],
     )
 
     html_path = paths.review_dir / "review.html"
     html_path.parent.mkdir(parents=True, exist_ok=True)
     html_path.write_text(
-        _render_html(paths, product_path, selected_items, candidate_items, copied_references),
+        _render_html(
+            paths,
+            product_path,
+            selected_items,
+            candidate_items,
+            copied_references,
+            snapshots_by_rank,
+        ),
         encoding="utf-8",
     )
     return html_path
@@ -58,7 +95,12 @@ def _copy_selected_references(
     return copied
 
 
-def _selected_item_to_dict(item: ScoredReference, review_copy: Path) -> dict[str, object]:
+def _selected_item_to_dict(
+    item: ScoredReference,
+    review_copy: Path,
+    source_sha256: str,
+    review_sha256: str,
+) -> dict[str, object]:
     data = item.to_dict()
     source_path = str(item.row.absolute_path.resolve())
     metadata = data.get("metadata")
@@ -68,11 +110,64 @@ def _selected_item_to_dict(item: ScoredReference, review_copy: Path) -> dict[str
     metadata["source_absolute_path"] = source_path
     metadata["source_relative_path"] = item.row.relative_path
     metadata["source_file_name"] = item.row.file_name
+    metadata["source_sha256"] = source_sha256
+    metadata["review_sha256"] = review_sha256
     metadata.setdefault("relative_path", item.row.relative_path)
     metadata.setdefault("相对路径", item.row.relative_path)
     data["metadata"] = metadata
     data["selected_reference"] = str(review_copy.resolve())
+    data["source_sha256"] = source_sha256
+    data["review_sha256"] = review_sha256
     return data
+
+
+def _validate_composition_snapshots(
+    selected: Sequence[ScoredReference],
+    snapshots: Sequence[ReferenceCompositionSnapshot],
+) -> dict[int, ReferenceCompositionSnapshot]:
+    if any(not isinstance(item, ReferenceCompositionSnapshot) for item in snapshots):
+        raise ValueError("composition_snapshots 必须全部是 ReferenceCompositionSnapshot")
+    selected_ranks = [item.rank for item in selected]
+    snapshot_ranks = [item.rank for item in snapshots]
+    if len(snapshot_ranks) != len(set(snapshot_ranks)):
+        raise ValueError("候选构图快照中存在重复 rank")
+    if set(snapshot_ranks) != set(selected_ranks):
+        raise ValueError("候选构图快照 rank 集合必须与 selected rank 集合完全一致")
+    roles = {item.output_role for item in snapshots}
+    if len(roles) > 1:
+        raise ValueError("同一审核包的候选构图快照 output_role 必须一致")
+
+    snapshots_by_rank = {item.rank: item for item in snapshots}
+    for reference in selected:
+        snapshot = snapshots_by_rank[reference.rank]
+        validate_snapshot_binding(
+            snapshot,
+            reference_file=reference.row.absolute_path,
+            output_role=snapshot.output_role,
+            expected_rank=reference.rank,
+        )
+    return snapshots_by_rank
+
+
+def _validate_copied_reference_hashes(
+    selected: Sequence[ScoredReference],
+    copied_references: dict[int, Path],
+    snapshots_by_rank: dict[int, ReferenceCompositionSnapshot],
+) -> dict[int, tuple[str, str]]:
+    hashes: dict[int, tuple[str, str]] = {}
+    for item in selected:
+        source_sha = _file_sha256(item.row.absolute_path)
+        review_sha = _file_sha256(copied_references[item.rank])
+        if snapshots_by_rank[item.rank].reference_sha256 != source_sha:
+            raise ValueError(f"候选构图快照 rank {item.rank} 的源参考图 SHA-256 不一致")
+        if source_sha != review_sha:
+            raise ValueError(f"参考图 rank {item.rank} 的源文件与审核副本 SHA-256 不一致")
+        hashes[item.rank] = (source_sha, review_sha)
+    return hashes
+
+
+def _file_sha256(path: str | Path) -> str:
+    return sha256(Path(path).read_bytes()).hexdigest()
 
 
 def _validate_product_image(paths: RunPaths, product_image: str | Path) -> Path:
@@ -111,14 +206,20 @@ def _render_html(
     selected: Sequence[ScoredReference],
     candidates: Sequence[ScoredReference],
     copied_references: dict[int, Path],
+    snapshots_by_rank: dict[int, ReferenceCompositionSnapshot],
 ) -> str:
     product_src = _html_path(product_image, paths.review_dir)
     selected_cards = "\n".join(
-        _render_card(item, paths.review_dir, copied_references.get(item.rank))
+        _render_card(
+            item,
+            paths.review_dir,
+            copied_references.get(item.rank),
+            snapshots_by_rank.get(item.rank),
+        )
         for item in selected
     )
     candidate_cards = "\n".join(
-        _render_card(item, paths.review_dir, copied_references.get(item.rank))
+        _render_card(item, paths.review_dir, copied_references.get(item.rank), None)
         for item in candidates
     )
     return f"""<!doctype html>
@@ -215,6 +316,8 @@ def _render_html(
     }}
     dd {{
       margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }}
     ul {{
       margin: 6px 0 0;
@@ -237,14 +340,21 @@ def _render_html(
   <main>
     <h1>参考图 Review 包</h1>
     <section class="hero">
-      <img src="{product_src}" alt="产品图预览">
+      <img src="{product_src}" alt="产品身份图">
       <div>
-        <p class="badge">产品图预览</p>
-        <p>用于确认上手参考图与产品图之间的构图、场景、风险和可忽略的参考图原有饰品。</p>
+        <p class="badge">产品身份图</p>
+        <p>此图只用于锁定产品身份、结构、材质与排列，不提供参考底图的皮肤、姿势或背景。</p>
       </div>
     </section>
 
+    {_render_product_analysis_section(paths)}
+
     {_render_fidelity_section(_load_optional_fidelity_constraints(paths))}
+
+    <section class="card">
+      <h2>人工确认提示</h2>
+      <p>逐张核对参考底图和候选构图快照；预计展示面积不足时不要选择，存在阻断性文字或 UI 时不要选择。</p>
+    </section>
 
     <section>
       <h2>Top 3 参考图</h2>
@@ -270,6 +380,49 @@ def _load_optional_fidelity_constraints(paths: RunPaths) -> ProductFidelityConst
     if not constraints_path.is_file():
         return None
     return load_product_fidelity_constraints(constraints_path)
+
+
+def _render_product_analysis_section(paths: RunPaths) -> str:
+    analysis_path = paths.analysis_dir / "product_analysis.json"
+    if not analysis_path.is_file():
+        return ""
+    analysis = read_json(analysis_path)
+    if not isinstance(analysis, dict):
+        raise ValueError(f"{analysis_path} 必须是 JSON 对象")
+    fields = (
+        ("自动识别品类", "detected_product_type"),
+        ("最终确认品类", "confirmed_product_type"),
+        ("分类置信度", "classification_confidence"),
+        ("分类证据", "classification_evidence"),
+        ("分类来源", "classification_source"),
+        ("输入图类型", "source_image_type"),
+        ("展示模式", "display_mode"),
+        ("层数", "layer_count"),
+        ("长度等级", "length_category"),
+        ("吊坠存在", "has_pendant"),
+        ("吊坠数量", "pendant_count"),
+        ("吊坠所属层", "pendant_layer"),
+        ("吊坠位置", "pendant_position"),
+        ("吊坠朝向", "pendant_orientation"),
+        ("吊坠连接", "connection_structure"),
+        ("遮挡区域", "occluded_parts"),
+        ("不确定细节", "uncertain_details"),
+    )
+    details = "".join(
+        f"<dt>{_text(label)}</dt><dd>{_display_value(analysis.get(key))}</dd>"
+        for label, key in fields
+    )
+    unsupported_reason = ""
+    if analysis.get("confirmed_product_type") == "pendant_only":
+        unsupported_reason = "当前版本不支持无链独立吊坠，且禁止自动补链"
+    support_status = unsupported_reason or "当前产品分析可进入人工参考图审核"
+    return f"""<section class="card">
+      <h2>产品确认</h2>
+      <dl>
+        {details}
+        <dt>支持状态</dt><dd>{_text(support_status)}</dd>
+      </dl>
+    </section>"""
 
 
 def _render_fidelity_section(
@@ -323,7 +476,12 @@ def _render_must_keep_item(item: object) -> str:
     )
 
 
-def _render_card(item: ScoredReference, review_dir: Path, image_path: Path | None) -> str:
+def _render_card(
+    item: ScoredReference,
+    review_dir: Path,
+    image_path: Path | None,
+    snapshot: ReferenceCompositionSnapshot | None,
+) -> str:
     image_html = ""
     if image_path is not None:
         image_html = (
@@ -333,28 +491,103 @@ def _render_card(item: ScoredReference, review_dir: Path, image_path: Path | Non
     return f"""<article class="card">
   {image_html}
   <h3>{_text(item.row.file_name)}</h3>
+  {('<p class="badge">参考底图</p>' if snapshot is not None else '')}
   <p class="badge">Rank {_text(item.rank)} · Score {_text(item.score)}</p>
   <dl>
-    <dt>purpose</dt>
+    <dt>用途分类</dt>
     <dd>{_text(item.row.purpose_category)}</dd>
-    <dt>style</dt>
+    <dt>风格分类</dt>
     <dd>{_text(item.row.style_category)}</dd>
-    <dt>scene keywords</dt>
+    <dt>场景关键词</dt>
     <dd>{_text(item.row.scene_keywords)}</dd>
-    <dt>reasons</dt>
+    <dt>适用品类</dt>
+    <dd>{_text(item.row.applicable_product_types)}</dd>
+    <dt>适用展示模式</dt>
+    <dd>{_text(item.row.applicable_display_modes)}</dd>
+    <dt>人物取景</dt>
+    <dd>{_text(item.row.framing)}</dd>
+    <dt>目标落点/身体区域</dt>
+    <dd>{_text(item.row.visible_body_regions)}</dd>
+    <dt>预计展示面积</dt>
+    <dd>{_text(item.row.product_visibility)}</dd>
+    <dt>衣领类型</dt>
+    <dd>{_text(item.row.collar_type)}</dd>
+    <dt>衣物遮挡风险</dt>
+    <dd>{_text(item.row.clothing_occlusion_risk)}</dd>
+    <dt>头发遮挡风险</dt>
+    <dd>{_text(item.row.hair_occlusion_risk)}</dd>
+    <dt>裁切风险</dt>
+    <dd>{_text(item.row.crop_risk)}</dd>
+    <dt>原有首饰</dt>
+    <dd>{_text(item.row.existing_jewelry)}</dd>
+    <dt>入选理由</dt>
     <dd>{_list(item.reason)}</dd>
-    <dt>risks</dt>
+    <dt>风险说明</dt>
     <dd>{_list(item.risk)}</dd>
-    <dt>ignored jewelry</dt>
+    <dt>需忽略首饰</dt>
     <dd>{_list(item.ignored_reference_jewelry)}</dd>
   </dl>
+  {_render_composition_snapshot(snapshot)}
 </article>"""
+
+
+def _render_composition_snapshot(
+    snapshot: ReferenceCompositionSnapshot | None,
+) -> str:
+    if snapshot is None:
+        return ""
+    pose = snapshot.pose
+    target = snapshot.replacement_target
+    risk_label = {
+        "none": "无",
+        "small_removable": "少量且可移除",
+        "blocking": "阻断",
+    }[snapshot.text_or_ui_risk]
+    visibility = "充足" if snapshot.product_visibility_sufficient else "不足"
+    pose_items = (
+        f"身体：{pose.body}",
+        f"手臂：{pose.arm}",
+        f"手部：{pose.hand}",
+        f"手侧：{pose.hand_side}",
+    )
+    return f"""<section class="composition-snapshot">
+    <h4>候选构图快照</h4>
+    <dl>
+      <dt>输出角色</dt><dd>{_text(snapshot.output_role.value)}</dd>
+      <dt>源图 SHA-256</dt><dd>{_text(snapshot.reference_sha256)}</dd>
+      <dt>景别</dt><dd>{_text(snapshot.framing)}</dd>
+      <dt>机位</dt><dd>{_text(snapshot.camera_angle)}</dd>
+      <dt>主体位置</dt><dd>{_text(snapshot.subject_placement)}</dd>
+      <dt>可见身体区域</dt><dd>{_list(snapshot.visible_body_regions)}</dd>
+      <dt>姿势</dt><dd>{_list(pose_items)}</dd>
+      <dt>服装</dt><dd>{_text(snapshot.clothing)}</dd>
+      <dt>背景</dt><dd>{_text(snapshot.background)}</dd>
+      <dt>光线</dt><dd>{_text(snapshot.lighting)}</dd>
+      <dt>目标替换位置</dt><dd>{_text(target.body_region)}</dd>
+      <dt>待替换原首饰</dt><dd>{_text(target.source_jewelry)}</dd>
+      <dt>目标产品数量</dt><dd>{_text(target.target_product_count)}</dd>
+      <dt>需移除首饰</dt><dd>{_list(snapshot.other_jewelry_to_remove)}</dd>
+      <dt>UI 风险</dt><dd>{_text(risk_label)}</dd>
+      <dt>展示面积</dt><dd>{_text(visibility)}</dd>
+      <dt>构图签名</dt><dd>{_text(snapshot.composition_signature)}</dd>
+    </dl>
+  </section>"""
 
 
 def _list(items: Sequence[str]) -> str:
     if not items:
         return "<ul><li>无</li></ul>"
     return "<ul>" + "".join(f"<li>{_text(item)}</li>" for item in items) + "</ul>"
+
+
+def _display_value(value: object) -> str:
+    if isinstance(value, (list, tuple)):
+        return _list(tuple(str(item) for item in value))
+    if isinstance(value, bool):
+        return _text("是" if value else "否")
+    if value is None or value == "":
+        return _text("未标注")
+    return _text(value)
 
 
 def _html_path(path: Path, review_dir: Path) -> str:

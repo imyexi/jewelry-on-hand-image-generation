@@ -23,6 +23,7 @@ from jewelry_on_hand.product_fidelity import load_product_fidelity_constraints
 from jewelry_on_hand.prompt_builder import build_prompt
 from jewelry_on_hand.qc import write_qc_result
 from jewelry_on_hand.reference_catalog import load_reference_rows
+from jewelry_on_hand.reference_composition import build_candidate_snapshot
 from jewelry_on_hand.review_decision import (
     ReviewGateError,
     require_generation_decision,
@@ -30,7 +31,10 @@ from jewelry_on_hand.review_decision import (
 )
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, create_run_id, read_json, write_json
-from jewelry_on_hand.scoring import select_top_references
+from jewelry_on_hand.scoring import (
+    select_batch_diverse_references,
+    select_top_references,
+)
 
 
 DEFAULT_OUTPUT_ROOT = "outputs/auto_reference_runs"
@@ -89,6 +93,14 @@ def _build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--no-wait", action="store_true")
     generate.set_defaults(handler=_generate)
 
+    rerank_batch = subparsers.add_parser(
+        "rerank-batch",
+        help="对多个既有 review run 执行批次级多样性重排。",
+    )
+    rerank_batch.add_argument("--output-root", required=True)
+    rerank_batch.add_argument("--run-id", action="append", required=True)
+    rerank_batch.set_defaults(handler=_rerank_batch)
+
     qc = subparsers.add_parser("qc", help="写入单次生成的质检结果。")
     qc.add_argument("--generation-dir", required=True)
     qc.add_argument("--status", required=True)
@@ -134,8 +146,18 @@ def _prepare_review(args: argparse.Namespace) -> int:
         paths.analysis_dir / OUTPUT_ROLE_FILE_NAME,
         {"output_role": output_role.value},
     )
-    selected, candidates = select_top_references(product, rows)
-    write_review_package(paths, copied_product, selected, candidates)
+    selected, candidates = select_top_references(product, rows, output_role)
+    snapshots = tuple(
+        build_candidate_snapshot(product, item, output_role)
+        for item in selected
+    )
+    write_review_package(
+        paths,
+        copied_product,
+        selected,
+        candidates,
+        composition_snapshots=snapshots,
+    )
     return 0
 
 
@@ -197,6 +219,91 @@ def _generate(args: argparse.Namespace) -> int:
         wait=not args.no_wait,
     )
     return 0
+
+
+def _rerank_batch(args: argparse.Namespace) -> int:
+    run_ids = list(args.run_id)
+    if len(run_ids) != len(set(run_ids)):
+        raise ValueError("rerank-batch 的 run-id 不能重复")
+
+    paths_list = [
+        _existing_batch_run_paths(args.output_root, run_id)
+        for run_id in run_ids
+    ]
+    products = []
+    output_roles = []
+    candidate_sets = []
+    for paths in paths_list:
+        decision_path = paths.review_dir / "review_decision.json"
+        if decision_path.exists():
+            raise ValueError(f"{paths.root} 已存在人工决策，拒绝批量重排")
+        products.append(
+            load_product_analysis(paths.analysis_dir / "product_analysis.json")
+        )
+        output_roles.append(
+            require_scene_replacement_role(
+                _load_run_output_role(paths),
+                stage=f"rerank-batch {paths.root.name}",
+            )
+        )
+        candidate_sets.append(
+            _load_selected_references(
+                paths.analysis_dir / "reference_candidates.json"
+            )
+        )
+
+    selections = select_batch_diverse_references(
+        candidate_sets,
+        output_roles,
+    )
+    snapshots_by_run = [
+        tuple(
+            build_candidate_snapshot(product, item, output_role)
+            for item in selected
+        )
+        for product, selected, output_role in zip(
+            products,
+            selections,
+            output_roles,
+            strict=True,
+        )
+    ]
+
+    for paths, selected, candidates, snapshots in zip(
+        paths_list,
+        selections,
+        candidate_sets,
+        snapshots_by_run,
+        strict=True,
+    ):
+        _remove_old_review_reference_copies(paths)
+        write_review_package(
+            paths,
+            paths.input_dir / "product-on-hand.jpg",
+            selected,
+            candidates,
+            composition_snapshots=snapshots,
+        )
+    return 0
+
+
+def _existing_batch_run_paths(
+    output_root: str | Path,
+    run_id: str,
+) -> RunPaths:
+    root = Path(output_root).resolve()
+    run_root = (root / run_id).resolve()
+    if not run_root.is_relative_to(root) or run_root.parent != root:
+        raise ValueError(f"rerank-batch 包含不安全的 run-id：{run_id!r}")
+    if not run_root.is_dir():
+        raise FileNotFoundError(run_root)
+    return RunPaths(root=run_root)
+
+
+def _remove_old_review_reference_copies(paths: RunPaths) -> None:
+    for path in paths.review_dir.glob("rank-*"):
+        if path.is_file():
+            path.unlink()
 
 
 def _record_output_role(
@@ -347,15 +454,15 @@ def _scored_reference_from_dict(item: Any, path: Path) -> ScoredReference:
         "file_name",
         metadata.get("file_name") or metadata.get("文件名") or Path(reference_path).name,
     )
-    row_data.setdefault("purpose_category", "")
+    row_data.setdefault("purpose_category", metadata.get("用途分类", ""))
     row_data.setdefault("bracelet_applicability", "")
     row_data.setdefault("default_strategy", "")
-    row_data.setdefault("style_category", "")
-    row_data.setdefault("scene_keywords", "")
-    row_data.setdefault("jewelry_type", "")
-    row_data.setdefault("recommended_usage", "")
-    row_data.setdefault("notes", "")
-    row_data.setdefault("confidence", "")
+    row_data.setdefault("style_category", metadata.get("风格分类", ""))
+    row_data.setdefault("scene_keywords", metadata.get("场景关键词", ""))
+    row_data.setdefault("jewelry_type", metadata.get("饰品类型", ""))
+    row_data.setdefault("recommended_usage", metadata.get("推荐使用方式", ""))
+    row_data.setdefault("notes", metadata.get("备注", ""))
+    row_data.setdefault("confidence", metadata.get("判断置信度", ""))
     row_data.setdefault("file_exists", Path(reference_path).is_file())
 
     row = ReferenceRow.from_dict(row_data)

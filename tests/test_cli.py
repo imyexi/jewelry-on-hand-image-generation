@@ -4,11 +4,13 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from jewelry_on_hand.models import ReferenceRow, ScoredReference
+from jewelry_on_hand.product_analysis import load_product_analysis
+from jewelry_on_hand.reference_composition import build_candidate_snapshot
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
-def make_catalog(path, ref):
+def make_catalog(path, ref, *, snapshot_overrides=None):
     wb = Workbook()
     ws = wb.active
     ws.title = "分类明细"
@@ -30,27 +32,52 @@ def make_catalog(path, ref):
             "推荐使用方式",
             "备注",
             "判断置信度",
+            "人物取景范围",
+            "可见身体区域",
+            "产品预计展示面积",
+            "衣领类型",
+            "衣物遮挡风险",
+            "姿势关键词",
+            "原有首饰类型",
+            "裁切风险",
+            "左右手",
+            "手部朝向",
         ]
     )
-    for i in range(1, 4):
+    snapshot_fields = {
+        "人物取景范围": "手部近景",
+        "可见身体区域": "左手腕 / 前臂完整露出",
+        "产品预计展示面积": "展示面积充足，大于 35%",
+        "衣领类型": "无衣领",
+        "衣物遮挡风险": "衣物无遮挡",
+        "姿势关键词": "身体未入镜，前臂自然抬起",
+        "原有首饰类型": "左手腕原有手链可完整识别并移除",
+        "裁切风险": "裁切风险低",
+        "左右手": "左手",
+        "手部朝向": "手背朝向镜头",
+    }
+    snapshot_fields.update(snapshot_overrides or {})
+    purposes = ["手部佩戴图"] * 3 + ["生活场景图"] * 3
+    for i, purpose in enumerate(purposes, start=1):
         ws.append(
             [
                 i,
-                f"ref{i}.jpg",
-                f"ref{i}.jpg",
+                ref.name,
+                ref.name,
                 str(ref),
                 100,
                 200,
                 0.1,
-                "上手姿势/手模构图参考",
+                purpose,
                 "是：可用于手链/手串",
                 "常规可优先使用",
                 "暗调闪光",
                 "车内 闪光",
                 "手链/手串",
                 "近景手腕",
-                "手腕/前臂露出面积足",
+                "正面视角，主体居中，无文字或 UI，手腕/前臂露出面积足",
                 "高",
+                *snapshot_fields.values(),
             ]
         )
     wb.save(path)
@@ -152,6 +179,13 @@ def test_prepare_review_cli_creates_review_html(tmp_path):
     assert "must_keep" in fidelity
     assert fidelity["review_status"] in {"pending", "not_applicable"}
     assert read_json(run_root / "analysis" / "product_analysis.json")["product_type"] == "手链/手串"
+    snapshots = read_json(
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    assert [item["rank"] for item in snapshots] == [1, 2, 3]
+    assert "产品身份图" in (run_root / "review" / "review.html").read_text(
+        encoding="utf-8"
+    )
     assert not (run_root / "review" / "review_decision.json").exists()
 
 
@@ -828,7 +862,42 @@ def test_generate_cli_preserves_mirror_relative_path_from_review_package(tmp_pat
         risk=[],
         ignored_reference_jewelry=[],
     )
-    write_review_package(paths, product, [scored], [scored])
+    scored = ScoredReference(
+        ReferenceRow(
+            **{
+                **scored.row.__dict__,
+                "framing": "对镜近景",
+                "visible_body_regions": "左手腕 / 前臂",
+                "product_visibility": "展示面积充足",
+                "collar_type": "无衣领",
+                "clothing_occlusion_risk": "衣物无遮挡",
+                "pose_keywords": "身体在镜中，前臂自然抬起",
+                "existing_jewelry": "左手腕原有手链",
+                "crop_risk": "裁切风险低",
+                "hand_side": "左手",
+                "hand_orientation": "手背朝向镜头",
+                "notes": "正面视角，主体居中，无文字或 UI",
+            }
+        ),
+        scored.score,
+        scored.rank,
+        scored.reason,
+        scored.risk,
+        scored.ignored_reference_jewelry,
+    )
+    write_review_package(
+        paths,
+        product,
+        [scored],
+        [scored],
+        composition_snapshots=[
+            build_candidate_snapshot(
+                load_product_analysis(paths.analysis_dir / "product_analysis.json"),
+                scored,
+                "hand_worn",
+            )
+        ],
+    )
     make_constraints(paths.analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
     write_json(paths.review_dir / "review_decision.json", {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
@@ -1129,3 +1198,133 @@ def test_生成时运行角色与决策角色不一致则不调用生成助手(
 
     assert "不一致" in capsys.readouterr().err
     assert helper_called is False
+
+
+def test_准备审核缺少输出角色时失败且不创建决策(tmp_path, capsys):
+    from jewelry_on_hand.cli import main
+
+    product = tmp_path / "product.jpg"
+    product.write_bytes(b"product")
+    output_root = tmp_path / "runs"
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product),
+            "--classification",
+            str(tmp_path / "unused.xlsx"),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "missing-role",
+        ]
+    ) != 0
+
+    assert "必须显式提供" in capsys.readouterr().err
+    assert not (output_root / "missing-role" / "review" / "review_decision.json").exists()
+
+
+def test_准备审核快照必填字段缺失时失败且不创建决策(tmp_path, capsys):
+    from jewelry_on_hand.cli import main
+
+    product = tmp_path / "product.jpg"
+    product.write_bytes(b"product")
+    reference = tmp_path / "reference.jpg"
+    reference.write_bytes(b"reference")
+    catalog = tmp_path / "catalog.xlsx"
+    make_catalog(catalog, reference, snapshot_overrides={"姿势关键词": ""})
+    analysis = tmp_path / "analysis.json"
+    make_analysis(analysis)
+    output_root = tmp_path / "runs"
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product),
+            "--analysis-json",
+            str(analysis),
+            "--classification",
+            str(catalog),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "missing-field",
+            "--output-role",
+            "hand_worn",
+        ]
+    ) != 0
+
+    assert "pose_keywords" in capsys.readouterr().err
+    assert not (
+        output_root / "missing-field" / "review" / "review_decision.json"
+    ).exists()
+
+
+def test_批量重排加载各运行角色并清除旧快照后重建审核包(tmp_path):
+    from jewelry_on_hand.cli import main
+
+    product = tmp_path / "product.jpg"
+    product.write_bytes(b"product")
+    reference = tmp_path / "reference.jpg"
+    reference.write_bytes(b"reference")
+    catalog = tmp_path / "catalog.xlsx"
+    make_catalog(catalog, reference)
+    analysis = tmp_path / "analysis.json"
+    make_analysis(analysis)
+    output_root = tmp_path / "runs"
+
+    for run_id, output_role in (("hand", "hand_worn"), ("life", "lifestyle")):
+        assert main(
+            [
+                "prepare-review",
+                "--product-image",
+                str(product),
+                "--analysis-json",
+                str(analysis),
+                "--classification",
+                str(catalog),
+                "--output-root",
+                str(output_root),
+                "--run-id",
+                run_id,
+                "--output-role",
+                output_role,
+            ]
+        ) == 0
+        run_root = output_root / run_id
+        write_json(
+            run_root / "analysis" / "reference_composition_snapshots.json",
+            [{"rank": 99, "stale": True}],
+        )
+        (run_root / "review" / "rank-99-stale.jpg").write_bytes(b"stale")
+
+    assert main(
+        [
+            "rerank-batch",
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "hand",
+            "--run-id",
+            "life",
+        ]
+    ) == 0
+
+    for run_id, expected_role in (("hand", "hand_worn"), ("life", "lifestyle")):
+        run_root = output_root / run_id
+        selected = read_json(run_root / "analysis" / "selected_references.json")
+        snapshots = read_json(
+            run_root / "analysis" / "reference_composition_snapshots.json"
+        )
+        assert len(selected) == len(snapshots) == 3
+        assert {item["rank"] for item in snapshots} == {
+            item["rank"] for item in selected
+        }
+        assert {item["output_role"] for item in snapshots} == {expected_role}
+        assert not (run_root / "review" / "rank-99-stale.jpg").exists()
+        assert "预计展示面积不足时不要选择" in (
+            run_root / "review" / "review.html"
+        ).read_text(encoding="utf-8")
+        assert not (run_root / "review" / "review_decision.json").exists()

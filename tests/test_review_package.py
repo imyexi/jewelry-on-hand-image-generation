@@ -1,10 +1,15 @@
 import re
+from hashlib import sha256
 from pathlib import Path
 from urllib.parse import unquote
 
 import pytest
 
-from jewelry_on_hand.models import ReferenceRow, ScoredReference
+from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
+from jewelry_on_hand.reference_composition import (
+    ReferenceCompositionSnapshot,
+    build_candidate_snapshot,
+)
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
@@ -49,9 +54,22 @@ def make_scored(
     risk: list[str] | None = None,
     ignored_reference_jewelry: list[str] | None = None,
     reference_fields: dict[str, str] | None = None,
+    notes: str = "正面视角，主体居中，无文字或 UI",
 ) -> ScoredReference:
     ref = tmp_path / file_name
     ref.write_bytes(b"ref")
+    complete_reference_fields = {
+        "framing": "手部近景",
+        "visible_body_regions": "左手腕 / 前臂",
+        "product_visibility": "展示面积充足，大于 35%",
+        "collar_type": "无衣领",
+        "clothing_occlusion_risk": "衣物无遮挡",
+        "pose_keywords": "身体未入镜，前臂自然抬起",
+        "existing_jewelry": "左手腕原有手链",
+        "hand_side": "左手",
+        "hand_orientation": "手背朝向镜头",
+    }
+    complete_reference_fields.update(reference_fields or {})
     row = ReferenceRow(
         index,
         file_name,
@@ -67,10 +85,10 @@ def make_scored(
         scene_keywords,
         "手链/手串",
         "近景",
-        "手腕露出",
+        notes,
         "高",
         True,
-        **(reference_fields or {}),
+        **complete_reference_fields,
     )
     return ScoredReference(
         row,
@@ -82,34 +100,54 @@ def make_scored(
     )
 
 
+def make_snapshot_product() -> ProductAnalysis:
+    return ProductAnalysis.from_dict(
+        {
+            "product_type": "手链/手串",
+            "wear_position": "手腕",
+            "visible_appearance": "深红主珠手链",
+            "color_family": ["深红"],
+            "style_mood": "暗调闪光",
+            "composition": "手腕近景",
+            "product_dimensions": {},
+            "needs_full_front_display": True,
+            "special_requirements": [],
+        }
+    )
+
+
+def make_snapshots(
+    selected: list[ScoredReference],
+) -> list[ReferenceCompositionSnapshot]:
+    product = make_snapshot_product()
+    return [
+        build_candidate_snapshot(product, item, "hand_worn")
+        for item in selected
+    ]
+
+
+def write_package(
+    paths: RunPaths,
+    product: Path,
+    selected: list[ScoredReference],
+    candidates: list[ScoredReference],
+) -> Path:
+    return write_review_package(
+        paths,
+        product,
+        selected,
+        candidates,
+        composition_snapshots=make_snapshots(selected),
+    )
+
+
 def test_write_review_package_outputs_json_and_html(tmp_path):
     paths = RunPaths.create(tmp_path, "run-1")
     product = paths.input_dir / "product-on-hand.jpg"
     product.write_bytes(b"product")
-    ref = tmp_path / "ref.jpg"
-    ref.write_bytes(b"ref")
-    row = ReferenceRow(
-        1,
-        "ref.jpg",
-        "ref.jpg",
-        ref,
-        100,
-        200,
-        0.1,
-        "上手姿势/手模构图参考",
-        "是",
-        "常规可优先使用",
-        "暗调闪光",
-        "车内",
-        "手链/手串",
-        "近景",
-        "手腕露出",
-        "高",
-        True,
-    )
-    scored = [ScoredReference(row, 100, 1, ["理由"], ["风险"], ["参考图中的原有手链"])]
+    scored = [make_scored(tmp_path)]
 
-    html = write_review_package(paths, product, scored, scored)
+    html = write_package(paths, product, scored, scored)
 
     assert "Top 3 参考图" in html.read_text(encoding="utf-8")
     assert read_json(paths.analysis_dir / "selected_references.json")[0]["rank"] == 1
@@ -124,7 +162,7 @@ def test_write_review_package_displays_product_fidelity_constraints(tmp_path):
     write_json(paths.analysis_dir / "product_fidelity_constraints.json", constraints_data(review_status="pending"))
     selected = [make_scored(tmp_path, 1)]
 
-    html = write_review_package(paths, product, selected, selected).read_text(encoding="utf-8")
+    html = write_package(paths, product, selected, selected).read_text(encoding="utf-8")
 
     assert "产品保真约束" in html
     assert "关键识别点" in html
@@ -143,7 +181,7 @@ def test_write_review_package_copies_selected_references_and_writes_candidates(t
     ]
     candidates = [*selected, make_scored(tmp_path, 3, file_name="ref-three.jpg")]
 
-    write_review_package(paths, product, selected, candidates)
+    write_package(paths, product, selected, candidates)
 
     assert (paths.review_dir / "rank-1-ref-one.jpg").read_bytes() == b"ref"
     assert (paths.review_dir / "rank-2-ref-two.jpg").read_bytes() == b"ref"
@@ -178,7 +216,7 @@ def test_write_review_package_escapes_html_fields(tmp_path):
         )
     ]
 
-    html = write_review_package(paths, product, selected, selected).read_text(encoding="utf-8")
+    html = write_package(paths, product, selected, selected).read_text(encoding="utf-8")
 
     assert "<script>用途</script>" not in html
     assert "evil-&-ref.jpg" not in html
@@ -244,7 +282,7 @@ def test_review_page_displays_and_escapes_product_confirmation_and_reference_ris
         )
     ]
 
-    html = write_review_package(paths, product, selected, selected).read_text(encoding="utf-8")
+    html = write_package(paths, product, selected, selected).read_text(encoding="utf-8")
 
     for expected in (
         "产品确认",
@@ -320,7 +358,7 @@ def test_review_page_shows_explicit_unsupported_reason(tmp_path):
     )
     selected = [make_scored(tmp_path)]
 
-    html = write_review_package(paths, product, selected, selected).read_text(encoding="utf-8")
+    html = write_package(paths, product, selected, selected).read_text(encoding="utf-8")
 
     assert "当前版本不支持无链独立吊坠，且禁止自动补链" in html
 
@@ -331,7 +369,7 @@ def test_write_review_package_url_encodes_image_src(tmp_path):
     product.write_bytes(b"product")
     selected = [make_scored(tmp_path, 1, file_name="ref#1 %.jpg")]
 
-    html = write_review_package(paths, product, selected, selected).read_text(encoding="utf-8")
+    html = write_package(paths, product, selected, selected).read_text(encoding="utf-8")
 
     match = re.search(r'<img class="reference-image" src="([^"]+)"', html)
     assert match is not None
@@ -349,7 +387,7 @@ def test_write_review_package_rejects_external_product_image(tmp_path):
     selected = [make_scored(tmp_path, 1)]
 
     with pytest.raises(ValueError, match="\u4ea7\u54c1\u56fe.*run"):
-        write_review_package(paths, external_product, selected, selected)
+        write_package(paths, external_product, selected, selected)
 
 
 def test_write_review_package_rejects_duplicate_selected_rank(tmp_path):
@@ -362,4 +400,79 @@ def test_write_review_package_rejects_duplicate_selected_rank(tmp_path):
     ]
 
     with pytest.raises(ValueError, match="\u91cd\u590d rank"):
-        write_review_package(paths, product, selected, selected)
+        write_package(paths, product, selected, selected)
+
+
+def test_审核包写入并结构化展示候选构图快照(tmp_path):
+    paths = RunPaths.create(tmp_path, "run-1")
+    product_image = paths.input_dir / "product-on-hand.jpg"
+    product_image.write_bytes(b"product")
+    selected = [
+        make_scored(tmp_path, rank, file_name=f"ref-{rank}.jpg")
+        for rank in (1, 2, 3)
+    ]
+    snapshots = make_snapshots(selected)
+
+    html_path = write_review_package(
+        paths,
+        product_image,
+        selected,
+        selected,
+        composition_snapshots=snapshots,
+    )
+
+    snapshot_data = read_json(
+        paths.analysis_dir / "reference_composition_snapshots.json"
+    )
+    selected_data = read_json(paths.analysis_dir / "selected_references.json")
+    html = html_path.read_text(encoding="utf-8")
+    assert [item["rank"] for item in snapshot_data] == [1, 2, 3]
+    assert snapshot_data[0]["reference_sha256"] == sha256(b"ref").hexdigest()
+    assert selected_data[0]["source_sha256"] == sha256(b"ref").hexdigest()
+    assert selected_data[0]["review_sha256"] == sha256(b"ref").hexdigest()
+    assert selected_data[0]["metadata"]["source_sha256"] == sha256(b"ref").hexdigest()
+    assert selected_data[0]["metadata"]["review_sha256"] == sha256(b"ref").hexdigest()
+    for label in (
+        "参考底图",
+        "产品身份图",
+        "景别",
+        "机位",
+        "主体位置",
+        "可见身体区域",
+        "姿势",
+        "服装",
+        "背景",
+        "光线",
+        "目标替换位置",
+        "需移除首饰",
+        "UI 风险",
+        "展示面积",
+        "预计展示面积不足时不要选择",
+    ):
+        assert label in html
+    assert snapshots[0].subject_placement in html
+    assert "@media (max-width: 720px)" in html
+
+
+def test_审核包拒绝快照与已选_rank_集合不一致且不写产物(tmp_path):
+    paths = RunPaths.create(tmp_path, "run-1")
+    product_image = paths.input_dir / "product-on-hand.jpg"
+    product_image.write_bytes(b"product")
+    selected = [make_scored(tmp_path, 1, file_name="ref-1.jpg")]
+    wrong_snapshot = make_snapshots(
+        [make_scored(tmp_path, 2, file_name="ref-2.jpg")]
+    )
+
+    with pytest.raises(ValueError, match="快照.*rank.*selected"):
+        write_review_package(
+            paths,
+            product_image,
+            selected,
+            selected,
+            composition_snapshots=wrong_snapshot,
+        )
+
+    assert not (
+        paths.analysis_dir / "reference_composition_snapshots.json"
+    ).exists()
+    assert not (paths.review_dir / "review_decision.json").exists()
