@@ -13,8 +13,16 @@ from jewelry_on_hand.models import (
 )
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
 from jewelry_on_hand.product_analysis import load_product_analysis
+from jewelry_on_hand.product_analysis import product_analysis_to_dict
 from jewelry_on_hand.qc import build_qc_checklist, qc_check_id
+from jewelry_on_hand.qc_review import (
+    build_reference_preservation_checklist,
+    write_qc_review_page,
+)
 from jewelry_on_hand.reference_composition import (
+    ReferenceCompositionSnapshot,
+    ReferencePose,
+    ReplacementTarget,
     build_candidate_snapshot,
     reference_composition_sha256,
 )
@@ -29,8 +37,9 @@ def test_qc_cli_rejects_non_string_fidelity_check_notes_without_writing(
 ):
     from jewelry_on_hand.cli import main
 
-    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
-    checks_json = tmp_path / "fidelity-checks.json"
+    generation_dir, checks_json, checklist_json, reference_json = (
+        _ready_cli_qc_generation(tmp_path)
+    )
     write_json(
         checks_json,
         [
@@ -54,6 +63,10 @@ def test_qc_cli_rejects_non_string_fidelity_check_notes_without_writing(
             "需要复核",
             "--fidelity-checks-json",
             str(checks_json),
+            "--checklist-checks-json",
+            str(checklist_json),
+            "--reference-preservation-checks-json",
+            str(reference_json),
         ]
     )
 
@@ -62,12 +75,27 @@ def test_qc_cli_rejects_non_string_fidelity_check_notes_without_writing(
     assert not (generation_dir / "qc.json").exists()
 
 
-def test_qc_cli_checklist_path_fails_closed_until_task8(tmp_path, capsys):
+def test_qc_cli_requires_all_three_check_json_arguments(tmp_path):
     from jewelry_on_hand.cli import main
 
-    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
-    checklist_json = tmp_path / "checklist.json"
-    write_json(checklist_json, [{"id": "future-task8-check"}])
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "qc",
+                "--generation-dir",
+                str(tmp_path / "generation" / "01"),
+                "--status",
+                "pass",
+            ]
+        )
+
+
+def test_qc_cli_writes_complete_modern_three_layer_result(tmp_path):
+    from jewelry_on_hand.cli import main
+
+    generation_dir, fidelity, checklist, reference = _ready_cli_qc_generation(
+        tmp_path
+    )
 
     result = main(
         [
@@ -76,13 +104,58 @@ def test_qc_cli_checklist_path_fails_closed_until_task8(tmp_path, capsys):
             str(generation_dir),
             "--status",
             "pass",
+            "--passed",
+            "三层人工复核完成",
+            "--notes",
+            "逐项对照四栏页面",
+            "--fidelity-checks-json",
+            str(fidelity),
             "--checklist-checks-json",
-            str(checklist_json),
+            str(checklist),
+            "--reference-preservation-checks-json",
+            str(reference),
         ]
     )
 
-    assert result == 1
-    assert "Task 8" in capsys.readouterr().err
+    payload = read_json(generation_dir / "qc.json")
+    assert result == 0
+    assert payload["status"] == "pass"
+    assert payload["reference_preservation_checks"]
+    assert "fidelity_checks" in payload
+    assert payload["checklist_checks"]
+
+
+def test_qc_cli_rejects_legacy_or_hero_generation_without_writing(tmp_path, capsys):
+    from jewelry_on_hand.cli import main
+
+    generation_dir, fidelity, checklist, reference = _ready_cli_qc_generation(
+        tmp_path
+    )
+    (generation_dir / "input-manifest.json").unlink()
+    args = [
+        "qc",
+        "--generation-dir",
+        str(generation_dir),
+        "--status",
+        "pass",
+        "--fidelity-checks-json",
+        str(fidelity),
+        "--checklist-checks-json",
+        str(checklist),
+        "--reference-preservation-checks-json",
+        str(reference),
+    ]
+
+    assert main(args) == 1
+    assert "历史离线 QC 仅可只读" in capsys.readouterr().err
+    assert not (generation_dir / "qc.json").exists()
+
+    write_json(
+        generation_dir / "input-manifest.json",
+        {"schema_version": 1, "output_role": "hero"},
+    )
+    assert main(args) == 1
+    assert "主图" in capsys.readouterr().err
     assert not (generation_dir / "qc.json").exists()
 
 
@@ -1461,7 +1534,9 @@ def test_record_decision_cli_invalid_ring_correction_changes_nothing(tmp_path, c
 def test_qc_cli_writes_qc_json(tmp_path):
     from jewelry_on_hand.cli import main
 
-    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
+    generation_dir, fidelity_json, checklist_json, reference_json = (
+        _ready_cli_qc_generation(tmp_path)
+    )
 
     assert (
         main(
@@ -1477,36 +1552,34 @@ def test_qc_cli_writes_qc_json(tmp_path):
                 "主珠被裁切",
                 "--notes",
                 "复跑",
+                "--fidelity-checks-json",
+                str(fidelity_json),
+                "--checklist-checks-json",
+                str(checklist_json),
+                "--reference-preservation-checks-json",
+                str(reference_json),
             ]
         )
         == 0
     )
 
-    assert read_json(generation_dir / "qc.json") == {
-        "status": "rerun",
-        "passed": ["无水印", "构图正确"],
-        "failed": ["主珠被裁切"],
-        "notes": "复跑",
-        "fidelity_checks": [],
-    }
+    payload = read_json(generation_dir / "qc.json")
+    assert payload["status"] == "rerun"
+    assert payload["passed"] == ["无水印", "构图正确"]
+    assert payload["failed"] == ["主珠被裁切"]
+    assert payload["notes"] == "复跑"
+    assert payload["reference_preservation_checks"]
+    assert payload["checklist_checks"]
 
 
 def test_qc_cli_writes_fidelity_checks_from_json(tmp_path):
     from jewelry_on_hand.cli import main
 
-    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
-    checks_json = tmp_path / "fidelity-checks.json"
-    write_json(
-        checks_json,
-        [
-            {
-                "name": "白水晶随形",
-                "question": "白水晶随形是否仍是不规则透明异形珠",
-                "result": "fail",
-                "notes": "变成圆珠",
-            }
-        ],
+    generation_dir, checks_json, checklist_json, reference_json = (
+        _ready_cli_qc_generation(tmp_path)
     )
+    checks = read_json(checks_json)
+    assert checks
 
     assert (
         main(
@@ -1520,18 +1593,24 @@ def test_qc_cli_writes_fidelity_checks_from_json(tmp_path):
                 "关键识别点失败",
                 "--fidelity-checks-json",
                 str(checks_json),
+                "--checklist-checks-json",
+                str(checklist_json),
+                "--reference-preservation-checks-json",
+                str(reference_json),
             ]
         )
         == 0
     )
 
-    assert read_json(generation_dir / "qc.json")["fidelity_checks"][0]["result"] == "fail"
+    assert read_json(generation_dir / "qc.json")["fidelity_checks"] == checks
 
 
 def test_qc_cli_strict_critical_failures_accepts_repeated_and_csv(tmp_path):
     from jewelry_on_hand.cli import main
 
-    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
+    generation_dir, fidelity_json, checklist_json, reference_json = (
+        _ready_cli_qc_generation(tmp_path)
+    )
 
     assert main(
         [
@@ -1540,6 +1619,12 @@ def test_qc_cli_strict_critical_failures_accepts_repeated_and_csv(tmp_path):
             str(generation_dir),
             "--status",
             "reject",
+            "--fidelity-checks-json",
+            str(fidelity_json),
+            "--checklist-checks-json",
+            str(checklist_json),
+            "--reference-preservation-checks-json",
+            str(reference_json),
             "--critical-failures",
             "auto_chain_added,layer_count_mismatch",
             "--critical-failures",
@@ -1572,7 +1657,9 @@ def test_qc_cli_strict_critical_failures_rejects_empty_segments(
 ):
     from jewelry_on_hand.cli import main
 
-    generation_dir = tmp_path / "runs" / str(len(critical_args)) / "generation" / "01"
+    generation_dir, fidelity_json, checklist_json, reference_json = (
+        _ready_cli_qc_generation(tmp_path)
+    )
     assert main(
         [
             "qc",
@@ -1580,6 +1667,12 @@ def test_qc_cli_strict_critical_failures_rejects_empty_segments(
             str(generation_dir),
             "--status",
             "reject",
+            "--fidelity-checks-json",
+            str(fidelity_json),
+            "--checklist-checks-json",
+            str(checklist_json),
+            "--reference-preservation-checks-json",
+            str(reference_json),
             *critical_args,
         ]
     ) != 0
@@ -1608,13 +1701,21 @@ def test_qc_cli_critical_failures_preserves_model_validation(
 ):
     from jewelry_on_hand.cli import main
 
-    generation_dir = tmp_path / "runs" / status / "generation" / "01"
+    generation_dir, fidelity_json, checklist_json, reference_json = (
+        _ready_cli_qc_generation(tmp_path)
+    )
     args = [
         "qc",
         "--generation-dir",
         str(generation_dir),
         "--status",
         status,
+        "--fidelity-checks-json",
+        str(fidelity_json),
+        "--checklist-checks-json",
+        str(checklist_json),
+        "--reference-preservation-checks-json",
+        str(reference_json),
     ]
     for value in critical_args:
         args.extend(["--critical-failures", value])
@@ -2507,3 +2608,120 @@ def _assert_task9_submit_call(
     assert reference_copy.read_bytes() == expected_reference_path.read_bytes()
     expected_product_path = expected_product or run_root / "input" / "product-on-hand.jpg"
     assert command[image_indexes[1] + 1] == str(expected_product_path)
+
+
+def _ready_cli_qc_generation(tmp_path):
+    generation_dir = tmp_path / "run" / "generation" / "01"
+    generation_dir.mkdir(parents=True)
+    analysis = ProductAnalysis.from_dict(
+        {
+            "product_type": "bracelet",
+            "detected_product_type": "bracelet",
+            "confirmed_product_type": "bracelet",
+            "classification_confidence": "high",
+            "classification_evidence": ["手腕处可见闭合珠串"],
+            "classification_source": "manual_override",
+            "display_mode": "worn",
+            "source_image_type": "worn_source",
+            "wear_position": "手腕",
+            "visible_appearance": "圆珠手链主珠右侧有一颗透明随形",
+            "color_family": ["海蓝", "透明"],
+            "style_mood": "清透",
+            "composition": "真人手腕近景",
+            "product_dimensions": {"bead_diameter_mm": 8.0},
+            "needs_full_front_display": True,
+            "special_requirements": ["保持可见珠序"],
+            "layer_count": 1,
+            "has_pendant": False,
+            "pendant_count": 0,
+            "pendant_layer": None,
+            "is_independent_multi_item": False,
+        }
+    )
+    constraints_data = build_product_fidelity_constraints(analysis).to_dict()
+    if constraints_data["review_status"] == "pending":
+        constraints_data["review_status"] = "confirmed"
+    constraints = ProductFidelityConstraints.from_dict(constraints_data)
+    snapshot = ReferenceCompositionSnapshot(
+        rank=1,
+        reference_file="rank-1-scene.jpg",
+        reference_sha256="1" * 64,
+        output_role="hand_worn",
+        framing="手腕近景",
+        camera_angle="平视",
+        subject_placement="手腕居中",
+        visible_body_regions=("左手腕",),
+        pose=ReferencePose("身体未入镜", "前臂横向", "手背朝上", "左手"),
+        clothing="黑色袖口",
+        background="深色木纹",
+        lighting="左侧柔光",
+        replacement_target=ReplacementTarget("左手腕", "原手串", 1),
+        other_jewelry_to_remove=(),
+        text_or_ui_risk="none",
+        product_visibility_sufficient=True,
+        composition_signature="signature",
+    )
+    write_json(
+        generation_dir / "product-analysis.json",
+        product_analysis_to_dict(analysis),
+    )
+    write_json(
+        generation_dir / "product-fidelity-constraints.json",
+        constraints_data,
+    )
+    write_json(
+        generation_dir / "reference-composition-snapshot.json",
+        snapshot.to_dict(),
+    )
+    write_json(
+        generation_dir / "input-manifest.json",
+        {"schema_version": 1, "output_role": "hand_worn"},
+    )
+    (generation_dir / "scene-reference.jpg").write_bytes(b"scene")
+    (generation_dir / "product-reference.jpg").write_bytes(b"product")
+    (generation_dir / "result.png").write_bytes(b"result")
+    write_qc_review_page(generation_dir)
+
+    fidelity_path = tmp_path / "fidelity-checks.json"
+    write_json(
+        fidelity_path,
+        [
+            {
+                "name": item.name,
+                "question": item.qc_question,
+                "result": "pass",
+                "notes": f"对照产品图确认 {item.name} 结构和位置一致",
+            }
+            for item in constraints.must_keep
+        ],
+    )
+    checklist_path = tmp_path / "checklist-checks.json"
+    write_json(
+        checklist_path,
+        [
+            {
+                "id": item.id,
+                "question": item.question,
+                "result": "pass",
+                "notes": f"逐项检查确认：{item.question}",
+            }
+            for item in build_qc_checklist(
+                product_analysis=analysis,
+                fidelity_constraints=constraints,
+            )
+        ],
+    )
+    reference_path = tmp_path / "reference-preservation-checks.json"
+    write_json(
+        reference_path,
+        [
+            {
+                "name": name,
+                "question": question,
+                "result": "pass",
+                "notes": f"对照参考底图网格确认 {name} 保持一致",
+            }
+            for name, question in build_reference_preservation_checklist(snapshot)
+        ],
+    )
+    return generation_dir, fidelity_path, checklist_path, reference_path

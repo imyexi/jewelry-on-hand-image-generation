@@ -1310,6 +1310,31 @@ def test_qc_result_accepts_fidelity_checks_for_rerun_and_copies_items():
     assert result.fidelity_checks[0].result == "fail"
 
 
+@pytest.mark.parametrize(
+    "critical_failure",
+    [
+        "reference_framing_changed",
+        "reference_pose_changed",
+        "reference_person_changed",
+        "reference_clothing_changed",
+        "reference_background_changed",
+        "reference_lighting_changed",
+        "reference_jewelry_leakage",
+        "replacement_target_changed",
+        "target_product_duplicated",
+    ],
+)
+def test_reference_structure_critical_failures_require_reject(critical_failure):
+    with pytest.raises(ValueError, match="必须标记为 reject"):
+        QcResult(
+            status="rerun",
+            passed=(),
+            failed=("参考底图结构未保持",),
+            notes="需要重新生成",
+            critical_failures=(critical_failure,),
+        )
+
+
 @pytest.mark.parametrize("notes", [None, "", "肉眼复核通过"])
 def test_fidelity_check_from_dict_accepts_only_optional_string_notes(notes):
     payload = {

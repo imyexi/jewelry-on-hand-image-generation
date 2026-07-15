@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -1849,6 +1850,15 @@ QcCriticalFailure = Literal[
     "ring_contact_error",
     "finger_deformation",
     "source_hand_leakage",
+    "reference_framing_changed",
+    "reference_pose_changed",
+    "reference_person_changed",
+    "reference_clothing_changed",
+    "reference_background_changed",
+    "reference_lighting_changed",
+    "reference_jewelry_leakage",
+    "replacement_target_changed",
+    "target_product_duplicated",
 ]
 
 _QC_CRITICAL_FAILURES = {
@@ -1870,6 +1880,15 @@ _QC_CRITICAL_FAILURES = {
     "ring_contact_error",
     "finger_deformation",
     "source_hand_leakage",
+    "reference_framing_changed",
+    "reference_pose_changed",
+    "reference_person_changed",
+    "reference_clothing_changed",
+    "reference_background_changed",
+    "reference_lighting_changed",
+    "reference_jewelry_leakage",
+    "replacement_target_changed",
+    "target_product_duplicated",
 }
 
 _QC_REJECT_FAILURES = {
@@ -1883,6 +1902,15 @@ _QC_REJECT_FAILURES = {
     "ring_structure_mismatch",
     "centerpiece_mismatch",
     "source_hand_leakage",
+    "reference_framing_changed",
+    "reference_pose_changed",
+    "reference_person_changed",
+    "reference_clothing_changed",
+    "reference_background_changed",
+    "reference_lighting_changed",
+    "reference_jewelry_leakage",
+    "replacement_target_changed",
+    "target_product_duplicated",
 }
 
 _QC_REJECT_FAILURE_TERMS = (
@@ -1913,6 +1941,9 @@ class QcResult:
     notes: str
     fidelity_checks: tuple["FidelityCheck", ...] = field(default_factory=tuple)
     checklist_checks: tuple["QcChecklistCheck", ...] = field(default_factory=tuple)
+    reference_preservation_checks: tuple["ReferencePreservationCheck", ...] = field(
+        default_factory=tuple
+    )
     critical_failures: tuple[QcCriticalFailure, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -1933,6 +1964,19 @@ class QcResult:
             check.result != "pass" for check in checklist_checks
         ):
             raise ValueError("checklist_checks 存在未通过项时不得标记为 pass")
+        reference_checks = _parse_reference_preservation_checks(
+            self.reference_preservation_checks
+        )
+        if self.status == "pass" and any(
+            check.result != "pass" for check in reference_checks
+        ):
+            raise ValueError(
+                "reference_preservation_checks 存在未通过项时不得标记为 pass"
+            )
+        if self.status != "reject" and any(
+            check.result == "fail" for check in reference_checks
+        ):
+            raise ValueError("参考底图保留检查失败时必须标记为 reject")
         critical_failures = _parse_qc_critical_failures(self.critical_failures)
         if self.status == "pass" and critical_failures:
             raise ValueError("存在关键 QC 失败时不得标记为 pass")
@@ -1943,6 +1987,11 @@ class QcResult:
             raise ValueError("品类、结构、自动补链或严重穿模错误必须标记为 reject")
         object.__setattr__(self, "fidelity_checks", checks)
         object.__setattr__(self, "checklist_checks", checklist_checks)
+        object.__setattr__(
+            self,
+            "reference_preservation_checks",
+            reference_checks,
+        )
         object.__setattr__(self, "critical_failures", critical_failures)
 
 
@@ -2031,6 +2080,80 @@ class QcChecklistCheck:
         }
 
 
+ReferencePreservationCheckResult = Literal["pass", "rerun", "fail"]
+
+
+@dataclass(frozen=True)
+class ReferencePreservationCheck:
+    name: str
+    question: str
+    result: ReferencePreservationCheckResult
+    notes: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "name",
+            _required_string_value(self.name, "reference_preservation_checks.name"),
+        )
+        object.__setattr__(
+            self,
+            "question",
+            _required_string_value(
+                self.question,
+                "reference_preservation_checks.question",
+            ),
+        )
+        if self.result not in {"pass", "rerun", "fail"}:
+            raise ValueError(
+                "reference_preservation_checks.result 必须是 pass/rerun/fail"
+            )
+        notes = _required_string_value(
+            self.notes,
+            "reference_preservation_checks.notes",
+        )
+        normalized = "".join(
+            character
+            for character in notes.casefold()
+            if not unicodedata.category(character).startswith(("P", "S", "Z"))
+            and unicodedata.category(character) != "Cf"
+        )
+        if normalized in {
+            "通过",
+            "符合",
+            "正常",
+            "无问题",
+            "已确认",
+            "人工qc通过",
+            "人工质检通过",
+        }:
+            raise ValueError(
+                "reference_preservation_checks.notes 必须是可验证的人工说明"
+            )
+        object.__setattr__(self, "notes", notes)
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any] | None,
+    ) -> "ReferencePreservationCheck":
+        source = _ensure_mapping(data, "ReferencePreservationCheck")
+        return cls(
+            name=_required_string(source, "name"),
+            question=_required_string(source, "question"),
+            result=_required_string(source, "result"),  # type: ignore[arg-type]
+            notes=_required_string(source, "notes"),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "question": self.question,
+            "result": self.result,
+            "notes": self.notes,
+        }
+
+
 def _parse_fidelity_checks(value: Any) -> tuple[FidelityCheck, ...]:
     if value is None:
         return ()
@@ -2056,6 +2179,22 @@ def _parse_qc_checklist_checks(value: Any) -> tuple[QcChecklistCheck, ...]:
             checks.append(item)
         else:
             checks.append(QcChecklistCheck.from_dict(item))
+    return tuple(checks)
+
+
+def _parse_reference_preservation_checks(
+    value: Any,
+) -> tuple[ReferencePreservationCheck, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("reference_preservation_checks 必须是列表")
+    checks: list[ReferencePreservationCheck] = []
+    for item in value:
+        if isinstance(item, ReferencePreservationCheck):
+            checks.append(item)
+        else:
+            checks.append(ReferencePreservationCheck.from_dict(item))
     return tuple(checks)
 
 

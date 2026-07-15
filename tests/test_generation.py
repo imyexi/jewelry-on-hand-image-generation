@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 import jewelry_on_hand.generation as generation
-from jewelry_on_hand.generation import GenerationError, run_generation
+from jewelry_on_hand.generation import (
+    REFERENCE_STRUCTURE_RETRY_SUFFIX,
+    GenerationError,
+    generation_failure_history,
+    run_generation,
+)
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
 from jewelry_on_hand.product_analysis import load_product_analysis
 from jewelry_on_hand.product_fidelity import (
@@ -214,6 +219,74 @@ def test_generation_falls_back_to_nanobanana_after_more_than_one_failed_qc(
     assert generation_dirs == [paths.generation_dir / "03"]
     assert calls[0][calls[0].index("--model") + 1] == "nano_banana_v2"
     assert (paths.generation_dir / "03" / "model.txt").read_text(encoding="utf-8") == "nano_banana_v2"
+
+
+def test_first_reference_structure_reject_retries_same_model_with_exact_suffix_once(
+    tmp_path,
+    monkeypatch,
+):
+    paths, product, _ref = _ready_run(tmp_path)
+    _write_qc_with_failures(
+        paths.generation_dir / "01",
+        "reject",
+        ["reference_framing_changed"],
+    )
+    calls = []
+
+    def fake_run(command, capture_output, text, check=False):
+        calls.append(command)
+        return Completed(
+            json.dumps(
+                {"ok": True, "data": {"status": "pending", "out_task_id": "task-r"}}
+            )
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    history = generation_failure_history(paths.generation_dir)
+    assert history.reference_structure_rejects == 1
+    assert history.model_switch_failures == 0
+
+    [generation_dir] = run_generation(
+        paths,
+        product,
+        {1: "基础替换提示词"},
+        HELPER,
+        wait=False,
+    )
+
+    assert (generation_dir / "model.txt").read_text(encoding="utf-8") == "gpt_image_2"
+    prompt = (generation_dir / "prompt.txt").read_text(encoding="utf-8")
+    assert prompt.count(REFERENCE_STRUCTURE_RETRY_SUFFIX) == 1
+    helper_prompt = calls[0][calls[0].index("--prompt") + 1]
+    assert helper_prompt == prompt
+    assert helper_prompt.count(REFERENCE_STRUCTURE_RETRY_SUFFIX) == 1
+
+
+def test_second_reference_structure_reject_stops_before_directory_or_helper(
+    tmp_path,
+    monkeypatch,
+):
+    paths, product, _ref = _ready_run(tmp_path)
+    _write_qc_with_failures(
+        paths.generation_dir / "01",
+        "reject",
+        ["reference_pose_changed"],
+    )
+    _write_qc_with_failures(
+        paths.generation_dir / "02",
+        "reject",
+        ["reference_background_changed"],
+    )
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args))
+
+    with pytest.raises(GenerationError, match="停用当前参考图.*prepare-review"):
+        run_generation(paths, product, {1: "基础替换提示词"}, HELPER, wait=False)
+
+    assert calls == []
+    assert not (paths.generation_dir / "03").exists()
+    assert not list(paths.generation_dir.glob(".*.staging-*"))
 
 
 def test_ring_retry_requires_reconfirmation_before_switching_rank(
@@ -600,6 +673,7 @@ def test_generation_waits_and_writes_result(tmp_path, monkeypatch):
     assert generation_dirs == [paths.generation_dir / "01"]
     assert read_json(paths.generation_dir / "01" / "result.json")["data"]["status"] == "completed"
     assert (paths.generation_dir / "01" / "result.png").read_bytes() == b"image-bytes"
+    assert (paths.generation_dir / "01" / "qc-review.html").is_file()
     assert "wait" in calls[1]
     assert calls[1][calls[1].index("--task-id") + 1] == "task-1"
 
@@ -2101,6 +2175,23 @@ def _write_qc(generation_dir, status):
             "failed": ["product fidelity"],
             "notes": "",
             "fidelity_checks": [],
+        },
+    )
+
+
+def _write_qc_with_failures(generation_dir, status, critical_failures):
+    generation_dir.mkdir(parents=True)
+    write_json(
+        generation_dir / "qc.json",
+        {
+            "status": status,
+            "passed": [],
+            "failed": ["参考底图结构未保持"],
+            "notes": "人工确认参考结构发生严重变化",
+            "reference_preservation_checks": [],
+            "fidelity_checks": [],
+            "checklist_checks": [],
+            "critical_failures": critical_failures,
         },
     )
 

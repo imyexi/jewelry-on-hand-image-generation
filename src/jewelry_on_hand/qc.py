@@ -20,7 +20,9 @@ from jewelry_on_hand.product_fidelity import (
     validate_product_fidelity_constraints,
 )
 from jewelry_on_hand.product_types import ProductType
-from jewelry_on_hand.run_paths import write_json
+from jewelry_on_hand.qc_review import build_reference_preservation_checklist
+from jewelry_on_hand.reference_composition import ReferenceCompositionSnapshot
+from jewelry_on_hand.run_paths import read_json, write_json
 
 
 _ALLOWED_STATUS = {"pass", "rerun", "reject"}
@@ -153,6 +155,8 @@ def write_qc_result(
     failed: Any,
     notes: Any,
     fidelity_checks: Any = None,
+    checklist_checks: Any = None,
+    reference_preservation_checks: Any = None,
     critical_failures: Any = None,
 ) -> Path:
     if status not in _ALLOWED_STATUS:
@@ -164,13 +168,25 @@ def write_qc_result(
         failed=tuple(_normalize_string_list(failed)),
         notes="" if notes is None else str(notes),
         fidelity_checks=tuple(_normalize_fidelity_checks(fidelity_checks)),
+        checklist_checks=tuple(_normalize_checklist_checks(checklist_checks)),
+        reference_preservation_checks=tuple(
+            _normalize_reference_preservation_checks(
+                reference_preservation_checks
+            )
+        ),
         critical_failures=tuple(_normalize_critical_failures(critical_failures)),
     )
     generation_path = Path(generation_dir)
-    constraints_path = _constraints_path_for_generation_dir(generation_path)
-    if constraints_path is not None and constraints_path.is_file():
-        constraints = load_product_fidelity_constraints(constraints_path)
-        _validate_must_keep_coverage(constraints.must_keep, result.fidelity_checks)
+    if (generation_path / "input-manifest.json").is_file():
+        _validate_modern_qc_layers(generation_path, result)
+    else:
+        constraints_path = _constraints_path_for_generation_dir(generation_path)
+        if constraints_path is not None and constraints_path.is_file():
+            constraints = load_product_fidelity_constraints(constraints_path)
+            _validate_must_keep_coverage(
+                constraints.must_keep,
+                result.fidelity_checks,
+            )
 
     qc_path = generation_path / "qc.json"
     payload = {
@@ -180,10 +196,114 @@ def write_qc_result(
         "notes": result.notes,
         "fidelity_checks": [check.to_dict() for check in result.fidelity_checks],
     }
+    if result.reference_preservation_checks:
+        payload["reference_preservation_checks"] = [
+            check.to_dict() for check in result.reference_preservation_checks
+        ]
+    if result.checklist_checks:
+        payload["checklist_checks"] = [
+            check.to_dict() for check in result.checklist_checks
+        ]
     if result.critical_failures:
         payload["critical_failures"] = list(result.critical_failures)
     write_json(qc_path, payload)
     return qc_path
+
+
+def _validate_modern_qc_layers(generation_path: Path, result: QcResult) -> None:
+    analysis_path = generation_path / "product-analysis.json"
+    constraints_path = generation_path / "product-fidelity-constraints.json"
+    snapshot_path = generation_path / "reference-composition-snapshot.json"
+    for path, label in (
+        (analysis_path, "产品分析"),
+        (constraints_path, "产品保真约束"),
+        (snapshot_path, "参考构图快照"),
+    ):
+        if not path.is_file():
+            raise ValueError(f"现代 QC 缺少{label}固化副本：{path.name}")
+
+    analysis = ProductAnalysis.from_dict(read_json(analysis_path))
+    constraints = load_product_fidelity_constraints(constraints_path)
+    snapshot = ReferenceCompositionSnapshot.from_dict(read_json(snapshot_path))
+    _validate_must_keep_coverage(constraints.must_keep, result.fidelity_checks)
+    expected_checklist = build_qc_checklist(
+        product_analysis=analysis,
+        fidelity_constraints=constraints,
+    )
+    _validate_checklist_coverage(expected_checklist, result.checklist_checks)
+    _validate_reference_preservation_coverage(
+        snapshot,
+        result.reference_preservation_checks,
+    )
+    _validate_cross_layer_results(
+        result.fidelity_checks,
+        result.checklist_checks,
+    )
+
+
+def _validate_reference_preservation_coverage(
+    snapshot: ReferenceCompositionSnapshot,
+    checks: tuple[Any, ...],
+) -> None:
+    expected = build_reference_preservation_checklist(snapshot)
+    actual = [(check.name, check.question) for check in checks]
+    if len(actual) != len(set(actual)):
+        raise ValueError("reference_preservation_checks 的 name/question 必须唯一")
+    expected_names = [name for name, _question in expected]
+    actual_names = [check.name for check in checks]
+    if Counter(actual_names) != Counter(expected_names):
+        raise ValueError(
+            "reference_preservation_checks 必须按固定 name 完整覆盖，且不得包含未知项"
+        )
+    if Counter(actual) != Counter(expected):
+        raise ValueError(
+            "reference_preservation_checks.question 必须与预期问题完全一致"
+        )
+    for check in checks:
+        if check.result == "rerun" and check.name != "source_jewelry_removed":
+            raise ValueError(
+                "构图、人物、姿势、服装、背景、光线和替换位置问题不得使用 rerun"
+            )
+        if check.name == "source_jewelry_removed" and check.result == "rerun":
+            if any(
+                term in check.notes
+                for term in ("肉眼可辨", "主体残留", "完整珠体", "明显残留", "大面积")
+            ):
+                raise ValueError(
+                    "肉眼可辨的原首饰主体残留必须使用 "
+                    "reference_jewelry_leakage 并标记 reject"
+                )
+
+
+def _validate_checklist_coverage(
+    expected_questions: tuple[QCChecklistItem, ...],
+    checks: tuple[Any, ...],
+) -> None:
+    expected = [(item.id, item.question) for item in expected_questions]
+    actual = [(check.id, check.question) for check in checks]
+    if len(actual) != len(set(actual)):
+        raise ValueError("checklist_checks 的 id/question 必须唯一")
+    if len(actual) != len(expected):
+        raise ValueError("checklist_checks 必须完整覆盖 runtime checklist")
+    if Counter(actual) != Counter(expected):
+        raise ValueError(
+            "checklist_checks 必须按稳定 id 与精确 question 完整覆盖 runtime checklist"
+        )
+
+
+def _validate_cross_layer_results(
+    fidelity_checks: tuple[Any, ...],
+    checklist_checks: tuple[Any, ...],
+) -> None:
+    checklist_by_question = {
+        check.question: check.result for check in checklist_checks
+    }
+    for check in fidelity_checks:
+        checklist_result = checklist_by_question.get(check.question)
+        if checklist_result is not None and checklist_result != check.result:
+            raise ValueError(
+                "fidelity_checks 与 checklist_checks 对同一 question 的 result 必须一致"
+            )
 
 
 def _normalize_string_list(value: Any) -> list[str]:
@@ -210,6 +330,22 @@ def _normalize_fidelity_checks(value: Any) -> list[Any]:
         return []
     if not isinstance(value, list):
         raise ValueError("fidelity_checks 必须是列表")
+    return value
+
+
+def _normalize_checklist_checks(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("checklist_checks 必须是列表")
+    return value
+
+
+def _normalize_reference_preservation_checks(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("reference_preservation_checks 必须是列表")
     return value
 
 

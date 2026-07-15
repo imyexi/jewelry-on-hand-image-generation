@@ -19,6 +19,7 @@ from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ReviewDecision
 from jewelry_on_hand.output_roles import OutputRole, require_scene_replacement_role
 from jewelry_on_hand.product_types import ProductType
+from jewelry_on_hand.qc_review import write_qc_review_page
 from jewelry_on_hand.reference_composition import (
     REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
     ReferenceCompositionSnapshot,
@@ -35,6 +36,23 @@ FALLBACK_MODEL_NAME = "nano_banana_v2"
 FALLBACK_AFTER_FAILED_QC_COUNT = 1
 ASPECT_RATIO = "3:4"
 RESOLUTION = "2K"
+REFERENCE_STRUCTURE_FAILURES = frozenset(
+    {
+        "reference_framing_changed",
+        "reference_pose_changed",
+        "reference_person_changed",
+        "reference_clothing_changed",
+        "reference_background_changed",
+        "reference_lighting_changed",
+        "reference_jewelry_leakage",
+        "replacement_target_changed",
+        "target_product_duplicated",
+    }
+)
+REFERENCE_STRUCTURE_RETRY_SUFFIX = (
+    "这是当前参考底图唯一一次构图纠偏重跑。逐项锁定已确认快照，"
+    "除原首饰替换区域外不得重绘、裁切、移动或重构任何画面元素。"
+)
 
 
 class GenerationError(RuntimeError):
@@ -55,9 +73,16 @@ class _GenerationJob:
 class _GenerationHistory:
     next_output_index: int
     failed_qc_count: int
+    reference_structure_rejects: int = 0
     attempted_ranks: tuple[int, ...] = ()
     latest_critical_failures: tuple[str, ...] = ()
     latest_qc_status: str = ""
+
+
+@dataclass(frozen=True)
+class GenerationFailureHistory:
+    reference_structure_rejects: int
+    model_switch_failures: int
 
 
 @dataclass(frozen=True)
@@ -83,6 +108,7 @@ def run_generation(
         raise GenerationError(
             "历史 generate_multiple run 不允许继续生成，请回到 prepare-review 重新确认。"
         )
+    require_reference_retry_allowed(paths)
 
     product_path = Path(product_image)
     helper_path = Path(helper_script)
@@ -244,6 +270,7 @@ def run_generation(
                 rank=job.rank,
                 generation_dir=generation_dir,
             )
+            write_qc_review_page(generation_dir)
 
         generation_dirs.append(generation_dir)
 
@@ -467,10 +494,39 @@ def _ensure_original_audit_path(path: Path, expected: Path, label: str) -> None:
 
 
 def select_generation_model(paths: RunPaths) -> str:
-    failed_qc_count = _generation_history(paths.generation_dir).failed_qc_count
-    if failed_qc_count > FALLBACK_AFTER_FAILED_QC_COUNT:
+    history = generation_failure_history(paths.generation_dir)
+    if history.model_switch_failures > FALLBACK_AFTER_FAILED_QC_COUNT:
         return FALLBACK_MODEL_NAME
     return DEFAULT_MODEL_NAME
+
+
+def generation_failure_history(
+    generation_root: str | Path,
+) -> GenerationFailureHistory:
+    history = _generation_history(Path(generation_root))
+    return GenerationFailureHistory(
+        reference_structure_rejects=history.reference_structure_rejects,
+        model_switch_failures=history.failed_qc_count,
+    )
+
+
+def reference_retry_suffix(history: GenerationFailureHistory) -> str:
+    if not isinstance(history, GenerationFailureHistory):
+        raise ValueError("history 必须是 GenerationFailureHistory")
+    return (
+        REFERENCE_STRUCTURE_RETRY_SUFFIX
+        if history.reference_structure_rejects == 1
+        else ""
+    )
+
+
+def require_reference_retry_allowed(paths: RunPaths) -> None:
+    history = generation_failure_history(paths.generation_dir)
+    if history.reference_structure_rejects >= 2:
+        raise GenerationError(
+            "当前参考图已连续两次发生结构严重错误，必须停用当前参考图并重新 "
+            "prepare-review；不得自动改用未确认 rank。"
+        )
 
 
 def _generation_ranks(
@@ -522,8 +578,13 @@ def _generation_history(
 ) -> _GenerationHistory:
     max_history_index = 0
     failed_qc_count = 0
+    reference_structure_rejects = 0
     if not generation_root.exists():
-        return _GenerationHistory(next_output_index=1, failed_qc_count=0)
+        return _GenerationHistory(
+            next_output_index=1,
+            failed_qc_count=0,
+            reference_structure_rejects=0,
+        )
 
     attempted_ranks: list[int] = []
     latest_critical_failures: tuple[str, ...] = ()
@@ -543,8 +604,13 @@ def _generation_history(
         qc_status = _qc_status(qc_path)
         latest_qc_status = qc_status
         if qc_status != "pass":
-            failed_qc_count += 1
             latest_critical_failures = _qc_critical_failures(qc_path)
+            if REFERENCE_STRUCTURE_FAILURES.intersection(
+                latest_critical_failures
+            ):
+                reference_structure_rejects += 1
+            else:
+                failed_qc_count += 1
         rank = _generation_reference_rank(generation_dir, references_by_rank)
         if rank is not None:
             attempted_ranks.append(rank)
@@ -552,6 +618,7 @@ def _generation_history(
     return _GenerationHistory(
         next_output_index=max_history_index + 1,
         failed_qc_count=failed_qc_count,
+        reference_structure_rejects=reference_structure_rejects,
         attempted_ranks=tuple(attempted_ranks),
         latest_critical_failures=latest_critical_failures,
         latest_qc_status=latest_qc_status,
@@ -646,6 +713,16 @@ def _build_generation_jobs(
                     correction,
                     reference_path.suffix,
                 )
+        retry_suffix = reference_retry_suffix(
+            GenerationFailureHistory(
+                reference_structure_rejects=(
+                    history.reference_structure_rejects
+                ),
+                model_switch_failures=history.failed_qc_count,
+            )
+        )
+        if retry_suffix:
+            prompt = _append_reference_retry_suffix(prompt, retry_suffix)
         generation_dir = paths.generation_dir / f"{output_index:02d}"
         jobs.append(
             _GenerationJob(
@@ -658,6 +735,12 @@ def _build_generation_jobs(
             )
         )
     return jobs
+
+
+def _append_reference_retry_suffix(prompt: str, suffix: str) -> str:
+    if REFERENCE_STRUCTURE_RETRY_SUFFIX in prompt:
+        raise GenerationError("基础 Prompt 不得预置参考结构纠偏后缀")
+    return f"{prompt.rstrip()}\n\n{suffix}"
 
 
 _RING_RETRY_CORRECTIONS = {
@@ -1400,7 +1483,13 @@ def _ensure_file(path: Path, message: str) -> None:
 
 
 __all__ = [
+    "GenerationFailureHistory",
     "GenerationError",
+    "REFERENCE_STRUCTURE_FAILURES",
+    "REFERENCE_STRUCTURE_RETRY_SUFFIX",
+    "generation_failure_history",
+    "reference_retry_suffix",
+    "require_reference_retry_allowed",
     "run_generation",
     "select_generation_model",
     "validate_necklace_reference_selection",

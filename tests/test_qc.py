@@ -8,8 +8,15 @@ import jewelry_on_hand.qc as qc_module
 from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import MustKeepConstraint, ProductAnalysis
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
+from jewelry_on_hand.product_analysis import product_analysis_to_dict
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.qc import build_qc_checklist, write_qc_result
+from jewelry_on_hand.qc_review import build_reference_preservation_checklist
+from jewelry_on_hand.reference_composition import (
+    ReferenceCompositionSnapshot,
+    ReferencePose,
+    ReplacementTarget,
+)
 from jewelry_on_hand.run_paths import read_json, write_json
 
 
@@ -592,6 +599,224 @@ def test_write_qc_result_persists_critical_failures_for_reject(tmp_path):
     )
 
     assert read_json(path)["critical_failures"] == ["auto_chain_added"]
+
+
+def test_modern_qc_pass_requires_complete_three_layer_coverage(tmp_path):
+    generation_dir, snapshot, fidelity_checks, checklist_checks = (
+        _modern_qc_generation(tmp_path)
+    )
+    reference_checks = _reference_checks(snapshot)
+
+    for field_name, incomplete in (
+        ("reference_preservation_checks", reference_checks[:-1]),
+        ("fidelity_checks", fidelity_checks[:-1]),
+        ("checklist_checks", checklist_checks[:-1]),
+    ):
+        arguments = {
+            "reference_preservation_checks": reference_checks,
+            "fidelity_checks": fidelity_checks,
+            "checklist_checks": checklist_checks,
+        }
+        arguments[field_name] = incomplete
+        with pytest.raises(ValueError, match=rf"{field_name}.*完整|{field_name}.*数量"):
+            write_qc_result(
+                generation_dir,
+                "pass",
+                ["三层人工检查全部完成"],
+                [],
+                "逐项人工对照",
+                **arguments,
+            )
+        assert not (generation_dir / "qc.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda checks: checks + [dict(checks[0])], "唯一"),
+        (lambda checks: [dict(checks[0], name="unknown")] + checks[1:], "未知|完整"),
+        (lambda checks: [dict(checks[0], question="错误问题")] + checks[1:], "question|问题"),
+        (lambda checks: [dict(checks[0], notes="人工 QC 通过")] + checks[1:], "可验证"),
+    ],
+)
+def test_modern_qc_rejects_invalid_reference_preservation_checks(
+    tmp_path,
+    mutation,
+    message,
+):
+    generation_dir, snapshot, fidelity_checks, checklist_checks = (
+        _modern_qc_generation(tmp_path)
+    )
+
+    with pytest.raises(ValueError, match=message):
+        write_qc_result(
+            generation_dir,
+            "pass",
+            ["三层人工检查全部完成"],
+            [],
+            "逐项人工对照",
+            reference_preservation_checks=mutation(_reference_checks(snapshot)),
+            fidelity_checks=fidelity_checks,
+            checklist_checks=checklist_checks,
+        )
+
+    assert not (generation_dir / "qc.json").exists()
+
+
+def test_modern_qc_accepts_complete_three_layer_pass_and_persists_all_layers(tmp_path):
+    generation_dir, snapshot, fidelity_checks, checklist_checks = (
+        _modern_qc_generation(tmp_path)
+    )
+    reference_checks = _reference_checks(snapshot)
+
+    path = write_qc_result(
+        generation_dir,
+        "pass",
+        ["三层人工检查全部完成"],
+        [],
+        "逐项人工对照",
+        reference_preservation_checks=reference_checks,
+        fidelity_checks=fidelity_checks,
+        checklist_checks=checklist_checks,
+    )
+
+    payload = read_json(path)
+    assert payload["reference_preservation_checks"] == reference_checks
+    assert payload["fidelity_checks"] == fidelity_checks
+    assert payload["checklist_checks"] == checklist_checks
+
+
+def test_only_source_jewelry_edge_residue_may_use_reference_rerun(tmp_path):
+    generation_dir, snapshot, fidelity_checks, checklist_checks = (
+        _modern_qc_generation(tmp_path)
+    )
+    checks = _reference_checks(snapshot)
+    checks[-3] = dict(
+        checks[-3],
+        result="rerun",
+        notes="放大查看原手串位置，仍有两像素灰色边缘需要局部清理",
+    )
+
+    path = write_qc_result(
+        generation_dir,
+        "rerun",
+        [],
+        ["原首饰存在轻微边缘残留"],
+        "只允许局部修复",
+        reference_preservation_checks=checks,
+        fidelity_checks=fidelity_checks,
+        checklist_checks=checklist_checks,
+    )
+    assert read_json(path)["status"] == "rerun"
+
+    checks[-3] = dict(
+        checks[-3],
+        notes="肉眼可辨原手串主体残留，仍能看出完整珠体",
+    )
+    with pytest.raises(ValueError, match="reference_jewelry_leakage|reject"):
+        write_qc_result(
+            generation_dir,
+            "rerun",
+            [],
+            ["原首饰主体残留"],
+            "不能局部修复",
+            reference_preservation_checks=checks,
+            fidelity_checks=fidelity_checks,
+            checklist_checks=checklist_checks,
+        )
+
+    checks[0] = dict(
+        checks[0],
+        result="rerun",
+        notes="对照网格确认主体裁切边界发生变化",
+    )
+    with pytest.raises(ValueError, match="构图|rerun"):
+        write_qc_result(
+            generation_dir,
+            "rerun",
+            [],
+            ["景别变化"],
+            "不能局部修复",
+            reference_preservation_checks=checks,
+            fidelity_checks=fidelity_checks,
+            checklist_checks=checklist_checks,
+        )
+
+
+def _modern_qc_generation(tmp_path):
+    generation_dir = tmp_path / "run" / "generation" / "01"
+    generation_dir.mkdir(parents=True)
+    analysis = _qc_analysis_for_category(ProductType.BRACELET)
+    constraints = _confirmed_qc_constraints(analysis)
+    snapshot = ReferenceCompositionSnapshot(
+        rank=1,
+        reference_file="rank-1-scene.jpg",
+        reference_sha256="1" * 64,
+        output_role="hand_worn",
+        framing="手腕近景",
+        camera_angle="平视",
+        subject_placement="手腕居中",
+        visible_body_regions=("左手腕",),
+        pose=ReferencePose("身体未入镜", "前臂横向", "手背朝上", "左手"),
+        clothing="黑色袖口",
+        background="深色木纹",
+        lighting="左侧柔光",
+        replacement_target=ReplacementTarget("左手腕", "原手串", 1),
+        other_jewelry_to_remove=(),
+        text_or_ui_risk="none",
+        product_visibility_sufficient=True,
+        composition_signature="signature",
+    )
+    write_json(
+        generation_dir / "product-analysis.json",
+        product_analysis_to_dict(analysis),
+    )
+    write_json(
+        generation_dir / "product-fidelity-constraints.json",
+        constraints.to_dict(),
+    )
+    write_json(
+        generation_dir / "reference-composition-snapshot.json",
+        snapshot.to_dict(),
+    )
+    write_json(
+        generation_dir / "input-manifest.json",
+        {"schema_version": 1, "output_role": "hand_worn"},
+    )
+    fidelity_checks = [
+        {
+            "name": item.name,
+            "question": item.qc_question,
+            "result": "pass",
+            "notes": f"对照产品身份图确认 {item.name} 的位置和外观一致",
+        }
+        for item in constraints.must_keep
+    ]
+    checklist_checks = [
+        {
+            "id": item.id,
+            "question": item.question,
+            "result": "pass",
+            "notes": f"逐项检查确认：{item.question}",
+        }
+        for item in build_qc_checklist(
+            product_analysis=analysis,
+            fidelity_constraints=constraints,
+        )
+    ]
+    return generation_dir, snapshot, fidelity_checks, checklist_checks
+
+
+def _reference_checks(snapshot):
+    return [
+        {
+            "name": name,
+            "question": question,
+            "result": "pass",
+            "notes": f"对照参考底图网格逐项确认 {name} 保持一致",
+        }
+        for name, question in build_reference_preservation_checklist(snapshot)
+    ]
 
 
 @pytest.mark.parametrize(

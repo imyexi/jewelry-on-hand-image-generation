@@ -47,6 +47,7 @@ from jewelry_on_hand.product_fidelity import (
 )
 from jewelry_on_hand.prompt_builder import build_prompt
 from jewelry_on_hand.qc import write_qc_result
+from jewelry_on_hand.qc_review import ensure_qc_review_ready
 from jewelry_on_hand.reference_catalog import load_reference_rows
 from jewelry_on_hand.reference_composition import (
     REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
@@ -240,8 +241,9 @@ def _build_parser() -> argparse.ArgumentParser:
     qc.add_argument("--passed", action="append")
     qc.add_argument("--failed", action="append")
     qc.add_argument("--notes", default="")
-    qc.add_argument("--fidelity-checks-json")
-    qc.add_argument("--checklist-checks-json")
+    qc.add_argument("--fidelity-checks-json", required=True)
+    qc.add_argument("--checklist-checks-json", required=True)
+    qc.add_argument("--reference-preservation-checks-json", required=True)
     qc.add_argument(
         "--critical-failures",
         action="append",
@@ -687,20 +689,23 @@ def _load_run_output_role(paths: RunPaths) -> OutputRole | None:
 
 
 def _qc(args: argparse.Namespace) -> int:
+    fidelity_checks = _load_optional_fidelity_checks(args.fidelity_checks_json)
     checklist_checks = _load_optional_checklist_checks(args.checklist_checks_json)
-    if checklist_checks:
-        raise ValueError(
-            "--checklist-checks-json 属于 Task 8 QC 接缝，当前尚未接入；"
-            "不得静默忽略，请等待 Task 8 完成后重试"
-        )
+    reference_checks = _load_optional_reference_preservation_checks(
+        args.reference_preservation_checks_json
+    )
+    critical_failures = _parse_critical_failures(args.critical_failures)
+    ensure_qc_review_ready(args.generation_dir)
     write_qc_result(
         args.generation_dir,
         args.status,
         _parse_string_list(args.passed),
         _parse_string_list(args.failed),
         args.notes,
-        fidelity_checks=_load_optional_fidelity_checks(args.fidelity_checks_json),
-        critical_failures=_parse_critical_failures(args.critical_failures),
+        fidelity_checks=fidelity_checks,
+        checklist_checks=checklist_checks,
+        reference_preservation_checks=reference_checks,
+        critical_failures=critical_failures,
     )
     return 0
 
@@ -743,6 +748,19 @@ def _load_optional_checklist_checks(path: str | None) -> list[Any]:
     data = read_json(path)
     if not isinstance(data, list):
         raise ValueError("--checklist-checks-json 必须是 JSON 数组")
+    return data
+
+
+def _load_optional_reference_preservation_checks(
+    path: str | None,
+) -> list[Any]:
+    if not path:
+        return []
+    data = read_json(path)
+    if not isinstance(data, list):
+        raise ValueError(
+            "--reference-preservation-checks-json 必须是 JSON 数组"
+        )
     return data
 
 
