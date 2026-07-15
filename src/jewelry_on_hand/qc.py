@@ -50,6 +50,15 @@ def _normalize_question(question: str) -> str:
     return normalized
 
 
+def _semantic_view(question: str) -> str:
+    normalized = _normalize_question(question)
+    return "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+
+
 class QCChecklistItem(str):
     __slots__ = ()
 
@@ -112,7 +121,10 @@ def build_qc_checklist(
     else:
         if product_type is None or display_mode is None:
             raise ValueError("兼容 QC 必须提供 product_type 与 display_mode")
-        must_keep_items = _normalize_must_keep(() if must_keep is None else must_keep)
+        must_keep_items = _normalize_must_keep(
+            () if must_keep is None else must_keep,
+            sort_items=True,
+        )
 
     if not isinstance(product_type, ProductType):
         raise ValueError("产品品类必须使用 ProductType 枚举")
@@ -211,6 +223,8 @@ def _normalize_critical_failures(value: Any) -> list[Any]:
 
 def _normalize_must_keep(
     must_keep: Iterable[MustKeepConstraint],
+    *,
+    sort_items: bool = False,
 ) -> tuple[MustKeepConstraint, ...]:
     if isinstance(must_keep, (str, bytes, bytearray, Mapping)):
         raise ValueError("must_keep 必须是 MustKeepConstraint 列表")
@@ -224,7 +238,38 @@ def _normalize_must_keep(
         raise ValueError("must_keep 必须是 MustKeepConstraint 列表") from exc
     if any(not isinstance(item, MustKeepConstraint) for item in items):
         raise ValueError("must_keep 只能包含 MustKeepConstraint")
+    if sort_items:
+        return tuple(sorted(items, key=_must_keep_sort_key))
     return items
+
+
+def _must_keep_sort_key(
+    item: MustKeepConstraint,
+) -> tuple[Any, ...]:
+    string_fields = (
+        "name",
+        "source_text",
+        "normalized_keyword",
+        "location",
+        "visual_shape",
+        "relationship",
+        "qc_question",
+    )
+    values: list[str] = []
+    for field_name in string_fields:
+        value = getattr(item, field_name)
+        if not isinstance(value, str):
+            raise ValueError(f"must_keep.{field_name} 必须是字符串")
+        values.append(value)
+    if not isinstance(item.forbid, (tuple, list)) or any(
+        not isinstance(value, str) for value in item.forbid
+    ):
+        raise ValueError("must_keep.forbid 必须是字符串列表")
+    return (
+        *values[:6],
+        tuple(item.forbid),
+        values[6],
+    )
 
 
 def _must_keep_questions(
@@ -261,7 +306,7 @@ def _validate_non_pendant_canonical(
     if product_type is ProductType.PENDANT_NECKLACE:
         return
     for item in constraints.must_keep:
-        question = _normalize_question(item.qc_question)
+        question = _semantic_view(item.qc_question)
         if any(term in question for term in _PENDANT_TERMS):
             raise ValueError(
                 f"产品品类 {product_type.value} 与吊坠要求冲突：{item.qc_question}"

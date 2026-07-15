@@ -289,25 +289,78 @@ def test_legacy_qc_rejects_falsey_or_non_sequence_must_keep(must_keep):
         )
 
 
-def test_legacy_qc_generator_matches_tuple_checklist_and_ids():
-    must_keep = (
-        _qc_must_keep("主吊坠是否保留原位置"),
-        _qc_must_keep("主吊坠是否保留原朝向"),
+def test_legacy_qc_iterables_use_deterministic_full_structure_order():
+    morphology_b = replace(
+        _qc_must_keep("主吊坠是否保留 B 形态"),
+        name="同名要求",
+        source_text="同一来源",
+        normalized_keyword="同一关键词",
+        location="同一位置",
+        visual_shape="B 形态",
+        relationship="B 邻接",
+        forbid=("禁止 B",),
+    )
+    morphology_a = replace(
+        _qc_must_keep("主吊坠是否保留 A 形态"),
+        name="同名要求",
+        source_text="同一来源",
+        normalized_keyword="同一关键词",
+        location="同一位置",
+        visual_shape="A 形态",
+        relationship="A 邻接",
+        forbid=("禁止 A",),
     )
 
     tuple_items = build_qc_checklist(
         ProductType.PENDANT_NECKLACE,
         DisplayMode.WORN,
-        must_keep,
+        (morphology_b, morphology_a),
     )
     generator_items = build_qc_checklist(
         ProductType.PENDANT_NECKLACE,
         DisplayMode.WORN,
-        (item for item in must_keep),
+        (item for item in (morphology_a, morphology_b)),
+    )
+    set_iterator_items = build_qc_checklist(
+        ProductType.PENDANT_NECKLACE,
+        DisplayMode.WORN,
+        iter({morphology_b, morphology_a}),
     )
 
     assert generator_items == tuple_items
+    assert set_iterator_items == tuple_items
     assert [item.id for item in generator_items] == [item.id for item in tuple_items]
+    assert tuple_items.index(morphology_a.qc_question) < tuple_items.index(
+        morphology_b.qc_question
+    )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("name", 1),
+        ("source_text", None),
+        ("normalized_keyword", True),
+        ("location", 1.0),
+        ("visual_shape", []),
+        ("relationship", {}),
+        ("forbid", ("合法", 1)),
+        ("qc_question", "问题".encode("utf-8")),
+    ],
+)
+def test_legacy_qc_sort_key_rejects_tampered_field_types(
+    field_name,
+    invalid_value,
+):
+    item = _qc_must_keep("主吊坠是否保留")
+    object.__setattr__(item, field_name, invalid_value)
+
+    with pytest.raises(ValueError, match=rf"must_keep\.{field_name}"):
+        build_qc_checklist(
+            ProductType.PENDANT_NECKLACE,
+            DisplayMode.WORN,
+            (item,),
+        )
 
 
 def test_qc_checklist_rejects_visually_empty_must_keep_question():
@@ -398,6 +451,43 @@ def test_non_pendant_modern_qc_rejects_canonical_pendant_requirement():
             product_analysis=analysis,
             fidelity_constraints=constraints,
         )
+
+
+@pytest.mark.parametrize("term", ["吊坠", "主吊坠", "链坠", "流苏", "坠子"])
+@pytest.mark.parametrize("format_character", ["\u200b", "\u200c", "\u2060"])
+def test_non_pendant_modern_qc_rejects_format_obfuscated_pendant_requirement(
+    term,
+    format_character,
+):
+    obfuscated = term[0] + format_character + term[1:]
+    analysis = replace(
+        _qc_analysis_for_category(ProductType.RING),
+        special_requirements=(f"禁止新增{obfuscated}",),
+    )
+    constraints = _confirmed_qc_constraints(analysis)
+
+    with pytest.raises(ValueError, match="产品品类.*吊坠要求冲突"):
+        build_qc_checklist(
+            product_analysis=analysis,
+            fidelity_constraints=constraints,
+        )
+
+
+def test_modern_qc_preserves_canonical_must_keep_order():
+    analysis = _qc_analysis_for_category(ProductType.RING)
+    constraints = _confirmed_qc_constraints(analysis)
+
+    items = build_qc_checklist(
+        product_analysis=analysis,
+        fidelity_constraints=constraints,
+    )
+    checklist_questions = [item.question for item in items]
+    positions = [
+        checklist_questions.index(item.qc_question)
+        for item in constraints.must_keep
+    ]
+
+    assert positions == sorted(positions)
 
 
 def test_modern_qc_requires_analysis_and_constraints_together():
