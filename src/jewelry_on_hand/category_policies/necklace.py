@@ -25,7 +25,7 @@ _LENGTH_CATEGORY_NAMES = {
     "upper_chest": "上胸链",
     "long": "长链",
 }
-NECKLACE_IMAGE_ONE_ROLE = "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。"
+NECKLACE_IMAGE_ONE_ROLE = "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变。"
 
 
 def _build_necklace_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
@@ -72,12 +72,12 @@ def _length_category_text(value: str | None) -> str:
 def _necklace_display_mode_fragment(product: ProductAnalysis) -> str:
     if product.display_mode is DisplayMode.HAND_HELD:
         return (
-            "手持展示：产品必须完整且可识别，链条在手部真实持握下完整进入画面，"
-            "不得以佩戴或贴图方式替代手持关系。"
+            "展示关系：保持底图手势不变，只重建手指与项链的真实接触；"
+            "链条按原连接关系受重力自然垂落。"
         )
     return (
-        "真人佩戴：根据有限可见的颈围和姿势适配，不改变人物体态；项链必须"
-        "真实绕颈并受重力自然垂落，长度等级、各层落点及相对落差与内部图2一致。"
+        "展示关系：保持底图人物和姿势不变；项链按原层数与连接关系受重力"
+        "自然垂落，并与接触表面形成真实接触。"
     )
 
 
@@ -91,7 +91,7 @@ def _necklace_occlusion_fragment(product: ProductAnalysis) -> str:
     return (
         "项链与颈部、锁骨或衣物表面应有真实接触、遮挡关系和自然阴影；"
         "禁止把颈部或衣服连同项链作为贴片，不得让链条穿透皮肤或衣物。\n"
-        "头发和衣领只能形成符合参考图姿势的有限自然遮挡，不得遮掉产品主要结构。"
+        "头发和衣领只保留底图已有遮挡关系，不得借产品替换改变人物或衣物。"
     )
 
 

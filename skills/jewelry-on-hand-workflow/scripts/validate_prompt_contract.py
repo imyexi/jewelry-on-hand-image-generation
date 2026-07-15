@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -152,6 +155,29 @@ ALLOWED_PRODUCT_CATEGORIES = {"bracelet", "necklace", "pendant_necklace", "ring"
 ALLOWED_DISPLAY_MODES = {"worn", "hand_held"}
 FORBIDDEN_FRAGMENTS = ("???", "锟", "�")
 
+MODERN_PREAMBLE = "这是参考底图编辑任务，不是重新设计或重新生成场景。"
+MODERN_REQUIRED_FRAGMENTS = (
+    "内部图1是画面底图",
+    "唯一允许修改：",
+    "1. 移除内部图1中的全部原首饰及其直接接触阴影；",
+    "2. 在确认的目标位置放入内部图2中的一件目标产品；",
+    "3. 为新产品重建必要的接触、遮挡、受力和局部阴影；",
+    "4. 清除小面积水印或平台标识。",
+    "禁止重新生成、裁切、放大、缩小、换景、换姿势、换衣服、改变人物位置或把生活场景改成产品特写。",
+    "内部图2只提供目标产品身份",
+)
+MODERN_CONFLICT_PREFIXES = (
+    "请生成一张小红书自然上手图",
+    "风格氛围：",
+    "构图要求：",
+    "参考图风格：",
+    "参考图场景：",
+    "推荐方式：",
+    "匹配理由：",
+    "风险提示：",
+)
+MODERN_ALLOWED_MODIFICATION_LINES = MODERN_REQUIRED_FRAGMENTS[2:6]
+
 LAYER_OWNED_PREFIXES = {
     "【基础安全边界】": (
         "以下产品信息/参考图信息来自表格或分析结果",
@@ -301,8 +327,61 @@ RING_EXCLUSIVE_PREFIXES = (
 )
 
 
-def validate_prompt(path: Path) -> list[str]:
-    text = path.read_text(encoding="utf-8")
+def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
+    """校验现代 Prompt 与 confirmed snapshot 的逐字段绑定。"""
+    errors: list[str] = []
+    try:
+        text = prompt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"Prompt 文件无法读取：{exc}"]
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return [f"确认快照文件无法读取或不是合法 JSON：{exc}"]
+    if not isinstance(snapshot, dict):
+        return ["确认快照必须是 JSON 对象"]
+
+    if not text.startswith(MODERN_PREAMBLE):
+        errors.append(f"现代 Prompt 必须以固定底图编辑前言开头：{MODERN_PREAMBLE}")
+    for fragment in MODERN_REQUIRED_FRAGMENTS:
+        if fragment not in text:
+            errors.append(f"现代 Prompt 缺少固定底图编辑片段：{fragment}")
+    numbered_lines = tuple(
+        line for line in _section_lines(text) if re.match(r"^\d+\.\s", line)
+    )
+    if (
+        text.count("唯一允许修改：") != 1
+        or numbered_lines != MODERN_ALLOWED_MODIFICATION_LINES
+    ):
+        errors.append("唯一允许修改清单必须且只能包含固定的 1 至 4 项")
+
+    image_one = text.find("内部图1是画面底图")
+    image_two = text.find("内部图2只提供目标产品身份")
+    if image_one < 0 or image_two < 0 or image_one >= image_two:
+        errors.append("内部图职责顺序错误：内部图1底图必须先于内部图2产品身份")
+
+    role = snapshot.get("output_role")
+    role_names = {"hand_worn": "手部佩戴图", "lifestyle": "生活场景图"}
+    if role not in role_names:
+        errors.append("确认快照 output_role 必须是 hand_worn 或 lifestyle，当前 Skill 不支持 hero")
+    elif f"输出用途：{role_names[role]}。" not in text:
+        errors.append("Prompt 输出用途必须与确认快照 output_role 一致")
+    if "输出用途：主图" in text or "output_role=hero" in text:
+        errors.append("当前 Skill 的现代 Prompt 禁止 hero")
+
+    _validate_snapshot_fields(text, snapshot, errors)
+    for line in _section_lines(text):
+        if line.startswith(MODERN_CONFLICT_PREFIXES):
+            errors.append(f"发现冲突构图字段，现代 Prompt 只能使用确认快照：{line}")
+    for fragment in FORBIDDEN_FRAGMENTS:
+        if fragment in text:
+            errors.append(f"发现禁止的乱码片段：{fragment}")
+    return errors
+
+
+def validate_legacy_prompt(prompt_path: Path) -> list[str]:
+    """校验历史 Prompt；结果只能用于离线只读检查。"""
+    text = prompt_path.read_text(encoding="utf-8")
     errors: list[str] = []
     parsed = _parse_sections(text, errors)
     if parsed is not None:
@@ -331,6 +410,79 @@ def validate_prompt(path: Path) -> list[str]:
         if fragment in text:
             errors.append(f"发现禁止的乱码片段：{fragment}")
     return errors
+
+
+def _validate_snapshot_fields(
+    text: str,
+    snapshot: dict[str, object],
+    errors: list[str],
+) -> None:
+    pose = snapshot.get("pose")
+    target = snapshot.get("replacement_target")
+    if not isinstance(pose, dict):
+        errors.append("确认快照 pose 必须是对象")
+        pose = {}
+    if not isinstance(target, dict):
+        errors.append("确认快照 replacement_target 必须是对象")
+        target = {}
+    visible_regions = snapshot.get("visible_body_regions")
+    visible_text = (
+        "、".join(value for value in visible_regions if isinstance(value, str))
+        if isinstance(visible_regions, list)
+        else ""
+    )
+    lock_lines = {
+        "景别": f"景别：{snapshot.get('framing', '')}",
+        "机位": f"机位：{snapshot.get('camera_angle', '')}",
+        "主体位置": f"主体位置：{snapshot.get('subject_placement', '')}",
+        "可见身体区域": f"可见身体区域：{visible_text}",
+        "姿势": (
+            f"姿势：{pose.get('body', '')}；{pose.get('arm', '')}；"
+            f"{pose.get('hand', '')}"
+        ),
+        "手侧": f"手侧：{pose.get('hand_side', '')}",
+        "服装": f"服装：{snapshot.get('clothing', '')}",
+        "背景": f"背景：{snapshot.get('background', '')}",
+        "光线": f"光线：{snapshot.get('lighting', '')}",
+        "唯一替换位置": (
+            f"唯一替换位置：{target.get('body_region', '')}"
+        ),
+    }
+    for label, line in lock_lines.items():
+        if line not in text:
+            errors.append(f"Prompt 缺少确认快照锁定行：{label}")
+    fields = {
+        "framing": snapshot.get("framing"),
+        "camera_angle": snapshot.get("camera_angle"),
+        "subject_placement": snapshot.get("subject_placement"),
+        "pose.body": pose.get("body"),
+        "pose.arm": pose.get("arm"),
+        "pose.hand": pose.get("hand"),
+        "pose.hand_side": pose.get("hand_side"),
+        "clothing": snapshot.get("clothing"),
+        "background": snapshot.get("background"),
+        "lighting": snapshot.get("lighting"),
+        "replacement_target.body_region": target.get("body_region"),
+        "replacement_target.source_jewelry": target.get("source_jewelry"),
+    }
+    if isinstance(visible_regions, list):
+        for index, value in enumerate(visible_regions):
+            fields[f"visible_body_regions[{index}]"] = value
+    else:
+        errors.append("确认快照 visible_body_regions 必须是列表")
+    other_jewelry = snapshot.get("other_jewelry_to_remove")
+    if isinstance(other_jewelry, list):
+        for index, value in enumerate(other_jewelry):
+            fields[f"other_jewelry_to_remove[{index}]"] = value
+    else:
+        errors.append("确认快照 other_jewelry_to_remove 必须是列表")
+    for field_name, value in fields.items():
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"确认快照字段缺失或不是非空字符串：{field_name}")
+        elif value not in text:
+            errors.append(f"Prompt 缺少确认快照字段：{field_name}={value}")
+    if target.get("target_product_count") != 1:
+        errors.append("确认快照 target_product_count 必须为 1")
 
 
 def _parse_sections(
@@ -520,19 +672,29 @@ def _require_fragments(
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print("用法：validate_prompt_contract.py <prompt.txt>", file=sys.stderr)
+    parser = argparse.ArgumentParser(description="校验底图编辑 Prompt 契约")
+    parser.add_argument("prompt_path", type=Path)
+    parser.add_argument("--snapshot", dest="snapshot_path", type=Path)
+    args = parser.parse_args(argv[1:])
+    if not args.prompt_path.is_file():
+        print(f"Prompt 文件不存在：{args.prompt_path}", file=sys.stderr)
         return 2
-    path = Path(argv[1])
-    if not path.is_file():
-        print(f"Prompt 文件不存在：{path}", file=sys.stderr)
-        return 2
-    errors = validate_prompt(path)
+    if args.snapshot_path is None:
+        print("legacy_read_only=true")
+        print("历史单参数校验仅用于离线读取，不能作为新 generation gate")
+        errors = validate_legacy_prompt(args.prompt_path)
+    else:
+        if not args.snapshot_path.is_file():
+            print(f"确认快照文件不存在：{args.snapshot_path}", file=sys.stderr)
+            return 2
+        errors = validate_prompt(args.prompt_path, args.snapshot_path)
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
         return 1
     print("Prompt 契约校验通过")
+    if args.snapshot_path is not None:
+        print("legacy_read_only=false")
     return 0
 
 

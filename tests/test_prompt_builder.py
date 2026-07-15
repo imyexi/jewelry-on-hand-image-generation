@@ -1,3 +1,5 @@
+import json
+from dataclasses import replace
 from pathlib import Path
 from runpy import run_path
 
@@ -14,6 +16,11 @@ from jewelry_on_hand.models import (
 from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
+from jewelry_on_hand.reference_composition import (
+    ReferenceCompositionSnapshot,
+    ReferencePose,
+    ReplacementTarget,
+)
 from jewelry_on_hand.prompt_builder import (
     PRODUCT_ISOLATION_SENTENCE,
     WRIST_SOURCE_SENTENCE,
@@ -182,7 +189,226 @@ def _constraints(**overrides):
     return ProductFidelityConstraints.from_dict(data)
 
 
-def _prompt_contract_errors(tmp_path, prompt):
+def _snapshot(
+    output_role=OutputRole.LIFESTYLE,
+    body_region="左手腕外侧",
+    **overrides,
+):
+    data = {
+        "rank": 1,
+        "reference_file": "ref.jpg",
+        "reference_sha256": "a" * 64,
+        "output_role": output_role,
+        "framing": "环境半身景",
+        "camera_angle": "平视略侧",
+        "subject_placement": "人物位于画面右侧，左侧保留环境留白",
+        "visible_body_regions": ("上半身", "左手腕"),
+        "pose": ReferencePose(
+            body="身体自然侧坐",
+            arm="左臂搭在桌沿",
+            hand="左手掌心斜向下，手指自然弯曲",
+            hand_side="left",
+        ),
+        "clothing": "深蓝色长袖衬衫",
+        "background": "咖啡店木桌与窗边绿植",
+        "lighting": "左前方自然窗光",
+        "replacement_target": ReplacementTarget(
+            body_region=body_region,
+            source_jewelry="左手腕外侧原手链",
+            target_product_count=1,
+        ),
+        "other_jewelry_to_remove": ("右手食指原戒指",),
+        "text_or_ui_risk": "small_removable",
+        "product_visibility_sufficient": True,
+        "composition_signature": "snapshot-signature",
+    }
+    data.update(overrides)
+    return ReferenceCompositionSnapshot(**data)
+
+
+def _write_snapshot(tmp_path, snapshot):
+    path = tmp_path / "reference_composition_snapshot.json"
+    path.write_text(
+        json.dumps(snapshot.to_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _snapshot_for_product(product, output_role=OutputRole.LIFESTYLE):
+    if product.confirmed_product_type is ProductType.RING:
+        body_region = "左手无名指根部"
+    elif product.confirmed_product_type in {
+        ProductType.NECKLACE,
+        ProductType.PENDANT_NECKLACE,
+    }:
+        body_region = "颈部与胸前中线"
+    else:
+        body_region = "左手腕外侧"
+    return _snapshot(output_role=output_role, body_region=body_region)
+
+
+def test_base_image_底图编辑而不是重新生成场景():
+    snapshot = _snapshot()
+    product = replace(
+        _product(),
+        composition="手腕近景，放大产品",
+        style_mood="改成白色影棚",
+    )
+
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
+
+    assert prompt.startswith("这是参考底图编辑任务，不是重新设计或重新生成场景。")
+    assert "内部图1是画面底图" in prompt
+    assert "内部图2只提供目标产品身份" in prompt
+    assert "唯一允许修改" in prompt
+    assert snapshot.framing in prompt
+    assert snapshot.subject_placement in prompt
+    assert "手腕近景，放大产品" not in prompt
+    assert "改成白色影棚" not in prompt
+    assert "把生活场景改成产品特写" in prompt
+    assert "改成圆珠" in prompt
+    assert "改成椭圆珠" in prompt
+
+
+@pytest.mark.parametrize(
+    ("product", "body_region"),
+    (
+        (_product(), "左手腕外侧"),
+        (_necklace_product(), "颈部与锁骨之间"),
+        (_necklace_product(ProductType.PENDANT_NECKLACE), "颈部与胸前中线"),
+        (_ring_product(), "左手无名指根部"),
+    ),
+)
+def test_reference_preservation_四品类只使用确认快照构图(product, body_region):
+    snapshot = _snapshot(body_region=body_region)
+
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
+
+    for value in (
+        snapshot.framing,
+        snapshot.camera_angle,
+        snapshot.subject_placement,
+        snapshot.pose.body,
+        snapshot.pose.arm,
+        snapshot.pose.hand,
+        snapshot.clothing,
+        snapshot.background,
+        snapshot.lighting,
+        snapshot.replacement_target.body_region,
+    ):
+        assert value in prompt
+
+
+def test_composition_conflict_角色不得改手势或推进生活场景镜头():
+    hand_snapshot = _snapshot(output_role=OutputRole.HAND_WORN)
+    hand_prompt = build_generation_prompt(
+        replace(_product(), composition="改成手背朝镜头并张开五指"),
+        _scored(_row()),
+        _constraints(),
+        OutputRole.HAND_WORN,
+        hand_snapshot,
+    )
+    lifestyle_snapshot = _snapshot(output_role=OutputRole.LIFESTYLE)
+    lifestyle_prompt = build_generation_prompt(
+        replace(_product(), composition="推进镜头并裁成产品特写"),
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        lifestyle_snapshot,
+    )
+
+    assert "改成手背朝镜头并张开五指" not in hand_prompt
+    assert "推进镜头并裁成产品特写" not in lifestyle_prompt
+    assert "不得改变快照中的手势" in hand_prompt
+    assert "不得推进镜头" in lifestyle_prompt
+
+
+def test_composition_conflict_戒指提示词短且不注入冲突手势():
+    product = replace(
+        _ring_product(),
+        composition="手背朝镜头，拇指位于左侧",
+        style_mood="影棚产品特写",
+    )
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row(jewelry_type="戒指")),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        _snapshot(body_region="左手无名指根部"),
+    )
+
+    assert len(prompt) <= 1200
+    assert "手背朝镜头" not in prompt
+    assert "拇指位于左侧" not in prompt
+    assert "戒圈自然环绕手指" in prompt
+
+
+@pytest.mark.parametrize(
+    "product",
+    (_necklace_product(), _necklace_product(ProductType.PENDANT_NECKLACE)),
+)
+def test_reference_preservation_项链只增加结构重力与接触规则(product):
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        _snapshot(body_region="颈部与胸前中线"),
+    )
+
+    assert "项链层数" in prompt
+    assert "连接" in prompt
+    assert "受重力自然垂落" in prompt
+    assert "真实接触" in prompt
+    assert "根据有限可见的颈围和姿势适配" not in prompt
+    assert "完整进入画面" not in prompt
+
+
+def test_composition_conflict_戒指目标必须与确认快照一致():
+    with pytest.raises(ValueError, match="戒指目标位置必须与确认快照一致"):
+        build_generation_prompt(
+            _ring_product(),
+            _scored(_row(jewelry_type="戒指")),
+            _constraints(),
+            OutputRole.LIFESTYLE,
+            _snapshot(body_region="右手食指根部"),
+        )
+
+
+def test_composition_conflict_戒指快照接受规范英文手侧与指位():
+    prompt = build_generation_prompt(
+        _ring_product(),
+        _scored(_row(jewelry_type="戒指")),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        _snapshot(body_region="left、ring_finger 根部"),
+    )
+
+    assert "唯一替换位置：left、ring_finger 根部" in prompt
+
+
+def test_base_image_现代便携校验器绑定快照并拒绝冲突构图(tmp_path, capsys):
+    snapshot = _snapshot()
+    prompt = build_generation_prompt(
+        _product(),
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
     validator_path = (
         Path(__file__).parents[1]
         / "skills"
@@ -190,10 +416,54 @@ def _prompt_contract_errors(tmp_path, prompt):
         / "scripts"
         / "validate_prompt_contract.py"
     )
-    validate_prompt = run_path(str(validator_path))["validate_prompt"]
+    validator = run_path(str(validator_path))
+    validate_prompt = validator["validate_prompt"]
     prompt_path = tmp_path / "prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
-    return validate_prompt(prompt_path)
+    snapshot_path = _write_snapshot(tmp_path, snapshot)
+
+    assert validate_prompt(prompt_path, snapshot_path) == []
+    assert validator["main"](
+        ["validate_prompt_contract.py", str(prompt_path), "--snapshot", str(snapshot_path)]
+    ) == 0
+    assert "legacy_read_only=false" in capsys.readouterr().out
+    prompt_path.write_text(prompt + "\n构图要求：推进镜头并放大产品", encoding="utf-8")
+    errors = validate_prompt(prompt_path, snapshot_path)
+    assert any("冲突构图" in error for error in errors)
+
+    prompt_path.write_text(
+        prompt + "\n5. 擅自改变背景。",
+        encoding="utf-8",
+    )
+    errors = validate_prompt(prompt_path, snapshot_path)
+    assert any("唯一允许修改清单" in error for error in errors)
+
+    prompt_path.write_text(
+        prompt.replace(
+            f"景别：{snapshot.framing}",
+            f"无约束备注：{snapshot.framing}",
+        ),
+        encoding="utf-8",
+    )
+    errors = validate_prompt(prompt_path, snapshot_path)
+    assert any("快照锁定行" in error and "景别" in error for error in errors)
+
+
+def _prompt_contract_errors(tmp_path, prompt, snapshot=None):
+    validator_path = (
+        Path(__file__).parents[1]
+        / "skills"
+        / "jewelry-on-hand-workflow"
+        / "scripts"
+        / "validate_prompt_contract.py"
+    )
+    namespace = run_path(str(validator_path))
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    if snapshot is None:
+        return namespace["validate_legacy_prompt"](prompt_path)
+    snapshot_path = _write_snapshot(tmp_path, snapshot)
+    return namespace["validate_prompt"](prompt_path, snapshot_path)
 
 
 def test_prompt_includes_exact_fixed_sentence_dimensions_mirror_and_ignored_jewelry():
@@ -224,20 +494,27 @@ def test_构建提示词拒绝主图并指向独立主图技能():
 
 
 def test_构建提示词注入场景输出角色用途():
+    snapshot = _snapshot(output_role=OutputRole.HAND_WORN)
     prompt = build_prompt(
         _product(),
         _scored(_row()),
         output_role=OutputRole.HAND_WORN,
+        reference_snapshot=snapshot,
     )
 
     assert "输出用途：手部佩戴图" in prompt
 
 
 def test_普通项链真人佩戴与手部佩戴角色可以构建提示词():
+    snapshot = _snapshot(
+        output_role=OutputRole.HAND_WORN,
+        body_region="颈部与锁骨之间",
+    )
     prompt = build_prompt(
         _necklace_product(display_mode=DisplayMode.WORN),
         _scored(_row()),
         output_role=OutputRole.HAND_WORN,
+        reference_snapshot=snapshot,
     )
 
     assert "输出用途：手部佩戴图。" in prompt
@@ -253,6 +530,7 @@ def test_生成提示词拒绝字符串主图并指向独立主图技能():
 
 
 def test_ring_prompt_contains_complete_identity_position_and_physics_contract():
+    snapshot = _snapshot(body_region="左手无名指根部")
     prompt = build_prompt(
         _ring_product(),
         _scored(
@@ -264,32 +542,37 @@ def test_ring_prompt_contains_complete_identity_position_and_physics_contract():
             ),
             ignored_reference_jewelry=["参考图中的戒指"],
         ),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
     )
 
     for required in (
-        "内部图1中的戒指必须移除且不提供产品身份",
-        "内部图2是戒指身份唯一来源",
+        "内部图1是画面底图",
+        "内部图2只提供目标产品身份",
         "只生成一枚目标戒指",
-        "佩戴在已确认的左手无名指根部",
+        "唯一替换位置：左手无名指根部",
         "戒圈自然环绕手指",
         "戒圈背侧按真实遮挡隐藏",
         "不得悬浮、贴片、嵌入皮肤或穿透手指",
         "不得改变戒面、主石、镶嵌、戒圈和装饰排列",
         "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图",
         "不可见戒圈背面不得补写为确定结构",
-        "被遮挡部分（仅标记不可见边界，不得推断或补全）：戒圈背面",
-        "不确定细节（仅作为不确定边界，不得转写为确定性结构）：镶嵌背面结构",
     ):
         assert required in prompt
 
 
 def test_portable_prompt_validator_accepts_complete_ring_contract(tmp_path):
+    snapshot = _snapshot(body_region="左手无名指根部")
     prompt = build_prompt(
         _ring_product(),
         _scored(_row(jewelry_type="戒指"), ignored_reference_jewelry=["参考图中的戒指"]),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
     )
 
-    assert _prompt_contract_errors(tmp_path, prompt) == []
+    assert _prompt_contract_errors(tmp_path, prompt, snapshot) == []
 
 
 def test_prompt_contract_includes_required_sections_dynamic_fields_and_image_order():
@@ -304,26 +587,28 @@ def test_prompt_contract_includes_required_sections_dynamic_fields_and_image_ord
         risk=["轻微裁切风险"],
     )
 
-    prompt = build_prompt(product, reference)
+    snapshot = _snapshot()
+    prompt = build_prompt(
+        product,
+        reference,
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
 
     assert EXACT_FIDELITY_SENTENCE in prompt
-    assert prompt.index("内部图1：自动参考图") < prompt.index("内部图2：用户输入产品上手原图")
+    assert prompt.index("内部图1是画面底图") < prompt.index("内部图2只提供目标产品身份")
     for expected in (
-        "小红书自然上手图",
-        "3:4",
-        "2K",
+        "参考底图编辑任务",
         "产品外观：深红主珠居中，两侧透明茶金纹理珠",
         "颜色范围：深红、茶金",
-        "风格氛围：暗调闪光",
-        "构图要求：手腕近景",
-        "特殊要求：保留主珠",
-        "参考图风格：暗调闪光",
-        "参考图场景：车内 暖光",
-        "推荐方式：手腕佩戴展示",
-        "匹配理由：风格匹配、手腕构图匹配",
-        "风险提示：轻微裁切风险",
+        snapshot.framing,
+        snapshot.background,
+        snapshot.replacement_target.body_region,
     ):
         assert expected in prompt
+    for removed in ("风格氛围：", "构图要求：", "推荐方式：", "匹配理由："):
+        assert removed not in prompt
 
 
 def test_prompt_includes_dynamic_field_safety_boundary():
@@ -463,12 +748,19 @@ def test_prompt_renders_detailed_running_ring_constraint(tmp_path):
     )
     constraints = build_product_fidelity_constraints(product)
 
-    prompt = build_prompt(product, _scored(_row()), constraints)
+    snapshot = _snapshot()
+    prompt = build_prompt(
+        product,
+        _scored(_row()),
+        constraints,
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
 
     assert "多颗小珠串成的独立闭合小环" in prompt
     assert "保持产品图中的环绕、套接或连接对象" in prompt
     assert "并入手串主串" in prompt
-    assert _prompt_contract_errors(tmp_path, prompt) == []
+    assert _prompt_contract_errors(tmp_path, prompt, snapshot) == []
 
 
 def test_prompt_includes_no_extra_keypoint_text_when_must_keep_empty():
@@ -507,14 +799,21 @@ def test_prompt_layers_are_emitted_in_fixed_security_first_order():
 
 
 def test_worn_necklace_prompt_includes_length_fit_drape_and_no_patching_rules():
-    prompt = build_prompt(_necklace_product(), _scored(_row()))
+    snapshot = _snapshot(body_region="颈部与锁骨之间")
+    prompt = build_prompt(
+        _necklace_product(),
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
 
     for expected in (
         "项链层数：1 层",
         "长度等级：锁骨链（collarbone）",
-        "根据有限可见的颈围和姿势适配",
-        "真实绕颈并受重力自然垂落",
-        "移除内部图1中的原有首饰",
+        "受重力自然垂落",
+        "保持底图人物和姿势不变",
+        "移除内部图1中的全部原首饰",
         "禁止把颈部或衣服连同项链作为贴片",
         "禁止自动补链、补扣头或推断背面结构",
     ):
@@ -562,13 +861,19 @@ def test_multi_layer_necklace_prompt_preserves_vertical_order_and_relative_drop(
 
 def test_hand_held_necklace_prompt_requires_contact_drape_and_complete_chain():
     product = _necklace_product(display_mode=DisplayMode.HAND_HELD)
-
-    prompt = build_prompt(product, _scored(_row()))
+    snapshot = _snapshot(body_region="左手手指与掌心")
+    prompt = build_prompt(
+        product,
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
 
     for expected in (
         "手指与项链必须有真实接触点",
         "链条受重力自然垂落",
-        "产品必须完整且可识别",
+        "保持底图手势不变",
         "手指不得穿透链条或吊坠",
         "不得删除、缩短或重组链条",
         "不得迁移内部图2中的人物颈部、衣服或皮肤",
@@ -633,9 +938,16 @@ def test_uncertain_and_occluded_details_are_non_completion_boundaries():
     ),
 )
 def test_portable_validator_accepts_each_supported_prompt_category(tmp_path, product):
-    prompt = build_prompt(product, _scored(_row()))
+    snapshot = _snapshot_for_product(product)
+    prompt = build_prompt(
+        product,
+        _scored(_row()),
+        _constraints(),
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
 
-    assert _prompt_contract_errors(tmp_path, prompt) == []
+    assert _prompt_contract_errors(tmp_path, prompt, snapshot) == []
 
 
 def test_portable_validator_rejects_necklace_missing_no_auto_completion_rule(tmp_path):
@@ -663,23 +975,21 @@ def test_build_generation_prompt_is_public_and_matches_compatibility_entrypoint(
 
 
 def test_necklace_prompt_uses_wide_image_one_role_and_common_identity_isolation():
-    prompt = build_prompt(_necklace_product(), _scored(_row()))
-    two_image_layer = prompt.split("【两图职责】", 1)[1].split("【产品分析与不确定性】", 1)[0]
+    product = _necklace_product()
+    snapshot = _snapshot_for_product(product)
+    prompt = build_prompt(
+        product, _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    two_image_layer = prompt.split("【两图职责】", 1)[1].split("【产品保真】", 1)[0]
 
-    assert "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。" in two_image_layer
-    assert "内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。" not in two_image_layer
-    assert "必须移除内部图1中的原有首饰" in two_image_layer
-    assert "内部图2仅提供产品身份" in two_image_layer
+    assert "内部图1是画面底图" in two_image_layer
+    assert "只参考" not in two_image_layer
+    assert "内部图2只提供目标产品身份" in two_image_layer
     for body_part in (
         "人物",
         "皮肤",
-        "颈部",
-        "胸部",
-        "手腕",
-        "手臂",
+        "身体",
         "手部",
-        "脸",
-        "头发",
         "衣服",
         "背景",
     ):
@@ -688,14 +998,17 @@ def test_necklace_prompt_uses_wide_image_one_role_and_common_identity_isolation(
 
 
 def test_bracelet_prompt_keeps_narrow_image_one_role_without_wide_role():
-    prompt = build_prompt(_product(), _scored(_row()))
-    two_image_layer = prompt.split("【两图职责】", 1)[1].split("【产品分析与不确定性】", 1)[0]
+    product = _product()
+    snapshot = _snapshot_for_product(product)
+    prompt = build_prompt(
+        product, _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    two_image_layer = prompt.split("【两图职责】", 1)[1].split("【产品保真】", 1)[0]
 
-    assert "内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。" in two_image_layer
-    assert "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。" not in two_image_layer
-    assert "内部图1只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系" not in two_image_layer
-    assert "必须移除内部图1中的原有首饰" in two_image_layer
-    assert "内部图2仅提供产品身份" in two_image_layer
+    assert "内部图1是画面底图" in two_image_layer
+    assert "只参考手部姿势" not in two_image_layer
+    assert "移除内部图1中的全部原首饰" in prompt
+    assert "内部图2只提供目标产品身份" in two_image_layer
 
 
 def test_pendant_necklace_forbids_all_pendant_identity_changes():
@@ -808,9 +1121,12 @@ def test_validator_uses_controlled_pendant_marker_not_raw_product_text(
         raw_product_type=raw_product_type,
     )
 
-    prompt = build_prompt(product, _scored(_row()))
+    snapshot = _snapshot_for_product(product)
+    prompt = build_prompt(
+        product, _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
 
-    assert _prompt_contract_errors(tmp_path, prompt) == []
+    assert _prompt_contract_errors(tmp_path, prompt, snapshot) == []
 
 
 def test_validator_rejects_unknown_controlled_category_marker(tmp_path):
@@ -906,9 +1222,12 @@ def test_validator_rejects_bracelet_contract_mixed_into_necklace(tmp_path):
     ),
 )
 def test_validator_accepts_clean_category_specific_image_roles(tmp_path, product):
-    prompt = build_prompt(product, _scored(_row()))
+    snapshot = _snapshot_for_product(product)
+    prompt = build_prompt(
+        product, _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
 
-    assert _prompt_contract_errors(tmp_path, prompt) == []
+    assert _prompt_contract_errors(tmp_path, prompt, snapshot) == []
 
 
 def test_validator_rejects_fidelity_sentence_copied_into_preamble(tmp_path):
@@ -931,8 +1250,12 @@ def test_validator_rejects_necklace_structure_inserted_into_bracelet_preamble(tm
 
 
 def test_validator_accepts_exact_single_line_generation_preamble(tmp_path):
-    prompt = build_prompt(_necklace_product(), _scored(_row()))
-    preamble = prompt.split("【基础安全边界】", 1)[0].strip()
+    product = _necklace_product()
+    snapshot = _snapshot_for_product(product)
+    prompt = build_prompt(
+        product, _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    preamble = prompt.splitlines()[0]
 
-    assert preamble == "请生成一张小红书自然上手图，画幅 3:4，清晰 2K。"
-    assert _prompt_contract_errors(tmp_path, prompt) == []
+    assert preamble == "这是参考底图编辑任务，不是重新设计或重新生成场景。"
+    assert _prompt_contract_errors(tmp_path, prompt, snapshot) == []

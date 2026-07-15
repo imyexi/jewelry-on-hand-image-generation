@@ -51,11 +51,23 @@ def require_scene_replacement_role(
 
 def output_role_instruction(
     output_role: OutputRole | str | None,
+    reference_snapshot: object | None = None,
 ) -> str:
     if output_role is None:
-        return ""
+        if reference_snapshot is None:
+            return ""
+        raise ValueError("Prompt 必须显式提供 output_role=hand_worn 或 lifestyle")
     role = require_scene_replacement_role(output_role, stage="Prompt")
-    return f"输出用途：{role.display_name}。"
+    if reference_snapshot is None:
+        return f"输出用途：{role.display_name}。"
+    snapshot_role = getattr(reference_snapshot, "output_role", None)
+    if normalize_output_role(snapshot_role) is not role:
+        raise ValueError("Prompt output_role 必须与确认快照的 output_role 一致")
+    if role is OutputRole.HAND_WORN:
+        boundary = "用途标签不得改变快照中的手势、机位、景别或主体位置。"
+    else:
+        boundary = "用途标签不得推进镜头、裁切生活场景或改成产品特写。"
+    return f"输出用途：{role.display_name}。{boundary}"
 
 
 __all__ = [

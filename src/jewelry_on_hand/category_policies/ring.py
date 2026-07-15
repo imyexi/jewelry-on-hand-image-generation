@@ -19,9 +19,8 @@ from jewelry_on_hand.ring_attributes import FingerPosition, HandSide
 
 
 RING_IMAGE_ONE_ROLE = (
-    "内部图1：自动参考图，只提供手部姿势、手模、构图、光线和场景；"
-    "内部图1中的戒指必须移除且不提供产品身份。"
-    "内部图2是戒指身份唯一来源。"
+    "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变；"
+    "内部图1中的戒指必须移除。"
 )
 
 RING_BASIC_QC_ITEMS = (
@@ -34,8 +33,6 @@ RING_BASIC_QC_ITEMS = (
 
 
 def _build_ring_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
-    hand_name = product.hand_side.display_name
-    finger_name = product.finger_position.display_name
     return PromptFragments(
         image_one_role=RING_IMAGE_ONE_ROLE,
         category_fidelity=(
@@ -43,8 +40,8 @@ def _build_ring_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
             "戒圈粗细、开口、颜色、朝向以及所有肉眼可见结构必须与内部图2一致。"
         ),
         display_mode=(
-            f"真人佩戴：戒指必须佩戴在已确认的{hand_name}{finger_name}根部，"
-            "不得静默换手、换指或改成指关节/跨指佩戴。"
+            "展示关系：只在确认快照的唯一替换位置放入一枚目标戒指；"
+            "不得换手、换指、改变手势或改成指关节/跨指佩戴。"
         ),
         occlusion_physics=(
             "戒圈自然环绕手指；戒圈背侧按真实遮挡隐藏，接触和阴影真实；"
