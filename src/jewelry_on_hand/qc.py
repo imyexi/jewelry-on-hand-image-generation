@@ -24,6 +24,8 @@ from jewelry_on_hand.run_paths import write_json
 
 
 _ALLOWED_STATUS = {"pass", "rerun", "reject"}
+_ZERO_WIDTH_TRANSLATION = str.maketrans({"\u200b": None, "\ufeff": None})
+_PENDANT_TERMS = ("吊坠", "主吊坠", "链坠", "流苏", "坠子")
 
 _COMMON_QC_ITEMS = (
     "产品颜色、材质、透明度、纹理、反光和比例与产品图一致",
@@ -35,14 +37,44 @@ _COMMON_QC_ITEMS = (
     "没有文字、水印或无关 logo",
 )
 
+
+def _normalize_question(question: str) -> str:
+    if not isinstance(question, str):
+        raise ValueError("QC 问题必须是非空字符串")
+    normalized = unicodedata.normalize("NFKC", question)
+    normalized = normalized.translate(_ZERO_WIDTH_TRANSLATION)
+    normalized = " ".join(normalized.split())
+    if not normalized:
+        raise ValueError("QC 问题必须是非空字符串")
+    return normalized
+
+
+class QCChecklistItem(str):
+    __slots__ = ()
+
+    def __new__(cls, question: str) -> "QCChecklistItem":
+        _normalize_question(question)
+        return super().__new__(cls, question)
+
+    @property
+    def id(self) -> str:
+        return qc_check_id(self)
+
+    @property
+    def question(self) -> str:
+        return str(self)
+
+
 def build_qc_checklist(
     product_type: ProductType | None = None,
     display_mode: DisplayMode | None = None,
-    must_keep: Iterable[MustKeepConstraint] | None = None,
+    must_keep: (
+        tuple[MustKeepConstraint, ...] | list[MustKeepConstraint] | None
+    ) = None,
     *,
     product_analysis: ProductAnalysis | None = None,
     fidelity_constraints: ProductFidelityConstraints | None = None,
-) -> tuple[str, ...]:
+) -> tuple[QCChecklistItem, ...]:
     modern_call = product_analysis is not None or fidelity_constraints is not None
     pendant_questions: tuple[str, ...] = ()
     if modern_call:
@@ -73,6 +105,7 @@ def build_qc_checklist(
         product_type = analysis_product_type
         display_mode = product_analysis.display_mode
         must_keep_items = canonical_must_keep
+        _validate_non_pendant_canonical(product_type, fidelity_constraints)
         pendant_questions = _structured_pendant_questions(
             product_type,
             fidelity_constraints,
@@ -80,7 +113,7 @@ def build_qc_checklist(
     else:
         if product_type is None or display_mode is None:
             raise ValueError("兼容 QC 必须提供 product_type 与 display_mode")
-        must_keep_items = _normalize_must_keep(must_keep or ())
+        must_keep_items = _normalize_must_keep(() if must_keep is None else must_keep)
 
     if not isinstance(product_type, ProductType):
         raise ValueError("产品品类必须使用 ProductType 枚举")
@@ -91,20 +124,14 @@ def build_qc_checklist(
     if modern_call and product_type is not ProductType.PENDANT_NECKLACE:
         policy_items = tuple(item for item in policy_items if "吊坠" not in item)
     questions = _must_keep_questions(must_keep_items)
-    return tuple(
-        dict.fromkeys(
-            _COMMON_QC_ITEMS + policy_items + questions + pendant_questions
-        )
+    return _build_checklist_items(
+        _COMMON_QC_ITEMS + policy_items + questions + pendant_questions
     )
 
 
 def qc_check_id(question: str) -> str:
-    if not isinstance(question, str):
-        raise ValueError("QC 问题必须是非空字符串")
-    normalized = " ".join(unicodedata.normalize("NFKC", question).split())
-    if not normalized:
-        raise ValueError("QC 问题必须是非空字符串")
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    normalized = _normalize_question(question)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
     return f"qc-{digest}"
 
 
@@ -184,9 +211,9 @@ def _normalize_critical_failures(value: Any) -> list[Any]:
 
 
 def _normalize_must_keep(
-    must_keep: Iterable[MustKeepConstraint],
+    must_keep: tuple[MustKeepConstraint, ...] | list[MustKeepConstraint],
 ) -> tuple[MustKeepConstraint, ...]:
-    if isinstance(must_keep, (str, bytes, bytearray, Mapping)):
+    if not isinstance(must_keep, (tuple, list)):
         raise ValueError("must_keep 必须是 MustKeepConstraint 列表")
     items = tuple(must_keep)
     if any(not isinstance(item, MustKeepConstraint) for item in items):
@@ -195,9 +222,44 @@ def _normalize_must_keep(
 
 
 def _must_keep_questions(
-    must_keep: Iterable[MustKeepConstraint],
+    must_keep: tuple[MustKeepConstraint, ...],
 ) -> tuple[str, ...]:
-    return tuple(item.qc_question for item in _normalize_must_keep(must_keep))
+    return tuple(item.qc_question for item in must_keep)
+
+
+def _build_checklist_items(
+    questions: tuple[str, ...],
+) -> tuple[QCChecklistItem, ...]:
+    items: list[QCChecklistItem] = []
+    normalized_questions: set[str] = set()
+    id_to_question: dict[str, str] = {}
+    for question in questions:
+        normalized = _normalize_question(question)
+        if normalized in normalized_questions:
+            continue
+        item = QCChecklistItem(question)
+        check_id = item.id
+        previous = id_to_question.get(check_id)
+        if previous is not None and previous != normalized:
+            raise ValueError("不同 QC 问题生成了相同稳定 ID，发生碰撞")
+        normalized_questions.add(normalized)
+        id_to_question[check_id] = normalized
+        items.append(item)
+    return tuple(items)
+
+
+def _validate_non_pendant_canonical(
+    product_type: ProductType,
+    constraints: ProductFidelityConstraints,
+) -> None:
+    if product_type is ProductType.PENDANT_NECKLACE:
+        return
+    for item in constraints.must_keep:
+        question = _normalize_question(item.qc_question)
+        if any(term in question for term in _PENDANT_TERMS):
+            raise ValueError(
+                f"产品品类 {product_type.value} 与吊坠要求冲突：{item.qc_question}"
+            )
 
 
 def _structured_pendant_questions(
@@ -249,6 +311,7 @@ def _validate_must_keep_coverage(
 
 
 __all__ = [
+    "QCChecklistItem",
     "build_qc_checklist",
     "qc_check_id",
     "write_qc_result",

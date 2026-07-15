@@ -1,3 +1,4 @@
+import json
 import re
 from dataclasses import replace
 
@@ -200,18 +201,83 @@ def test_build_qc_checklist_includes_ring_position_structure_and_contact_checks(
 
 
 def test_qc_check_id_is_stable_for_normalized_question_text():
-    first = qc_module.qc_check_id("  产品结构\n是否完整  ")
+    first = qc_module.qc_check_id(" \ufeff 产品\u200b结构\n是否完整  ")
     second = qc_module.qc_check_id("产品结构 是否完整")
 
     assert first == second
-    assert re.fullmatch(r"qc-[0-9a-f]{16}", first)
+    assert re.fullmatch(r"qc-[0-9a-f]{64}", first)
     assert qc_module.qc_check_id("产品结构是否完整") != first
 
 
-@pytest.mark.parametrize("question", ["", " \t\n", None, 1, True])
+@pytest.mark.parametrize(
+    "question",
+    ["", " \t\n", "\u200b\ufeff", None, 1, True],
+)
 def test_qc_check_id_rejects_empty_or_non_string_question(question):
     with pytest.raises(ValueError, match="QC 问题必须是非空字符串"):
         qc_module.qc_check_id(question)
+
+
+def test_qc_checklist_deduplicates_by_normalized_question_and_keeps_stable_id():
+    first = _qc_must_keep("  主吊坠\u200b是否保留？ ")
+    duplicate = _qc_must_keep("主吊坠是否保留?")
+
+    items = build_qc_checklist(
+        ProductType.PENDANT_NECKLACE,
+        DisplayMode.WORN,
+        (first, duplicate),
+    )
+    expected_id = qc_module.qc_check_id(first.qc_question)
+    matching = [item for item in items if item.id == expected_id]
+
+    assert len(matching) == 1
+    assert matching[0].question == first.qc_question
+
+
+def test_qc_checklist_rejects_different_questions_when_ids_collide(monkeypatch):
+    monkeypatch.setattr(qc_module, "qc_check_id", lambda _question: "qc-collision")
+
+    with pytest.raises(ValueError, match="不同 QC 问题.*ID.*碰撞"):
+        build_qc_checklist(ProductType.BRACELET, DisplayMode.WORN)
+
+
+def test_qc_checklist_items_are_immutable_string_compatible_records():
+    items = build_qc_checklist(ProductType.BRACELET, DisplayMode.WORN)
+    item = items[0]
+
+    assert isinstance(item, str)
+    assert isinstance(item, qc_module.QCChecklistItem)
+    assert item.question == str(item)
+    assert item.id == qc_module.qc_check_id(item.question)
+    assert item.startswith("产品")
+    assert "产品" in item
+    assert item + "。" == f"{item}。"
+    assert json.loads(json.dumps(items, ensure_ascii=False))[0] == item.question
+    with pytest.raises(AttributeError):
+        item.id = "qc-tampered"
+    with pytest.raises(AttributeError):
+        item.question = "篡改问题"
+
+
+@pytest.mark.parametrize("must_keep", ["", b"", bytearray(), {}, iter(())])
+def test_legacy_qc_rejects_falsey_or_non_sequence_must_keep(must_keep):
+    with pytest.raises(ValueError, match="must_keep.*列表"):
+        build_qc_checklist(
+            ProductType.BRACELET,
+            DisplayMode.WORN,
+            must_keep,
+        )
+
+
+def test_qc_checklist_rejects_visually_empty_must_keep_question():
+    must_keep = _qc_must_keep("\u200b\ufeff")
+
+    with pytest.raises(ValueError, match="QC 问题必须是非空字符串"):
+        build_qc_checklist(
+            ProductType.PENDANT_NECKLACE,
+            DisplayMode.WORN,
+            (must_keep,),
+        )
 
 
 @pytest.mark.parametrize(
@@ -276,6 +342,21 @@ def test_non_pendant_modern_qc_has_no_structured_main_pendant_questions(product_
     )
 
     assert not any("吊坠" in question for question in questions)
+
+
+def test_non_pendant_modern_qc_rejects_canonical_pendant_requirement():
+    analysis = replace(
+        _qc_analysis_for_category(ProductType.RING),
+        special_requirements=("禁止新增吊坠",),
+    )
+    constraints = _confirmed_qc_constraints(analysis)
+    assert any("吊坠" in item.qc_question for item in constraints.must_keep)
+
+    with pytest.raises(ValueError, match="产品品类.*吊坠要求冲突"):
+        build_qc_checklist(
+            product_analysis=analysis,
+            fidelity_constraints=constraints,
+        )
 
 
 def test_modern_qc_requires_analysis_and_constraints_together():
@@ -539,6 +620,19 @@ def _confirmed_qc_constraints(analysis):
     if constraints.review_status == "pending":
         return replace(constraints, review_status="confirmed")
     return constraints
+
+
+def _qc_must_keep(question):
+    return MustKeepConstraint(
+        name="主吊坠",
+        source_text="第二层中央主吊坠",
+        normalized_keyword="主吊坠",
+        location="第二层中央",
+        visual_shape="水滴形",
+        relationship="连接第二层链条",
+        forbid=("不得换层",),
+        qc_question=question,
+    )
 
 
 def _qc_analysis_for_category(product_type):
