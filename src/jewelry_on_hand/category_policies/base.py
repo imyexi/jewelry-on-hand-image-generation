@@ -13,11 +13,23 @@ if TYPE_CHECKING:
 
 
 SHARED_BASIC_QC_ITEMS = ("禁止推断不可见扣头或背面结构",)
-_BROAD_NEGATION_PREFIXES = ("没有明显", "无明显", "不是", "不适合", "未见", "没有", "无", "未")
+_BROAD_NEGATION_PREFIXES = (
+    "没有明显",
+    "无明显",
+    "不存在",
+    "不包括",
+    "不含",
+    "不是",
+    "不适合",
+    "未见",
+    "没有",
+    "无",
+    "未",
+)
 _DIRECT_NEGATION_PREFIXES = ("不", "非")
 _NEGATION_PREFIXES = _BROAD_NEGATION_PREFIXES + _DIRECT_NEGATION_PREFIXES
 _NON_NEGATION_PREFIXES = ("非常", "不错", "不只是", "不仅", "不但", "不单", "不止", "不局限于")
-_NEGATION_BOUNDARIES = " 　，,。；;：:\n\r\t"
+_NEGATION_BOUNDARIES = "，,。；;：:\n\r\t"
 _NEGATION_CONTRAST_BOUNDARIES = ("但是", "不过", "然而", "但", "却")
 _NEGATION_CONNECTORS = ("或", "和", "及", "与", "/", "、")
 _CONTROLLED_NEGATIONS = (

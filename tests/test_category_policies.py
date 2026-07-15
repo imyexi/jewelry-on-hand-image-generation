@@ -3,9 +3,42 @@ from pathlib import Path
 import pytest
 
 from jewelry_on_hand.category_policies import get_category_policy
+from jewelry_on_hand.category_policies.base import contains_unnegated_any
 from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow
 from jewelry_on_hand.product_types import ProductType
+
+
+@pytest.mark.parametrize(
+    ("text", "terms", "expected"),
+    [
+        ("不含blocking风险", ("blocking",), False),
+        ("不含 BLOCKING 风险", ("blocking",), False),
+        ("不存在任何原首饰无法清除的问题", ("无法清除",), False),
+        ("不存在 原首饰无法完整识别问题", ("无法完整识别",), False),
+        ("存在 blocking 风险", ("blocking",), True),
+        ("原首饰确实无法清除", ("无法清除",), True),
+        ("不含blocking风险，但另一处存在 blocking 风险", ("blocking",), True),
+        (
+            "不存在任何原首饰无法清除的问题，"
+            "但另一枚原首饰确实无法清除",
+            ("无法清除",),
+            True,
+        ),
+    ],
+    ids=[
+        "不含无空格",
+        "不含大小写与空格",
+        "不存在插入修饰词",
+        "不存在分隔空格",
+        "肯定blocking",
+        "肯定插入修饰词",
+        "blocking冲突",
+        "原首饰冲突",
+    ],
+)
+def test_共用未否定语义区分安全否定与独立危险(text, terms, expected):
+    assert contains_unnegated_any(text, terms) is expected
 
 
 def necklace_product(display_mode="worn"):

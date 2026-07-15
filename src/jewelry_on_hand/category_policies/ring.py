@@ -156,12 +156,7 @@ def _evaluate_ring_reference(
 
 
 def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
-    text = (
-        row.combined_text()
-        .replace("不含 blocking", "无blocking")
-        .replace("不存在原首饰", "无原首饰")
-        .replace("不存在原有首饰", "无原有首饰")
-    )
+    text = row.combined_text()
     risks: list[str] = []
     if contains_unnegated_any(
         text,
@@ -185,6 +180,9 @@ def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
             "原有首饰不可完整识别",
             "原首饰无法清除",
             "原有首饰无法清除",
+            "无法完整识别",
+            "不可完整识别",
+            "无法清除",
         ),
     ):
         risks.append("原首饰无法完整识别或安全清除")
@@ -199,20 +197,34 @@ def _identified_reference_fingers(text: str) -> set[FingerPosition]:
         FingerPosition.RING: ("无名指", "ring_finger"),
         FingerPosition.LITTLE: ("小指", "尾指", "little_finger"),
     }
-    identified: set[FingerPosition] = set()
-    clauses = (
-        clause.strip()
-        for clause in re.split(r"[，,。；;]+", text)
-        if clause.strip()
+    alias_to_finger = {
+        alias.lower(): finger
+        for finger, finger_aliases in aliases.items()
+        for alias in finger_aliases
+    }
+    alias_pattern = re.compile(
+        "|".join(
+            re.escape(alias)
+            for alias in sorted(alias_to_finger, key=len, reverse=True)
+        ),
+        re.IGNORECASE,
     )
-    for clause in clauses:
-        if not contains_unnegated_any(clause, ("原戒指", "戒指", "指环")):
-            continue
-        identified.update(
-            finger
-            for finger, terms in aliases.items()
-            if contains_any(clause, terms)
-        )
+    matches = list(alias_pattern.finditer(text))
+    identified: set[FingerPosition] = set()
+    grouped_fingers: list[FingerPosition] = []
+    ring_terms = ("原戒指", "戒指", "指环")
+    for index, match in enumerate(matches):
+        finger = alias_to_finger[match.group(0).lower()]
+        next_start = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        predicate = text[match.end() : next_start]
+        if contains_any(predicate, ring_terms):
+            if contains_unnegated_any(predicate, ring_terms):
+                identified.update((*grouped_fingers, finger))
+            grouped_fingers.clear()
+        elif re.fullmatch(r"\s*(?:(?:和|与|及|以及|、|/|且)\s*)+", predicate):
+            grouped_fingers.append(finger)
+        else:
+            grouped_fingers.clear()
     return identified
 
 

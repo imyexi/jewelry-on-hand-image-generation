@@ -108,12 +108,7 @@ def _evaluate_bracelet_reference(
 
 
 def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
-    text = (
-        row.combined_text()
-        .replace("不含 blocking", "无blocking")
-        .replace("不存在原首饰", "无原首饰")
-        .replace("不存在原有首饰", "无原有首饰")
-    )
+    text = row.combined_text()
     risks: list[str] = []
     target_text = f"{row.visible_body_regions} {row.recommended_usage} {row.notes}"
     if not contains_affirmed_any(target_text, ("手腕", "腕部", "前臂")):
@@ -156,6 +151,9 @@ def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
             "原有首饰不可完整识别",
             "原首饰无法清除",
             "原有首饰无法清除",
+            "无法完整识别",
+            "不可完整识别",
+            "无法清除",
         ),
     ):
         risks.append("原首饰无法完整识别或安全清除")

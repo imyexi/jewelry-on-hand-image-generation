@@ -7,6 +7,7 @@ from jewelry_on_hand import scoring as scoring_module
 from jewelry_on_hand.models import ProductAnalysis, ProductDimensions, ReferenceRow, ScoredReference
 from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.reference_composition import build_candidate_snapshot
+from jewelry_on_hand.ring_attributes import FingerPosition
 from jewelry_on_hand.scoring import (
     score_reference,
     select_batch_diverse_references,
@@ -936,6 +937,106 @@ def test_戒指指位只读取与原戒指肯定关联的手指():
     assert safe.index in _三品类候选索引("戒指", safe)
     assert dangerous.index not in _三品类候选索引("戒指", dangerous)
     assert multiple.index not in _三品类候选索引("戒指", multiple)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "安全描述"),
+    [
+        ("notes", "不含blocking风险"),
+        ("notes", "不含 BLOCKING 风险"),
+        ("existing_jewelry", "不存在任何原首饰无法清除的问题"),
+        ("existing_jewelry", "不存在 原首饰无法完整识别问题"),
+    ],
+    ids=["无空格", "大小写与空格", "插入修饰词", "分隔空格"],
+)
+@pytest.mark.parametrize("品类", ["手串", "项链", "戒指"])
+def test_三品类通用否定变体不会误拒(field_name, 安全描述, 品类):
+    candidate = _三品类参考行(品类, 880, **{field_name: 安全描述})
+
+    assert candidate.index in _三品类候选索引(品类, candidate)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "危险描述"),
+    [
+        ("notes", "存在 blocking 风险"),
+        ("existing_jewelry", "原首饰确实无法清除"),
+    ],
+    ids=["阻断风险", "原首饰无法清除"],
+)
+@pytest.mark.parametrize("品类", ["手串", "项链", "戒指"])
+def test_三品类插入修饰词的肯定危险仍被拒绝(field_name, 危险描述, 品类):
+    candidate = _三品类参考行(品类, 881, **{field_name: 危险描述})
+
+    assert candidate.index not in _三品类候选索引(品类, candidate)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "冲突描述"),
+    [
+        ("notes", "不含blocking风险，但另一处存在 blocking 风险"),
+        (
+            "existing_jewelry",
+            "不存在任何原首饰无法清除的问题，"
+            "但另一枚原首饰确实无法清除",
+        ),
+    ],
+    ids=["文字界面冲突", "原首饰冲突"],
+)
+@pytest.mark.parametrize("品类", ["手串", "项链", "戒指"])
+def test_三品类安全否定与独立肯定冲突时关闭硬门(field_name, 冲突描述, 品类):
+    candidate = _三品类参考行(品类, 882, **{field_name: 冲突描述})
+
+    assert candidate.index not in _三品类候选索引(品类, candidate)
+
+
+@pytest.mark.parametrize(
+    "existing_jewelry",
+    [
+        "无名指有原戒指而食指无戒指",
+        "无名指有原戒指、同时食指没有戒指",
+        "无名指有原戒指同时食指没有戒指",
+        "无名指有原戒指并且食指没有戒指",
+        "无名指有原戒指且食指没有戒指",
+        "无名指有原戒指和食指没有戒指",
+        "无名指有原戒指与食指没有戒指",
+    ],
+    ids=["转折", "顿号同时", "同时", "并且", "且", "和", "与"],
+)
+def test_戒指逐手指关联忽略异指否定谓词(existing_jewelry):
+    candidate = ring_row(883, existing_jewelry=existing_jewelry)
+
+    assert candidate.index in _三品类候选索引("戒指", candidate)
+
+
+def test_戒指目标食指时仍识别无名指的肯定原戒指():
+    target_index_product = replace(ring_product(), finger_position=FingerPosition.INDEX)
+    candidate = ring_row(885, existing_jewelry="无名指有原戒指而食指无戒指")
+
+    _, candidates = select_top_references(
+        target_index_product,
+        [candidate, ring_row(990), ring_row(991), ring_row(992)],
+        OutputRole.HAND_WORN,
+    )
+
+    assert candidate.index not in {item.row.index for item in candidates}
+
+
+@pytest.mark.parametrize(
+    "existing_jewelry",
+    [
+        "无名指和食指都有原戒指",
+        "无名指与食指都有原戒指",
+        "无名指及食指都有原戒指",
+        "无名指和食指且中指都有原戒指",
+        "食指有原戒指而无名指无戒指",
+    ],
+    ids=["和连接的多枚肯定", "与连接的多枚肯定", "及连接的多枚肯定", "三个肯定指位", "异指肯定目标指否定"],
+)
+def test_戒指逐手指关联拒绝异指肯定谓词(existing_jewelry):
+    candidate = ring_row(884, existing_jewelry=existing_jewelry)
+
+    assert candidate.index not in _三品类候选索引("戒指", candidate)
 
 
 def _完整构图参考(tmp_path):
