@@ -156,6 +156,10 @@ RING_LAYER_REQUIREMENTS = {
 ALLOWED_PRODUCT_CATEGORIES = {"bracelet", "necklace", "pendant_necklace", "ring"}
 ALLOWED_DISPLAY_MODES = {"worn", "hand_held"}
 FORBIDDEN_FRAGMENTS = ("???", "锟", "�")
+REFERENCE_STRUCTURE_RETRY_SUFFIX = (
+    "这是当前参考底图唯一一次构图纠偏重跑。逐项锁定已确认快照，"
+    "除原首饰替换区域外不得重绘、裁切、移动或重构任何画面元素。"
+)
 
 MODERN_PREAMBLE = "这是参考底图编辑任务，不是重新设计或重新生成场景。"
 MODERN_PREAMBLE_LINES = (
@@ -472,6 +476,14 @@ def validate_prompt(
         text = prompt_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         return [f"Prompt 文件无法读取：{exc}"]
+
+    suffix_count = text.count(REFERENCE_STRUCTURE_RETRY_SUFFIX)
+    suffix_block = f"\n\n{REFERENCE_STRUCTURE_RETRY_SUFFIX}"
+    if suffix_count:
+        if suffix_count != 1 or not text.endswith(suffix_block):
+            errors.append("参考结构纠偏尾缀只能按固定文本在末尾精确出现一次")
+        else:
+            text = text[: -len(suffix_block)]
 
     snapshot = _load_json_object(snapshot_path, "确认快照文件", errors)
     analysis = _load_json_object(analysis_path, "产品分析文件", errors)
@@ -1520,6 +1532,11 @@ def main(argv: list[str]) -> int:
     if not args.prompt_path.is_file():
         print(f"Prompt 文件不存在：{args.prompt_path}", file=sys.stderr)
         return 2
+    try:
+        args.prompt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        print(f"Prompt 文件无法按 UTF-8 读取：{exc}", file=sys.stderr)
+        return 2
     modern_paths = (
         args.snapshot_path,
         args.analysis_path,
@@ -1543,6 +1560,11 @@ def main(argv: list[str]) -> int:
         ):
             if not path.is_file():
                 print(f"{label}文件不存在：{path}", file=sys.stderr)
+                return 2
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                print(f"{label}文件不是有效 UTF-8 JSON：{exc}", file=sys.stderr)
                 return 2
         errors = validate_prompt(
             args.prompt_path,

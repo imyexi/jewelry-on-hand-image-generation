@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 import json
 import os
@@ -11,10 +12,24 @@ from pathlib import Path
 
 import pytest
 
-from jewelry_on_hand.qc import write_qc_result
+from jewelry_on_hand.qc import build_qc_checklist, write_qc_result
 from jewelry_on_hand.cli import _build_parser
-from jewelry_on_hand.models import ProductAnalysis, ProductFidelityConstraints
+from jewelry_on_hand.models import (
+    ProductAnalysis,
+    ProductFidelityConstraints,
+    ReferenceRow,
+    ScoredReference,
+)
+from jewelry_on_hand.output_roles import OutputRole
+from jewelry_on_hand.product_analysis import product_analysis_to_dict
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
+from jewelry_on_hand.prompt_builder import build_generation_prompt
+from jewelry_on_hand.qc_review import build_reference_preservation_checklist
+from jewelry_on_hand.reference_composition import (
+    ReferenceCompositionSnapshot,
+    ReferencePose,
+    ReplacementTarget,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +38,7 @@ INSTALLER = PROJECT_ROOT / "scripts" / "install_codex_skills.py"
 ARTIFACT_INSPECTOR = WORKFLOW_SKILL / "scripts" / "inspect_run_artifacts.py"
 QC_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_qc_record.py"
 PROMPT_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_prompt_contract.py"
+SNAPSHOT_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_reference_snapshot.py"
 PROJECT_GUIDE = PROJECT_ROOT / "CLAUDE.md"
 MANUAL_WORKFLOW = PROJECT_ROOT / "reference" / "manual-workflow.md"
 FIDELITY_SCHEMA = PROJECT_ROOT / "reference" / "product-fidelity-constraints-schema.md"
@@ -902,3 +918,468 @@ def _modern_decision(analysis: dict[str, object]) -> dict[str, object]:
             field_name: analysis[field_name] for field_name in snapshot_fields
         },
     }
+
+
+def _task9_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _task9_signature(snapshot: dict[str, object]) -> str:
+    payload = {
+        "output_role": snapshot["output_role"],
+        "framing": snapshot["framing"],
+        "pose": snapshot["pose"],
+        "background": snapshot["background"],
+        "lighting": snapshot["lighting"],
+        "replacement_target": snapshot["replacement_target"],
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _task9_modern_run(root: Path, *, completed: bool = True) -> tuple[Path, Path]:
+    generation = root / "generation" / "01"
+    source_dir = root / "sources"
+    for directory in (root / "input", root / "analysis", root / "review", generation, source_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    product_source = root / "input" / "product-on-hand.jpg"
+    scene_source = source_dir / "rank-1-scene.jpg"
+    product_source.write_bytes(b"product-identity")
+    scene_source.write_bytes(b"scene-reference")
+    scene_copy = generation / "scene-reference.jpg"
+    product_copy = generation / "product-reference.jpg"
+    scene_copy.write_bytes(scene_source.read_bytes())
+    product_copy.write_bytes(product_source.read_bytes())
+
+    analysis_data = {
+        "product_type": "手链/手串",
+        "wear_position": "左手腕",
+        "visible_appearance": "深红圆珠手串，中央有一颗白水晶随形珠",
+        "color_family": ["深红", "透明"],
+        "style_mood": "自然",
+        "composition": "手腕近景",
+        "product_dimensions": {
+            "bead_diameter_mm": 10,
+            "dimension_source": "用户录入",
+        },
+        "needs_full_front_display": True,
+        "special_requirements": ["保留白水晶随形珠"],
+    }
+    product = ProductAnalysis.from_dict(analysis_data)
+    analysis_data = product_analysis_to_dict(product)
+    canonical_data = build_product_fidelity_constraints(product).to_dict()
+    canonical_data["review_status"] = "confirmed"
+    constraints = ProductFidelityConstraints.from_dict(canonical_data)
+
+    snapshot_data: dict[str, object] = {
+        "rank": 1,
+        "reference_file": scene_source.name,
+        "reference_sha256": _task9_sha256(scene_source),
+        "output_role": "hand_worn",
+        "framing": "手腕近景",
+        "camera_angle": "平视",
+        "subject_placement": "人物居中",
+        "visible_body_regions": ["左手腕", "左手"],
+        "pose": {
+            "body": "身体正面",
+            "arm": "手臂自然下垂",
+            "hand": "左手手背朝上",
+            "hand_side": "left",
+        },
+        "clothing": "黑色圆领上衣",
+        "background": "深色木纹背景",
+        "lighting": "左侧柔光",
+        "replacement_target": {
+            "body_region": "左手腕",
+            "source_jewelry": "原手串",
+            "target_product_count": 1,
+        },
+        "other_jewelry_to_remove": [],
+        "text_or_ui_risk": "none",
+        "product_visibility_sufficient": True,
+    }
+    snapshot_data["composition_signature"] = _task9_signature(snapshot_data)
+    snapshot = ReferenceCompositionSnapshot.from_dict(snapshot_data)
+    row = ReferenceRow(
+        index=1,
+        file_name=scene_source.name,
+        relative_path=scene_source.name,
+        absolute_path=scene_source,
+        width=1200,
+        height=1600,
+        size_mb=0.1,
+        purpose_category="手部佩戴图",
+        bracelet_applicability="否",
+        default_strategy="已确认",
+        style_category="暗调",
+        scene_keywords="深色木纹",
+        jewelry_type="手链/手串",
+        recommended_usage="手腕近景",
+        notes="人工确认",
+        confidence="高",
+        file_exists=True,
+    )
+    reference = ScoredReference(row, 100, 1, ("人工确认",), (), ())
+    prompt = build_generation_prompt(
+        product,
+        reference,
+        constraints,
+        OutputRole.HAND_WORN,
+        snapshot,
+    )
+
+    fixed_json = {
+        "reference-composition-snapshot.json": snapshot_data,
+        "product-analysis.json": analysis_data,
+        "product-fidelity-constraints.json": canonical_data,
+    }
+    for name, value in fixed_json.items():
+        _write_json(generation / name, value)
+    (generation / "prompt.txt").write_text(prompt, encoding="utf-8")
+    (generation / "model.txt").write_text("gpt_image_2", encoding="utf-8")
+    (generation / "reference-rank.txt").write_text("1", encoding="utf-8")
+    _write_json(generation / "submit.json", {"ok": True, "data": {"out_task_id": "task-1"}})
+
+    manifest = {
+        "schema_version": 1,
+        "output_role": "hand_worn",
+        "reference_snapshot": {
+            "copied_file": "reference-composition-snapshot.json",
+            "sha256": _task9_sha256(generation / "reference-composition-snapshot.json"),
+        },
+        "product_analysis": {
+            "copied_file": "product-analysis.json",
+            "sha256": _task9_sha256(generation / "product-analysis.json"),
+        },
+        "fidelity_constraints": {
+            "copied_file": "product-fidelity-constraints.json",
+            "sha256": _task9_sha256(generation / "product-fidelity-constraints.json"),
+        },
+        "inputs": [
+            {
+                "order": 1,
+                "role": "scene_reference",
+                "source_path": str(scene_source.resolve()),
+                "copied_file": scene_copy.name,
+                "sha256": _task9_sha256(scene_copy),
+            },
+            {
+                "order": 2,
+                "role": "product_identity",
+                "source_path": str(product_source.resolve()),
+                "copied_file": product_copy.name,
+                "sha256": _task9_sha256(product_copy),
+            },
+        ],
+    }
+    _write_json(generation / "input-manifest.json", manifest)
+
+    _write_json(root / "analysis" / "product_analysis.json", analysis_data)
+    _write_json(root / "analysis" / "product_fidelity_constraints.json", canonical_data)
+    _write_json(root / "review" / "reference_composition_snapshot.json", snapshot_data)
+    selected = []
+    for rank in (1, 2, 3):
+        path = scene_source if rank == 1 else source_dir / f"rank-{rank}-scene.jpg"
+        if rank != 1:
+            path.write_bytes(f"scene-{rank}".encode("ascii"))
+        selected.append({"rank": rank, "selected_reference": str(path), "score": 101 - rank})
+    _write_json(root / "analysis" / "selected_references.json", selected)
+    _write_json(root / "review" / "review_decision.json", _modern_decision(analysis_data))
+
+    reference_checks = []
+    comparison_sources = {
+        "replacement_target_preserved": "confirmed_snapshot",
+        "single_target_product": "product_identity",
+    }
+    for name, question in build_reference_preservation_checklist(snapshot):
+        evidence: dict[str, object] = {
+            "comparison_source": comparison_sources.get(name, "scene_reference"),
+            "region": f"{name} 对应区域",
+            "observation": f"逐项确认 {name} 保持一致",
+        }
+        if name == "source_jewelry_removed":
+            evidence.update(source_jewelry_subject_visible=False, residual_scope="none")
+        reference_checks.append(
+            {
+                "name": name,
+                "question": question,
+                "result": "pass",
+                "issue_code": None,
+                "notes": "人工逐项复核通过",
+                "evidence": evidence,
+            }
+        )
+    fidelity_checks = [
+        {
+            "name": item.name,
+            "question": item.qc_question,
+            "result": "pass",
+            "notes": "对照产品身份图通过",
+        }
+        for item in constraints.must_keep
+    ]
+    checklist_checks = [
+        {
+            "id": item.id,
+            "question": item.question,
+            "result": "pass",
+            "notes": "逐项检查通过",
+        }
+        for item in build_qc_checklist(
+            product_analysis=product,
+            fidelity_constraints=constraints,
+        )
+    ]
+    _write_json(
+        generation / "qc.json",
+        {
+            "status": "pass",
+            "passed": ["全部结构化检查通过"],
+            "failed": [],
+            "notes": "人工复核通过",
+            "fidelity_checks": fidelity_checks,
+            "checklist_checks": checklist_checks,
+            "reference_preservation_checks": reference_checks,
+        },
+    )
+    if completed:
+        _write_json(generation / "result.json", {"ok": True, "data": {"status": "completed"}})
+        (generation / "result.png").write_bytes(b"result")
+        (generation / "qc-review.html").write_text("<html>四栏 QC</html>", encoding="utf-8")
+    return root, generation
+
+
+def test_reference_snapshot_cli_严格校验成功与输入错误退出码(tmp_path: Path) -> None:
+    _root, generation = _task9_modern_run(tmp_path / "run")
+    manifest = json.loads((generation / "input-manifest.json").read_text(encoding="utf-8"))
+    reference = manifest["inputs"][0]["source_path"]
+    command = [
+        sys.executable,
+        str(SNAPSHOT_VALIDATOR),
+        str(generation / "reference-composition-snapshot.json"),
+        "--reference",
+        reference,
+        "--output-role",
+        "hand_worn",
+    ]
+    passed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=False)
+    assert passed.returncode == 0, passed.stderr
+    assert "参考构图快照校验通过" in passed.stdout
+
+    broken = generation / "broken-snapshot.json"
+    broken.write_text('{"rank":', encoding="utf-8")
+    failed = subprocess.run(
+        [*command[:2], str(broken), *command[3:]],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert failed.returncode == 2
+    assert "Traceback" not in failed.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("sha", "role", "rank_bool", "count_bool", "nested_extra", "signature"),
+)
+def test_reference_snapshot_拒绝摘要角色类型嵌套与签名篡改(tmp_path: Path, mutation: str) -> None:
+    _root, generation = _task9_modern_run(tmp_path / mutation)
+    snapshot_path = generation / "reference-composition-snapshot.json"
+    data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    if mutation == "sha":
+        data["reference_sha256"] = "0" * 64
+    elif mutation == "role":
+        data["output_role"] = "lifestyle"
+    elif mutation == "rank_bool":
+        data["rank"] = True
+    elif mutation == "count_bool":
+        data["replacement_target"]["target_product_count"] = True
+    elif mutation == "nested_extra":
+        data["pose"]["camera_hint"] = "俯拍"
+        data["composition_signature"] = _task9_signature(data)
+    else:
+        data["composition_signature"] = "0" * 64
+    _write_json(snapshot_path, data)
+    namespace = runpy.run_path(str(SNAPSHOT_VALIDATOR))
+    errors = namespace["validate_reference_snapshot"](
+        snapshot_path,
+        Path(json.loads((generation / "input-manifest.json").read_text(encoding="utf-8"))["inputs"][0]["source_path"]),
+        "hand_worn",
+    )
+    assert errors, mutation
+
+
+def test_reference_preservation_prompt_四输入与精确单次纠偏尾缀(tmp_path: Path) -> None:
+    _root, generation = _task9_modern_run(tmp_path / "prompt")
+    namespace = runpy.run_path(str(PROMPT_VALIDATOR))
+    arguments = (
+        generation / "prompt.txt",
+        generation / "reference-composition-snapshot.json",
+        generation / "product-analysis.json",
+        generation / "product-fidelity-constraints.json",
+    )
+    assert namespace["validate_prompt"](*arguments) == []
+    suffix = namespace["REFERENCE_STRUCTURE_RETRY_SUFFIX"]
+    original = arguments[0].read_text(encoding="utf-8")
+    arguments[0].write_text(original.rstrip() + "\n\n" + suffix, encoding="utf-8")
+    assert namespace["validate_prompt"](*arguments) == []
+    arguments[0].write_text(original.rstrip() + "\n\n" + suffix + suffix, encoding="utf-8")
+    assert namespace["validate_prompt"](*arguments)
+
+
+@pytest.mark.parametrize("mutation", ("missing", "analysis_type", "canonical_projection"))
+def test_reference_preservation_prompt_拒绝缺输入与可信投影篡改(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _root, generation = _task9_modern_run(tmp_path / mutation)
+    namespace = runpy.run_path(str(PROMPT_VALIDATOR))
+    paths: list[Path | None] = [
+        generation / "prompt.txt",
+        generation / "reference-composition-snapshot.json",
+        generation / "product-analysis.json",
+        generation / "product-fidelity-constraints.json",
+    ]
+    if mutation == "missing":
+        paths[2] = None
+    elif mutation == "analysis_type":
+        data = json.loads(paths[2].read_text(encoding="utf-8"))
+        data["color_family"] = True
+        _write_json(paths[2], data)
+    else:
+        data = json.loads(paths[3].read_text(encoding="utf-8"))
+        data["must_not_change"].append("新增未确认约束")
+        _write_json(paths[3], data)
+    assert namespace["validate_prompt"](*paths), mutation
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "duplicate", "wrong_source", "wrong_issue", "uniform_evidence"),
+)
+def test_reference_preservation_qc_拒绝缺失重复错源错码与统一伪证据(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    _root, generation = _task9_modern_run(tmp_path / mutation)
+    qc_path = generation / "qc.json"
+    data = json.loads(qc_path.read_text(encoding="utf-8"))
+    checks = data["reference_preservation_checks"]
+    if mutation == "missing":
+        checks.pop()
+    elif mutation == "duplicate":
+        checks[-1] = dict(checks[0])
+    elif mutation == "wrong_source":
+        checks[0]["evidence"]["comparison_source"] = "product_identity"
+    elif mutation == "wrong_issue":
+        checks[0]["result"] = "fail"
+        checks[0]["issue_code"] = "reference_pose_changed"
+        data["status"] = "reject"
+        data["critical_failures"] = ["reference_pose_changed"]
+        data["failed"] = ["参考结构失败"]
+    else:
+        for check in checks:
+            check["evidence"]["region"] = "整个画面"
+            check["evidence"]["observation"] = "全部一致"
+    _write_json(qc_path, data)
+    errors = runpy.run_path(str(QC_VALIDATOR))["validate_qc"](qc_path)
+    assert errors, mutation
+    expected = {
+        "missing": "完整唯一覆盖",
+        "duplicate": "完整唯一覆盖",
+        "wrong_source": "comparison_source",
+        "wrong_issue": "issue_code",
+        "uniform_evidence": "统一伪证据",
+    }[mutation]
+    assert any(expected in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing_manifest",
+        "reverse_order",
+        "path_escape",
+        "digest",
+        "replace_input",
+        "hand_reference",
+        "prompt_failure",
+        "qc_failure",
+        "source_digest",
+    ),
+)
+def test_input_manifest_inspector_拒绝缺失顺序路径摘要替换与旧文件名(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root, generation = _task9_modern_run(tmp_path / mutation)
+    manifest_path = generation / "input-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if mutation == "missing_manifest":
+        manifest_path.unlink()
+    elif mutation == "reverse_order":
+        manifest["inputs"].reverse()
+        _write_json(manifest_path, manifest)
+    elif mutation == "path_escape":
+        manifest["reference_snapshot"]["copied_file"] = "../snapshot.json"
+        _write_json(manifest_path, manifest)
+    elif mutation == "digest":
+        manifest["product_analysis"]["sha256"] = "0" * 64
+        _write_json(manifest_path, manifest)
+    elif mutation == "replace_input":
+        (generation / "scene-reference.jpg").write_bytes(b"tampered")
+    elif mutation == "hand_reference":
+        (generation / "hand-reference.jpg").write_bytes(b"legacy-name")
+    elif mutation == "prompt_failure":
+        (generation / "prompt.txt").write_text("擅自重画整个场景", encoding="utf-8")
+    elif mutation == "qc_failure":
+        data = json.loads((generation / "qc.json").read_text(encoding="utf-8"))
+        data["reference_preservation_checks"].pop()
+        _write_json(generation / "qc.json", data)
+    else:
+        data = json.loads((run_root / "analysis" / "product_analysis.json").read_text(encoding="utf-8"))
+        data["visible_appearance"] = "源文件被替换"
+        _write_json(run_root / "analysis" / "product_analysis.json", data)
+    before = {path.relative_to(run_root): path.read_bytes() for path in run_root.rglob("*") if path.is_file()}
+    errors = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run"](run_root)
+    after = {path.relative_to(run_root): path.read_bytes() for path in run_root.rglob("*") if path.is_file()}
+    assert errors, mutation
+    expected = {
+        "missing_manifest": "input-manifest",
+        "reverse_order": "顺序",
+        "path_escape": "路径逃逸",
+        "digest": "摘要",
+        "replace_input": "摘要",
+        "hand_reference": "hand-reference",
+        "prompt_failure": "Prompt",
+        "qc_failure": "完整唯一覆盖",
+        "source_digest": "源文件摘要",
+    }[mutation]
+    assert any(expected in error for error in errors), errors
+    assert after == before
+
+
+def test_input_manifest_inspector_完整现代run通过且历史run只读(tmp_path: Path) -> None:
+    modern_root, _generation = _task9_modern_run(tmp_path / "modern")
+    namespace = runpy.run_path(str(ARTIFACT_INSPECTOR))
+    assert namespace["inspect_run"](modern_root) == []
+
+    legacy = tmp_path / "legacy"
+    generation = legacy / "generation" / "01"
+    generation.mkdir(parents=True)
+    (generation / "hand-reference.jpg").write_bytes(b"legacy")
+    (generation / "prompt.txt").write_text("历史提示词", encoding="utf-8")
+    before = {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*") if path.is_file()}
+    result = namespace["inspect_run_state"](legacy)
+    after = {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*") if path.is_file()}
+    assert result["legacy_read_only"] is True
+    assert result["errors"] == []
+    assert after == before

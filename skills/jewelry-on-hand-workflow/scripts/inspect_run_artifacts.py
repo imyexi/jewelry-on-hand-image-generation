@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,10 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from validate_prompt_contract import validate_prompt  # noqa: E402
 from validate_qc_record import validate_qc  # noqa: E402
+from validate_reference_snapshot import (  # noqa: E402
+    SnapshotInputError,
+    validate_reference_snapshot,
+)
 
 REQUIRED_GENERATION_FILES = ("model.txt", "prompt.txt", "submit.json", "result.json", "result.png", "qc.json")
 BRACELET_PRODUCT_TYPE_TERMS = ("手链", "手串", "手镯", "bracelet", "hand-string", "hand string")
@@ -52,6 +57,233 @@ BLOCKED_ACTIONS = {"rerank", "manual_reference"}
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _safe_copied_file(generation_dir: Path, value: Any, label: str, errors: list[str]) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{label}.copied_file 必须是非空字符串")
+        return None
+    if Path(value).name != value or Path(value).is_absolute():
+        errors.append(f"{label}.copied_file 禁止路径逃逸：{value}")
+        return None
+    path = generation_dir / value
+    if not path.is_file():
+        errors.append(f"{label} 固化副本不存在：{value}")
+        return None
+    return path
+
+
+def _manifest_entry(
+    generation_dir: Path,
+    value: Any,
+    label: str,
+    errors: list[str],
+    *,
+    require_source: bool,
+) -> tuple[Path | None, Path | None]:
+    required = {"copied_file", "sha256"}
+    if require_source:
+        required |= {"order", "role", "source_path"}
+    if not isinstance(value, dict) or set(value) != required:
+        errors.append(f"{label} 字段集合不合法")
+        return None, None
+    copied = _safe_copied_file(generation_dir, value.get("copied_file"), label, errors)
+    digest = value.get("sha256")
+    if not isinstance(digest, str) or len(digest) != 64:
+        errors.append(f"{label}.sha256 必须是 64 位摘要")
+    elif copied is not None and _sha256(copied) != digest:
+        errors.append(f"{label} 固化副本摘要与 manifest 不一致")
+    source: Path | None = None
+    if require_source:
+        raw_source = value.get("source_path")
+        if not isinstance(raw_source, str) or not raw_source.strip():
+            errors.append(f"{label}.source_path 必须是非空路径")
+        else:
+            source = Path(raw_source)
+            if not source.is_file():
+                errors.append(f"{label} 源文件不存在：{source}")
+                source = None
+            elif isinstance(digest, str) and _sha256(source) != digest:
+                errors.append(f"{label} 源文件摘要与 manifest 不一致")
+    return copied, source
+
+
+def _validate_task9_generation(generation_dir: Path) -> list[str]:
+    errors: list[str] = []
+    if list(generation_dir.glob("hand-reference.*")):
+        errors.append("现代 generation 禁止出现 hand-reference.*")
+    manifest_path = generation_dir / "input-manifest.json"
+    if not manifest_path.is_file():
+        return [*errors, "现代 generation 缺少 input-manifest.json，属于 damaged run"]
+    try:
+        manifest = _load_json(manifest_path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return [*errors, "input-manifest.json 不是有效 UTF-8 JSON"]
+    fields = {
+        "schema_version",
+        "output_role",
+        "reference_snapshot",
+        "product_analysis",
+        "fidelity_constraints",
+        "inputs",
+    }
+    if not isinstance(manifest, dict) or set(manifest) != fields:
+        return [*errors, "input-manifest.json 字段集合不合法"]
+    if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
+        errors.append("input-manifest.schema_version 必须是 JSON 整数 1")
+    role = manifest.get("output_role")
+    if role not in {"hand_worn", "lifestyle"}:
+        errors.append("input-manifest.output_role 只能是 hand_worn/lifestyle")
+
+    copied_fixed: dict[str, Path | None] = {}
+    for key, expected_name in (
+        ("reference_snapshot", "reference-composition-snapshot.json"),
+        ("product_analysis", "product-analysis.json"),
+        ("fidelity_constraints", "product-fidelity-constraints.json"),
+    ):
+        copied, _source = _manifest_entry(
+            generation_dir,
+            manifest.get(key),
+            f"input-manifest.{key}",
+            errors,
+            require_source=False,
+        )
+        copied_fixed[key] = copied
+        if copied is not None and copied.name != expected_name:
+            errors.append(f"input-manifest.{key}.copied_file 必须为 {expected_name}")
+    run_root = generation_dir.parent.parent
+    fixed_sources = {
+        "reference_snapshot": run_root / "review" / "reference_composition_snapshot.json",
+        "product_analysis": run_root / "analysis" / "product_analysis.json",
+        "fidelity_constraints": run_root / "analysis" / "product_fidelity_constraints.json",
+    }
+    for key, source_path in fixed_sources.items():
+        if not source_path.is_file():
+            errors.append(f"input-manifest.{key} 对应源文件不存在：{source_path.name}")
+            continue
+        entry = manifest.get(key)
+        digest = entry.get("sha256") if isinstance(entry, dict) else None
+        if isinstance(digest, str) and _sha256(source_path) != digest:
+            errors.append(f"input-manifest.{key} 源文件摘要与 manifest 不一致")
+
+    inputs = manifest.get("inputs")
+    scene_source: Path | None = None
+    if not isinstance(inputs, list) or len(inputs) != 2:
+        errors.append("input-manifest.inputs 必须恰好包含两个有序图片输入")
+    else:
+        expected = ((1, "scene_reference", "scene-reference."), (2, "product_identity", "product-reference."))
+        for index, (item, (order, input_role, prefix)) in enumerate(zip(inputs, expected)):
+            copied, source = _manifest_entry(
+                generation_dir,
+                item,
+                f"input-manifest.inputs[{index}]",
+                errors,
+                require_source=True,
+            )
+            if isinstance(item, dict):
+                if type(item.get("order")) is not int or item.get("order") != order:
+                    errors.append("图片输入顺序必须为 scene_reference 后 product_identity")
+                if item.get("role") != input_role:
+                    errors.append("图片输入角色顺序必须为 scene_reference 后 product_identity")
+            if copied is not None and not copied.name.startswith(prefix):
+                errors.append(f"{input_role} copied_file 命名不合法")
+            if index == 0:
+                scene_source = source
+
+    for name in ("model.txt", "reference-rank.txt", "prompt.txt", "submit.json"):
+        if not (generation_dir / name).is_file():
+            errors.append(f"现代 generation 缺少 {name}")
+    snapshot_path = copied_fixed.get("reference_snapshot")
+    analysis_path = copied_fixed.get("product_analysis")
+    canonical_path = copied_fixed.get("fidelity_constraints")
+    prompt_path = generation_dir / "prompt.txt"
+    if snapshot_path is not None and scene_source is not None and isinstance(role, str):
+        try:
+            errors.extend(
+                f"快照：{error}"
+                for error in validate_reference_snapshot(snapshot_path, scene_source, role)
+            )
+        except SnapshotInputError as exc:
+            errors.append(str(exc))
+        rank_path = generation_dir / "reference-rank.txt"
+        try:
+            snapshot_data = _load_json(snapshot_path)
+            expected_rank = snapshot_data.get("rank") if isinstance(snapshot_data, dict) else None
+            actual_rank = int(rank_path.read_text(encoding="utf-8").strip())
+            if type(expected_rank) is not int or actual_rank != expected_rank:
+                errors.append("reference-rank.txt 与确认快照 rank 不一致")
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            errors.append("reference-rank.txt 无法与确认快照 rank 交叉校验")
+    if all(path is not None for path in (snapshot_path, analysis_path, canonical_path)) and prompt_path.is_file():
+        errors.extend(
+            f"Prompt：{error}"
+            for error in validate_prompt(prompt_path, snapshot_path, analysis_path, canonical_path)
+        )
+
+    result_path = generation_dir / "result.json"
+    completed = False
+    if result_path.is_file():
+        try:
+            result_data = _load_json(result_path)
+            completed = (
+                isinstance(result_data, dict)
+                and isinstance(result_data.get("data"), dict)
+                and result_data["data"].get("status") == "completed"
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            errors.append("result.json 不是有效 UTF-8 JSON")
+    if completed:
+        for name in ("result.png", "qc-review.html", "qc.json"):
+            if not (generation_dir / name).is_file():
+                errors.append(f"已完成 generation 缺少 {name}")
+        qc_path = generation_dir / "qc.json"
+        if qc_path.is_file():
+            errors.extend(f"QC：{error}" for error in validate_qc(qc_path))
+    return errors
+
+
+def inspect_run_state(run_root: Path) -> dict[str, Any]:
+    generation_root = run_root / "generation"
+    generation_dirs = (
+        sorted(path for path in generation_root.iterdir() if path.is_dir())
+        if generation_root.is_dir()
+        else []
+    )
+    modern_markers = {
+        "input-manifest.json",
+        "reference-composition-snapshot.json",
+        "product-analysis.json",
+        "product-fidelity-constraints.json",
+    }
+    modern: list[Path] = []
+    legacy: list[Path] = []
+    for directory in generation_dirs:
+        names = {path.name for path in directory.iterdir() if path.is_file()}
+        if names.intersection(modern_markers) or any(name.startswith("scene-reference.") for name in names):
+            modern.append(directory)
+        elif any(name.startswith("hand-reference.") for name in names):
+            legacy.append(directory)
+    if modern:
+        errors: list[str] = []
+        if legacy:
+            errors.append("同一 run 不得混合现代 generation 与历史 hand-reference generation")
+        for directory in modern:
+            errors.extend(
+                f"generation/{directory.name}: {error}"
+                for error in _validate_task9_generation(directory)
+            )
+        return {"classified": True, "legacy_read_only": False, "errors": errors}
+    if legacy:
+        return {"classified": True, "legacy_read_only": True, "errors": []}
+    return {"classified": False, "legacy_read_only": False, "errors": []}
 
 
 def _is_json_int(value: Any) -> bool:
@@ -529,6 +761,9 @@ def _validate_final_summary(summary_path: Path, run_root: Path) -> list[str]:
 
 
 def inspect_run(run_root: Path, final_summary: Path | None = None) -> list[str]:
+    state = inspect_run_state(run_root)
+    if state["classified"]:
+        return list(state["errors"])
     errors: list[str] = []
     if not (run_root / "input" / "product-on-hand.jpg").is_file():
         errors.append("缺少 input/product-on-hand.jpg")
@@ -591,6 +826,9 @@ def inspect_run(run_root: Path, final_summary: Path | None = None) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[1] in {"-h", "--help"}:
+        print("用法：inspect_run_artifacts.py <run-root> [final-summary.json]")
+        return 0
     if len(argv) not in (2, 3):
         print("用法：inspect_run_artifacts.py <run-root> [final-summary.json]", file=sys.stderr)
         return 2
@@ -598,6 +836,12 @@ def main(argv: list[str]) -> int:
     if not run_root.is_dir():
         print(f"run 根目录不存在：{run_root}", file=sys.stderr)
         return 2
+    for json_path in sorted(run_root.rglob("*.json")):
+        try:
+            json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            print(f"JSON 输入无法读取或语法错误：{json_path}；{exc}", file=sys.stderr)
+            return 2
     final_summary = _resolve_artifact_path(argv[2], run_root) if len(argv) == 3 else None
     errors = inspect_run(run_root, final_summary)
     if errors:
@@ -605,6 +849,8 @@ def main(argv: list[str]) -> int:
             print(error, file=sys.stderr)
         return 1
     print("run 产物检查通过")
+    state = inspect_run_state(run_root)
+    print(f"legacy_read_only={'true' if state['legacy_read_only'] else 'false'}")
     return 0
 
 
