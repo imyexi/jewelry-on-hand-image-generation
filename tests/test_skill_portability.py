@@ -55,8 +55,17 @@ def test_base_image_便携提示词校验器公开快照绑定签名() -> None:
     namespace = runpy.run_path(str(PROMPT_VALIDATOR))
     parameters = inspect.signature(namespace["validate_prompt"]).parameters
 
-    assert tuple(parameters) == ("prompt_path", "snapshot_path")
-    assert all(parameter.default is inspect.Parameter.empty for parameter in parameters.values())
+    assert tuple(parameters) == (
+        "prompt_path",
+        "snapshot_path",
+        "analysis_path",
+        "canonical_path",
+    )
+    assert parameters["prompt_path"].default is inspect.Parameter.empty
+    assert all(
+        parameters[name].default is None
+        for name in ("snapshot_path", "analysis_path", "canonical_path")
+    )
 
 
 def test_reference_preservation_历史单参数校验只读且不能充当现代门禁(

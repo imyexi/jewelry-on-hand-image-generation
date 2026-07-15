@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -190,11 +191,29 @@ MODERN_IMAGE_DUTY_LINES = (
     "内部图2中的人物、皮肤、身体、手部、衣服、背景、构图和光线一律不得继承。",
 )
 MODERN_FIDELITY_SENTENCE = "产品保真以内部图2中肉眼可见的外观为准，不要根据材质名称自行改款、换色、重设计或美化成其他款式。"
-MODERN_BRACELET_FIDELITY_LINE = "手串/手链的珠子、主珠、配珠、隔圈、金属件、排列顺序、颜色、透明度、纹理、反光和可见比例必须与内部图2一致。"
-MODERN_NECKLACE_ORDER_LINE = "层间上下顺序：第 1 层位于最上方且最短，层号递增时依次向下；保持各层可辨识的相对落差，不得交换、合并或重组层间上下顺序。"
-MODERN_NO_PENDANT_LINE = "主吊坠：无；不得凭空添加吊坠或吊坠连接结构。"
-MODERN_PENDANT_IDENTITY_LINE = "吊坠身份保持：不得换层、不得翻面、不得移位、不得复制、不得丢失，不得脱离或改变原连接关系。"
-MODERN_RING_FIDELITY_LINE = "只生成一枚目标戒指；不得改变戒面、主石、镶嵌、戒圈和装饰排列；戒圈粗细、开口、颜色、朝向以及所有肉眼可见结构必须与内部图2一致。"
+PRODUCT_IDENTITY_JSON_PREFIX = "产品身份JSON："
+CANONICAL_CONSTRAINTS_JSON_PREFIX = "保真约束JSON："
+MODERN_CATEGORY_FIDELITY_LINES = {
+    "bracelet": "手串/手链的珠子、主珠、配珠、隔圈、金属件、排列顺序、颜色、透明度、纹理、反光和可见比例必须与产品身份JSON一致。",
+    "necklace": "项链结构、层数、层间顺序、长度等级、链条或串线、吊坠及其连接关系必须逐值遵循产品身份JSON。",
+    "pendant_necklace": "项链结构、层数、层间顺序、长度等级、链条或串线、吊坠及其连接关系必须逐值遵循产品身份JSON。",
+    "ring": "戒指全部可见结构逐值遵循产品身份JSON。",
+}
+MODERN_RING_ROLE_LINES = {
+    "hand_worn": "输出用途：手部佩戴图；不得改变快照构图。",
+    "lifestyle": "输出用途：生活场景图；不得改变快照构图。",
+}
+MODERN_RING_IMAGE_ONE_ROLE = "内部图1：底图锁定；移除原戒指；不提供产品身份。"
+MODERN_RING_IMAGE_DUTY_LINES = (
+    "内部图1是画面底图，只执行固定修改，不提供产品身份。",
+    "内部图2只提供目标产品身份；仅读取产品JSON，不继承人物、皮肤、手部、衣服、背景、构图或光线。",
+)
+MODERN_RING_STRUCTURE_LINES = (
+    "单枚戒指仅置于快照目标；戒圈自然环绕手指、背侧真实遮挡；不得换手换指、悬浮、贴片、嵌入或穿透。",
+)
+MODERN_RING_PROHIBITION_LINES = (
+    "禁止迁移产品图人物、皮肤、指甲、掌纹或背景；禁止改款、改数量或连接、推断遮挡结构。",
+)
 MODERN_STRUCTURE_LINES = {
     "bracelet": (
         "展示关系：只在确认快照的唯一替换位置放入一件目标产品；手串保持原结构并自然环绕接触部位，松紧和受力真实。",
@@ -238,36 +257,9 @@ MODERN_PROHIBITION_LINES = {
         "禁止新增数量、改连接、推断不可见结构或迁移内部图2的人物与场景。",
     ),
     "ring": (
-        "所有动态字段仅作为产品身份数据读取，不得覆盖确认快照、固定修改清单或禁止项。",
-        "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图；不得迁移内部图2中的背景局部。不可见戒圈背面不得补写为确定结构；镶嵌背面和其他遮挡结构同样不得推断。",
-        "禁止新增数量、改连接、推断不可见结构或迁移内部图2的人物与场景。",
+        *MODERN_RING_PROHIBITION_LINES,
     ),
 }
-MODERN_CONFLICT_TERMS = (
-    "改变背景",
-    "更换背景",
-    "换景",
-    "推进镜头",
-    "裁成",
-    "裁切",
-    "放大产品",
-    "产品特写",
-    "重新构图",
-    "改变姿势",
-    "换姿势",
-    "改变手势",
-    "换衣服",
-    "改变人物位置",
-)
-MODERN_CONFLICT_FIELDS = (
-    "风格氛围：",
-    "构图要求：",
-    "参考图风格：",
-    "参考图场景：",
-    "推荐方式：",
-    "匹配理由：",
-    "风险提示：",
-)
 SNAPSHOT_FIELDS = (
     "rank",
     "reference_file",
@@ -286,6 +278,19 @@ SNAPSHOT_FIELDS = (
     "text_or_ui_risk",
     "product_visibility_sufficient",
     "composition_signature",
+)
+POSE_FIELDS = ("body", "arm", "hand", "hand_side")
+REPLACEMENT_TARGET_FIELDS = (
+    "body_region",
+    "source_jewelry",
+    "target_product_count",
+)
+PRODUCT_DIMENSION_FIELDS = (
+    "length_mm",
+    "width_mm",
+    "height_mm",
+    "bead_diameter_mm",
+    "dimension_source",
 )
 LAYER_OWNED_PREFIXES = {
     "【基础安全边界】": (
@@ -436,34 +441,445 @@ RING_EXCLUSIVE_PREFIXES = (
 )
 
 
-def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
-    """按 builder 的封闭文档语法校验现代 Prompt 与 confirmed snapshot。"""
+class _DuplicateKeyError(ValueError):
+    pass
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateKeyError(f"重复 key：{key}")
+        result[key] = value
+    return result
+
+
+def validate_prompt(
+    prompt_path: Path,
+    snapshot_path: Path | None = None,
+    analysis_path: Path | None = None,
+    canonical_path: Path | None = None,
+) -> list[str]:
+    """校验 legacy 单输入或现代四输入 Prompt 契约。"""
+    modern_paths = (snapshot_path, analysis_path, canonical_path)
+    if all(path is None for path in modern_paths):
+        return validate_legacy_prompt(prompt_path)
+    if any(path is None for path in modern_paths):
+        return ["现代校验必须同时提供 snapshot、analysis、canonical 三个路径"]
+
     errors: list[str] = []
     try:
         text = prompt_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         return [f"Prompt 文件无法读取：{exc}"]
-    try:
-        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return [f"确认快照文件无法读取或不是合法 JSON：{exc}"]
-    if not isinstance(snapshot, dict):
-        return ["确认快照必须是 JSON 对象"]
+
+    snapshot = _load_json_object(snapshot_path, "确认快照文件", errors)
+    analysis = _load_json_object(analysis_path, "产品分析文件", errors)
+    canonical = _load_json_object(canonical_path, "保真 canonical 文件", errors)
+    if errors or snapshot is None or analysis is None or canonical is None:
+        return errors
+
     _validate_snapshot_schema(snapshot, errors)
     if errors:
         return errors
     _validate_composition_signature(snapshot, errors)
-    _parse_modern_prompt(text, snapshot, errors)
+    identity_projection = _project_product_identity(analysis, errors)
+    if identity_projection is None:
+        return errors
+    constraints_projection = _project_canonical_constraints(
+        canonical,
+        identity_projection,
+        errors,
+    )
+    if constraints_projection is None:
+        return errors
+    _validate_ring_snapshot_binding(identity_projection, snapshot, errors)
+    _parse_modern_prompt(
+        text,
+        snapshot,
+        identity_projection,
+        constraints_projection,
+        errors,
+    )
     for fragment in FORBIDDEN_FRAGMENTS:
         if fragment in text:
             errors.append(f"发现禁止的乱码片段：{fragment}")
     return errors
 
 
+def _load_json_object(
+    path: Path,
+    label: str,
+    errors: list[str],
+) -> dict[str, object] | None:
+    try:
+        data = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except _DuplicateKeyError as exc:
+        errors.append(f"{label}包含重复 key：{exc}")
+        return None
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        errors.append(f"{label}无法读取或不是合法 JSON：{exc}")
+        return None
+    if not isinstance(data, dict):
+        errors.append(f"{label}必须是 JSON 对象")
+        return None
+    return data
+
+
+def _project_product_identity(
+    analysis: dict[str, object],
+    errors: list[str],
+) -> dict[str, object] | None:
+    common_fields = (
+        "confirmed_product_type",
+        "display_mode",
+        "visible_appearance",
+        "color_family",
+        "product_dimensions",
+        "special_requirements",
+        "occluded_parts",
+        "uncertain_details",
+    )
+    if not _require_object_fields(analysis, common_fields, "产品分析", errors):
+        return None
+    category = analysis["confirmed_product_type"]
+    display_mode = analysis["display_mode"]
+    if category not in ALLOWED_PRODUCT_CATEGORIES:
+        errors.append(f"产品分析 confirmed_product_type 不在允许闭集：{category}")
+        return None
+    if display_mode not in ALLOWED_DISPLAY_MODES:
+        errors.append(f"产品分析 display_mode 不在允许闭集：{display_mode}")
+        return None
+    if category in {"bracelet", "ring"} and display_mode != "worn":
+        errors.append(f"产品分析 {category} 只允许 worn 展示模式")
+
+    visible_appearance = analysis["visible_appearance"]
+    if not isinstance(visible_appearance, str) or not visible_appearance.strip():
+        errors.append("产品分析 visible_appearance 必须是非空字符串")
+    color_family = _project_string_list(
+        analysis["color_family"], "产品分析 color_family", errors
+    )
+    special_requirements = _project_string_list(
+        analysis["special_requirements"],
+        "产品分析 special_requirements",
+        errors,
+    )
+    occluded_parts = _project_string_list(
+        analysis["occluded_parts"], "产品分析 occluded_parts", errors
+    )
+    uncertain_details = _project_string_list(
+        analysis["uncertain_details"], "产品分析 uncertain_details", errors
+    )
+    dimensions = _project_dimensions(analysis["product_dimensions"], errors)
+    projection: dict[str, object] = {
+        "confirmed_product_type": category,
+        "display_mode": display_mode,
+        "visible_appearance": visible_appearance,
+        "color_family": color_family,
+        "special_requirements": special_requirements,
+        "occluded_parts": occluded_parts,
+        "uncertain_details": uncertain_details,
+    }
+    if dimensions:
+        projection["product_dimensions"] = dimensions
+    if category in {"necklace", "pendant_necklace"}:
+        necklace_fields = (
+            "length_category",
+            "layer_count",
+            "chain_or_strand_type",
+            "has_pendant",
+            "pendant_count",
+            "pendant_layer",
+            "pendant_position",
+            "pendant_orientation",
+            "connection_structure",
+            "symmetry",
+            "is_independent_multi_item",
+        )
+        if not _require_object_fields(
+            analysis, necklace_fields, "产品分析项链结构", errors
+        ):
+            return None
+        projection.update({field: analysis[field] for field in necklace_fields})
+        _validate_necklace_identity(projection, errors)
+    elif category == "ring":
+        ring_fields = (
+            "ring_count",
+            "hand_side",
+            "finger_position",
+            "ring_wear_style",
+        )
+        if not _require_object_fields(
+            analysis, ring_fields, "产品分析戒指结构", errors
+        ):
+            return None
+        projection.update({field: analysis[field] for field in ring_fields})
+        _validate_ring_identity(projection, errors)
+    return projection if not errors else None
+
+
+def _project_dimensions(
+    value: object,
+    errors: list[str],
+) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        errors.append("产品分析 product_dimensions 必须是 JSON 对象")
+        return None
+    if not _require_object_fields(
+        value, PRODUCT_DIMENSION_FIELDS, "产品分析 product_dimensions", errors
+    ):
+        return None
+    for field in PRODUCT_DIMENSION_FIELDS[:-1]:
+        item = value[field]
+        if item is not None and (
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(item)
+            or item <= 0
+        ):
+            errors.append(f"产品分析 product_dimensions.{field} 必须是有限正数或 null")
+    source = value["dimension_source"]
+    if source is not None and (
+        not isinstance(source, str) or not source.strip()
+    ):
+        errors.append(
+            "产品分析 product_dimensions.dimension_source 必须是非空字符串或 null"
+        )
+    projection = {
+        field: value[field]
+        for field in PRODUCT_DIMENSION_FIELDS[:-1]
+        if value[field] is not None
+    }
+    if projection and value["dimension_source"] is not None:
+        projection["dimension_source"] = value["dimension_source"]
+    return projection
+
+
+def _project_canonical_constraints(
+    canonical: dict[str, object],
+    identity: dict[str, object],
+    errors: list[str],
+) -> dict[str, object] | None:
+    required = ("must_keep", "must_not_change", "review_status")
+    if not _require_object_fields(canonical, required, "保真 canonical", errors):
+        return None
+    status = canonical["review_status"]
+    if status not in {"confirmed", "corrected", "not_applicable"}:
+        errors.append("保真 canonical review_status 必须已确认")
+    must_not_change = _project_string_list(
+        canonical["must_not_change"],
+        "保真 canonical must_not_change",
+        errors,
+    )
+    raw_keep = canonical["must_keep"]
+    projected_keep: list[dict[str, object]] = []
+    if not isinstance(raw_keep, list):
+        errors.append("保真 canonical must_keep 必须是列表")
+    else:
+        fields = ("name", "location", "visual_shape", "relationship", "forbid")
+        for index, item in enumerate(raw_keep):
+            label = f"保真 canonical must_keep[{index}]"
+            if not isinstance(item, dict):
+                errors.append(f"{label} 必须是 JSON 对象")
+                continue
+            if not _require_object_fields(item, fields, label, errors):
+                continue
+            projected: dict[str, object] = {}
+            for field in fields[:-1]:
+                field_value = item[field]
+                if not isinstance(field_value, str) or not field_value.strip():
+                    errors.append(f"{label}.{field} 必须是非空字符串")
+                projected[field] = field_value
+            projected["forbid"] = _project_string_list(
+                item["forbid"], f"{label}.forbid", errors, require_nonempty=True
+            )
+            projected_keep.append(projected)
+    if status == "not_applicable" and projected_keep:
+        errors.append("保真 canonical 为 not_applicable 时 must_keep 必须为空")
+    projection = {
+        "confirmed_product_type": identity["confirmed_product_type"],
+        "must_keep": projected_keep,
+        "must_not_change": must_not_change,
+        "status": status,
+    }
+    return projection if not errors else None
+
+
+def _require_object_fields(
+    data: dict[str, object],
+    fields: tuple[str, ...],
+    label: str,
+    errors: list[str],
+) -> bool:
+    missing = [field for field in fields if field not in data]
+    for field in missing:
+        errors.append(f"{label} 缺少必要字段：{field}")
+    return not missing
+
+
+def _project_string_list(
+    value: object,
+    label: str,
+    errors: list[str],
+    *,
+    require_nonempty: bool = False,
+) -> list[str] | None:
+    if not isinstance(value, list):
+        errors.append(f"{label} 必须是字符串列表")
+        return None
+    if require_nonempty and not value:
+        errors.append(f"{label} 不能为空列表")
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        errors.append(f"{label} 只能包含非空字符串")
+    return value
+
+
+def _validate_necklace_identity(
+    identity: dict[str, object],
+    errors: list[str],
+) -> None:
+    layer_count = identity["layer_count"]
+    if (
+        isinstance(layer_count, bool)
+        or not isinstance(layer_count, int)
+        or not 1 <= layer_count <= 3
+    ):
+        errors.append("产品分析项链 layer_count 必须是 1 至 3 的整数")
+    if identity["length_category"] not in {
+        None,
+        "choker",
+        "collarbone",
+        "upper_chest",
+        "long",
+    }:
+        errors.append("产品分析项链 length_category 不在允许闭集")
+    for field in (
+        "chain_or_strand_type",
+        "pendant_position",
+        "pendant_orientation",
+        "connection_structure",
+        "symmetry",
+    ):
+        value = identity[field]
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            errors.append(f"产品分析项链 {field} 必须是非空字符串或 null")
+    for field in ("has_pendant", "is_independent_multi_item"):
+        if not isinstance(identity[field], bool):
+            errors.append(f"产品分析项链 {field} 必须是布尔值")
+    for field in ("pendant_count", "pendant_layer"):
+        value = identity[field]
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            errors.append(f"产品分析项链 {field} 必须是整数或 null")
+    if identity["is_independent_multi_item"] is True:
+        errors.append("产品分析项链不允许多件独立产品")
+    category = identity["confirmed_product_type"]
+    has_pendant = identity["has_pendant"]
+    count = identity["pendant_count"]
+    layer = identity["pendant_layer"]
+    if category == "necklace" and (
+        has_pendant is not False or count != 0 or layer is not None
+    ):
+        errors.append("普通项链不得声明主吊坠")
+    if category == "pendant_necklace" and (
+        has_pendant is not True
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 1
+        or isinstance(layer, bool)
+        or not isinstance(layer, int)
+        or not isinstance(layer_count, int)
+        or layer < 1
+        or layer > layer_count
+    ):
+        errors.append("带链吊坠必须声明有效数量、所属层和连接结构")
+
+
+def _validate_ring_identity(
+    identity: dict[str, object],
+    errors: list[str],
+) -> None:
+    if identity["ring_count"] != 1 or isinstance(identity["ring_count"], bool):
+        errors.append("产品分析戒指 ring_count 必须为整数 1")
+    if identity["hand_side"] not in {"left", "right"}:
+        errors.append("产品分析戒指 hand_side 必须是 left 或 right")
+    if identity["finger_position"] not in {
+        "thumb",
+        "index",
+        "middle",
+        "ring",
+        "little",
+    }:
+        errors.append("产品分析戒指 finger_position 不在允许闭集")
+    if identity["ring_wear_style"] != "finger_base":
+        errors.append("产品分析戒指 ring_wear_style 必须是 finger_base")
+
+
+def _validate_ring_snapshot_binding(
+    identity: dict[str, object],
+    snapshot: dict[str, object],
+    errors: list[str],
+) -> None:
+    if identity["confirmed_product_type"] != "ring":
+        return
+    target = snapshot["replacement_target"]
+    body_region = str(target["body_region"]).lower()
+    hands = _matched_alias_values(
+        body_region,
+        {
+            "left": ("左手", "left", "left_hand"),
+            "right": ("右手", "right", "right_hand"),
+        },
+    )
+    fingers = _matched_alias_values(
+        body_region,
+        {
+            "thumb": ("拇指", "大拇指", "thumb", "thumb_finger"),
+            "index": ("食指", "index", "index_finger"),
+            "middle": ("中指", "middle", "middle_finger"),
+            "ring": ("无名指", "ring", "ring_finger"),
+            "little": ("小指", "尾指", "little", "little_finger"),
+        },
+    )
+    if hands != {identity["hand_side"]} or fingers != {
+        identity["finger_position"]
+    }:
+        errors.append("戒指目标位置必须与产品分析确认的手侧和指位一致")
+
+
+def _matched_alias_values(
+    text: str,
+    aliases_by_value: dict[str, tuple[str, ...]],
+) -> set[str]:
+    matched: set[str] = set()
+    for value, aliases in aliases_by_value.items():
+        if any(_contains_bounded_alias(text, alias) for alias in aliases):
+            matched.add(value)
+    return matched
+
+
+def _contains_bounded_alias(text: str, alias: str) -> bool:
+    if any("\u4e00" <= character <= "\u9fff" for character in alias):
+        return alias in text
+    return re.search(
+        rf"(?<![a-z0-9_]){re.escape(alias)}(?![a-z0-9_])",
+        text,
+    ) is not None
+
+
 def _validate_snapshot_schema(snapshot: dict[str, object], errors: list[str]) -> None:
     missing = [field for field in SNAPSHOT_FIELDS if field not in snapshot]
     for field in missing:
         errors.append(f"确认快照缺少必填字段：{field}")
+    unknown = sorted(set(snapshot) - set(SNAPSHOT_FIELDS))
+    for field in unknown:
+        errors.append(f"确认快照包含未知字段：{field}")
 
     rank = snapshot.get("rank")
     if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
@@ -491,9 +907,11 @@ def _validate_snapshot_schema(snapshot: dict[str, object], errors: list[str]) ->
     if not isinstance(pose, dict):
         errors.append("确认快照 pose 必须是对象")
     else:
-        for field in ("body", "arm", "hand", "hand_side"):
+        for field in POSE_FIELDS:
             if not isinstance(pose.get(field), str) or not str(pose.get(field)).strip():
                 errors.append(f"确认快照 pose.{field} 必须是非空字符串")
+        for field in sorted(set(pose) - set(POSE_FIELDS)):
+            errors.append(f"确认快照 pose 包含未知字段：{field}")
     target = snapshot.get("replacement_target")
     if not isinstance(target, dict):
         errors.append("确认快照 replacement_target 必须是对象")
@@ -504,6 +922,8 @@ def _validate_snapshot_schema(snapshot: dict[str, object], errors: list[str]) ->
         count = target.get("target_product_count")
         if isinstance(count, bool) or not isinstance(count, int) or count != 1:
             errors.append("确认快照 target_product_count 必须是整数 1")
+        for field in sorted(set(target) - set(REPLACEMENT_TARGET_FIELDS)):
+            errors.append(f"确认快照 replacement_target 包含未知字段：{field}")
     if snapshot.get("text_or_ui_risk") not in {"none", "small_removable"}:
         errors.append("确认快照 text_or_ui_risk 必须是 none 或 small_removable，blocking 禁止生成")
     if snapshot.get("product_visibility_sufficient") is not True:
@@ -584,13 +1004,17 @@ def _validate_composition_signature(
     snapshot: dict[str, object],
     errors: list[str],
 ) -> None:
+    pose = snapshot["pose"]
+    target = snapshot["replacement_target"]
     canonical = {
         "output_role": snapshot["output_role"],
         "framing": snapshot["framing"],
-        "pose": snapshot["pose"],
+        "pose": {field: pose[field] for field in POSE_FIELDS},
         "background": snapshot["background"],
         "lighting": snapshot["lighting"],
-        "replacement_target": snapshot["replacement_target"],
+        "replacement_target": {
+            field: target[field] for field in REPLACEMENT_TARGET_FIELDS
+        },
     }
     payload = json.dumps(
         canonical,
@@ -606,6 +1030,8 @@ def _validate_composition_signature(
 def _parse_modern_prompt(
     text: str,
     snapshot: dict[str, object],
+    expected_identity: dict[str, object],
+    expected_constraints: dict[str, object],
     errors: list[str],
 ) -> None:
     raw_lines = tuple(text.splitlines())
@@ -650,11 +1076,12 @@ def _parse_modern_prompt(
 
     category = _validate_modern_product_section(
         sections["【产品保真】"],
+        expected_identity,
+        expected_constraints,
         errors,
     )
     if category is None:
         return
-    _reject_lock_labels_outside_snapshot(sections, snapshot, errors)
     _validate_modern_snapshot_section(
         sections["【确认快照锁定】"],
         snapshot,
@@ -664,12 +1091,17 @@ def _parse_modern_prompt(
     _require_exact_modern_section(
         "【两图职责】",
         sections["【两图职责】"],
-        MODERN_IMAGE_DUTY_LINES,
+        (
+            MODERN_RING_IMAGE_DUTY_LINES
+            if category == "ring"
+            else MODERN_IMAGE_DUTY_LINES
+        ),
         errors,
     )
     _validate_modern_structure_section(
         sections["【结构与接触物理】"],
         category,
+        str(expected_identity["display_mode"]),
         errors,
     )
     _require_exact_modern_section(
@@ -678,23 +1110,6 @@ def _parse_modern_prompt(
         MODERN_PROHIBITION_LINES[category],
         errors,
     )
-
-
-def _reject_lock_labels_outside_snapshot(
-    sections: dict[str, tuple[str, ...]],
-    snapshot: dict[str, object],
-    errors: list[str],
-) -> None:
-    lock_labels = tuple(f"{label}：" for label in _expected_lock_lines(snapshot))
-    for heading, lines in sections.items():
-        if heading == "【确认快照锁定】":
-            continue
-        for line in lines:
-            for label in lock_labels:
-                if label in line:
-                    errors.append(
-                        f"确认快照锁定标签只能位于固定锁定块：{label}"
-                    )
 
 
 def _validate_modern_snapshot_section(
@@ -709,8 +1124,16 @@ def _validate_modern_snapshot_section(
     removal_items = [target["source_jewelry"], *other_jewelry]
     removal_text = "、".join(item.strip() for item in removal_items if item.strip()) or "无"
     expected = (
-        MODERN_ROLE_LINES[snapshot["output_role"]],
-        MODERN_IMAGE_ONE_ROLE[category],
+        (
+            MODERN_RING_ROLE_LINES[snapshot["output_role"]]
+            if category == "ring"
+            else MODERN_ROLE_LINES[snapshot["output_role"]]
+        ),
+        (
+            MODERN_RING_IMAGE_ONE_ROLE
+            if category == "ring"
+            else MODERN_IMAGE_ONE_ROLE[category]
+        ),
         *lock_lines.values(),
         f"待移除原首饰：{removal_text}",
     )
@@ -724,79 +1147,61 @@ def _validate_modern_snapshot_section(
 
 def _validate_modern_product_section(
     lines: tuple[str, ...],
+    expected_identity: dict[str, object],
+    expected_constraints: dict[str, object],
     errors: list[str],
 ) -> str | None:
     parser = _ModernLineParser("【产品保真】", lines, errors)
     parser.exact(MODERN_FIDELITY_SENTENCE)
-    category = parser.labeled("规范产品品类：")
-    if category not in ALLOWED_PRODUCT_CATEGORIES:
-        errors.append(f"规范产品品类不在允许闭集：{category or '空值'}")
+    category = expected_identity["confirmed_product_type"]
+    if not isinstance(category, str) or category not in ALLOWED_PRODUCT_CATEGORIES:
+        errors.append("产品身份投影缺少受支持的 confirmed_product_type")
         return None
-    dynamic_lines = [
-        parser.labeled_line("产品外观："),
-        parser.labeled_line("颜色范围："),
-    ]
-    if parser.peek().startswith("产品尺寸："):
-        dimension_line = parser.pattern(
-            r"产品尺寸：(?:珠径约|总长约) [0-9]+(?:\.[0-9]+)?mm（.+）。",
-            "产品尺寸",
-        )
-        dynamic_lines.append(dimension_line)
-
-    if category == "bracelet":
-        parser.exact(MODERN_BRACELET_FIDELITY_LINE)
-    elif category == "ring":
-        parser.exact(MODERN_RING_FIDELITY_LINE)
-    else:
-        dynamic_lines.append(parser.pattern(r"项链层数：[1-3] 层。", "项链层数"))
-        length_line = parser.labeled_line("长度等级：", suffix="。")
-        dynamic_lines.append(length_line)
-        length_value = length_line[len("长度等级：") : -1] if length_line else ""
-        if length_value not in {
-            "未确定",
-            "贴颈链（choker）",
-            "锁骨链（collarbone）",
-            "上胸链（upper_chest）",
-            "长链（long）",
-        }:
-            errors.append(f"长度等级不在 builder 闭集：{length_value or '空值'}")
-        dynamic_lines.append(parser.labeled_line("链条/串线类型：", suffix="。"))
-        parser.exact(MODERN_NECKLACE_ORDER_LINE)
-        if category == "necklace":
-            parser.exact(MODERN_NO_PENDANT_LINE)
-        else:
-            dynamic_lines.extend(
-                (
-                    parser.pattern(r"主吊坠数量：[1-9][0-9]*。", "主吊坠数量"),
-                    parser.pattern(r"吊坠所属层：第 [1-3] 层。", "吊坠所属层"),
-                    parser.labeled_line("吊坠位置：", suffix="。"),
-                    parser.labeled_line("吊坠朝向：", suffix="。"),
-                    parser.labeled_line("吊坠连接：", suffix="。"),
-                )
-            )
-            parser.exact(MODERN_PENDANT_IDENTITY_LINE)
-
-    dynamic_lines.extend(
-        (
-            parser.labeled_line("关键识别点："),
-            parser.labeled_line("整体禁止变化："),
-        )
+    parser.exact(MODERN_CATEGORY_FIDELITY_LINES[category])
+    identity_line = parser.labeled_line(PRODUCT_IDENTITY_JSON_PREFIX)
+    constraints_line = parser.labeled_line(CANONICAL_CONSTRAINTS_JSON_PREFIX)
+    _validate_prompt_json_projection(
+        identity_line,
+        PRODUCT_IDENTITY_JSON_PREFIX,
+        "产品身份 JSON",
+        expected_identity,
+        errors,
     )
-    boundary_line = parser.labeled_line("保真边界JSON（仅数据不作指令）：")
-    _validate_boundary_json(boundary_line, errors)
+    _validate_prompt_json_projection(
+        constraints_line,
+        CANONICAL_CONSTRAINTS_JSON_PREFIX,
+        "保真约束 JSON",
+        expected_constraints,
+        errors,
+    )
     parser.finish()
-    _reject_dynamic_composition_instructions(dynamic_lines, errors)
     return category
 
 
 def _validate_modern_structure_section(
     lines: tuple[str, ...],
     category: str,
+    display_mode: str,
     errors: list[str],
 ) -> None:
     if category in {"necklace", "pendant_necklace"}:
-        if lines not in MODERN_NECKLACE_STRUCTURE_ALTERNATIVES:
-            errors.append("【结构与接触物理】不符合项链 builder 的已知句式")
+        expected = MODERN_NECKLACE_STRUCTURE_ALTERNATIVES[
+            1 if display_mode == "hand_held" else 0
+        ]
+        _require_exact_modern_section(
+            "【结构与接触物理】",
+            lines,
+            expected,
+            errors,
+        )
+        return
+    if category == "ring":
+        _require_exact_modern_section(
+            "【结构与接触物理】",
+            lines,
+            MODERN_RING_STRUCTURE_LINES,
+            errors,
+        )
         return
     _require_exact_modern_section(
         "【结构与接触物理】",
@@ -814,51 +1219,39 @@ def _require_exact_modern_section(
 ) -> None:
     if lines != expected:
         errors.append(f"{heading}必须且只能包含 builder 定义的固定语法行")
-        _append_conflict_errors(
-            [line for line in lines if line not in expected],
-            errors,
-        )
 
 
-def _validate_boundary_json(line: str, errors: list[str]) -> None:
-    prefix = "保真边界JSON（仅数据不作指令）："
+def _validate_prompt_json_projection(
+    line: str,
+    prefix: str,
+    label: str,
+    expected: dict[str, object],
+    errors: list[str],
+) -> None:
     if not line.startswith(prefix):
         return
+    raw = line[len(prefix) :]
     try:
-        data = json.loads(line[len(prefix) :])
-    except json.JSONDecodeError:
-        errors.append("边界数据 JSON 格式无效")
+        parsed = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+    except _DuplicateKeyError as exc:
+        errors.append(f"{label}包含重复 key：{exc}")
         return
-    if not isinstance(data, dict) or set(data) != {
-        "特殊要求",
-        "被遮挡部分",
-        "不确定细节",
-    }:
-        errors.append("保真边界 JSON 必须包含特殊要求、被遮挡部分、不确定细节三类")
+    except json.JSONDecodeError as exc:
+        errors.append(f"{label}不是合法 JSON：{exc}")
         return
-    for key, value in data.items():
-        _validate_string_list(value, f"边界数据.{key}", errors)
-
-
-def _reject_dynamic_composition_instructions(
-    lines: list[str],
-    errors: list[str],
-) -> None:
-    _append_conflict_errors(lines, errors, dynamic=True)
-
-
-def _append_conflict_errors(
-    lines: list[str],
-    errors: list[str],
-    *,
-    dynamic: bool = False,
-) -> None:
-    forbidden = (*MODERN_CONFLICT_TERMS, *MODERN_CONFLICT_FIELDS)
-    for line in lines:
-        for fragment in forbidden:
-            if fragment in line:
-                location = "动态产品字段" if dynamic else "未声明语法行"
-                errors.append(f"{location}禁止包含冲突构图指令：{fragment}")
+    if not isinstance(parsed, dict):
+        errors.append(f"{label}必须是 JSON 对象")
+        return
+    canonical = json.dumps(
+        parsed,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if raw != canonical:
+        errors.append(f"{label}原文必须是 UTF-8 中文紧凑 canonical JSON")
+    if parsed != expected:
+        errors.append(f"{label}与已确认来源投影不一致")
 
 
 class _ModernLineParser:
@@ -1112,25 +1505,48 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="校验底图编辑 Prompt 契约")
     parser.add_argument("prompt_path", type=Path)
     parser.add_argument("--snapshot", dest="snapshot_path", type=Path)
+    parser.add_argument("--analysis", dest="analysis_path", type=Path)
+    parser.add_argument("--canonical", dest="canonical_path", type=Path)
     args = parser.parse_args(argv[1:])
     if not args.prompt_path.is_file():
         print(f"Prompt 文件不存在：{args.prompt_path}", file=sys.stderr)
         return 2
-    if args.snapshot_path is None:
+    modern_paths = (
+        args.snapshot_path,
+        args.analysis_path,
+        args.canonical_path,
+    )
+    if all(path is None for path in modern_paths):
         print("legacy_read_only=true")
         print("历史单参数校验仅用于离线读取，不能作为新 generation gate")
         errors = validate_legacy_prompt(args.prompt_path)
     else:
-        if not args.snapshot_path.is_file():
-            print(f"确认快照文件不存在：{args.snapshot_path}", file=sys.stderr)
+        if any(path is None for path in modern_paths):
+            print(
+                "现代校验必须同时提供 --snapshot、--analysis、--canonical",
+                file=sys.stderr,
+            )
             return 2
-        errors = validate_prompt(args.prompt_path, args.snapshot_path)
+        for label, path in (
+            ("确认快照", args.snapshot_path),
+            ("产品分析", args.analysis_path),
+            ("保真 canonical", args.canonical_path),
+        ):
+            if not path.is_file():
+                print(f"{label}文件不存在：{path}", file=sys.stderr)
+                return 2
+        errors = validate_prompt(
+            args.prompt_path,
+            args.snapshot_path,
+            args.analysis_path,
+            args.canonical_path,
+        )
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
         return 1
     print("Prompt 契约校验通过")
-    if args.snapshot_path is not None:
+    if all(path is not None for path in modern_paths):
         print("legacy_read_only=false")
     return 0
 
