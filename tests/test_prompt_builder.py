@@ -619,6 +619,115 @@ def test_四输入产品身份JSON拒绝篡改与非canonical原文(
     assert errors, f"产品身份 JSON {mutation} 必须失败"
 
 
+@pytest.mark.parametrize(
+    ("product", "field", "replacement"),
+    (
+        (_necklace_product(), "layer_count", 1.0),
+        (_necklace_product(), "layer_count", True),
+        (_necklace_product(), "has_pendant", 0),
+        (_necklace_product(ProductType.PENDANT_NECKLACE), "has_pendant", 1),
+    ),
+)
+def test_四输入Prompt产品JSON严格区分整数浮点与布尔类型(
+    tmp_path,
+    product,
+    field,
+    replacement,
+):
+    constraints = _constraints()
+    snapshot = _snapshot_for_product(product)
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row()),
+        constraints,
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
+    identity = json.loads(_json_payload(prompt, PRODUCT_IDENTITY_JSON_PREFIX))
+    identity[field] = replacement
+    tampered = _replace_json_payload(
+        prompt,
+        PRODUCT_IDENTITY_JSON_PREFIX,
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+    errors = _modern_contract_errors(
+        tmp_path,
+        tampered,
+        snapshot.to_dict(),
+        f"strict-type-{field}-{type(replacement).__name__}",
+        product,
+        constraints,
+    )
+    assert errors, f"{field} 不得把 {type(replacement).__name__} 当作原类型"
+
+
+@pytest.mark.parametrize("replacement", (1.0, True))
+def test_四输入analysis与Prompt协调篡改ring_count类型仍拒绝(
+    tmp_path,
+    replacement,
+):
+    product = _ring_product()
+    constraints = _ring_constraints()
+    snapshot = _snapshot_for_product(product)
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row(jewelry_type="戒指")),
+        constraints,
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
+    identity = json.loads(_json_payload(prompt, PRODUCT_IDENTITY_JSON_PREFIX))
+    identity["ring_count"] = replacement
+    prompt = _replace_json_payload(
+        prompt,
+        PRODUCT_IDENTITY_JSON_PREFIX,
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    prompt_path = tmp_path / f"ring-count-{type(replacement).__name__}-prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    snapshot_path = _write_snapshot(tmp_path, snapshot)
+    analysis_path, canonical_path = _write_modern_sources(
+        tmp_path,
+        product,
+        constraints,
+        f"ring-count-{type(replacement).__name__}",
+    )
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    analysis["ring_count"] = replacement
+    analysis_path.write_text(
+        json.dumps(analysis, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    validator = run_path(
+        str(
+            Path(__file__).parents[1]
+            / "skills"
+            / "jewelry-on-hand-workflow"
+            / "scripts"
+            / "validate_prompt_contract.py"
+        )
+    )
+
+    errors = validator["validate_prompt"](
+        prompt_path,
+        snapshot_path,
+        analysis_path,
+        canonical_path,
+    )
+    assert errors, "ring_count 必须严格是 JSON 整数 1"
+
+
 def test_四输入保真约束JSON拒绝篡改并绑定canonical文件(tmp_path):
     product = _product()
     constraints = _constraints()

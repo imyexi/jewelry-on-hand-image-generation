@@ -805,7 +805,7 @@ def _validate_ring_identity(
     identity: dict[str, object],
     errors: list[str],
 ) -> None:
-    if identity["ring_count"] != 1 or isinstance(identity["ring_count"], bool):
+    if type(identity["ring_count"]) is not int or identity["ring_count"] != 1:
         errors.append("产品分析戒指 ring_count 必须为整数 1")
     if identity["hand_side"] not in {"left", "right"}:
         errors.append("产品分析戒指 hand_side 必须是 left 或 right")
@@ -1250,7 +1250,13 @@ def _validate_prompt_json_projection(
     )
     if raw != canonical:
         errors.append(f"{label}原文必须是 UTF-8 中文紧凑 canonical JSON")
-    if parsed != expected:
+    expected_canonical = json.dumps(
+        expected,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if raw != expected_canonical:
         errors.append(f"{label}与已确认来源投影不一致")
 
 
