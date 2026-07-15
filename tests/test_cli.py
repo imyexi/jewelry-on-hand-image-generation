@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook
 
 from jewelry_on_hand.models import ReferenceRow, ScoredReference
@@ -1328,3 +1330,176 @@ def test_批量重排加载各运行角色并清除旧快照后重建审核包(t
             run_root / "review" / "review.html"
         ).read_text(encoding="utf-8")
         assert not (run_root / "review" / "review_decision.json").exists()
+
+
+def test_批量重排后段提交失败时所有运行旧包逐字节不变(tmp_path, monkeypatch):
+    from jewelry_on_hand.cli import main
+
+    output_root = tmp_path / "runs"
+    package_before = {}
+    for run_id in ("first", "second"):
+        paths = RunPaths.create(output_root, run_id)
+        product_image = paths.input_dir / "product-on-hand.jpg"
+        product_image.write_bytes(f"product-{run_id}".encode())
+        make_analysis(paths.analysis_dir / "product_analysis.json")
+        write_json(
+            paths.analysis_dir / "output_role.json",
+            {"output_role": "hand_worn"},
+        )
+        candidates = []
+        for index, name in enumerate(("a", "b", "c", "d"), start=1):
+            reference = tmp_path / f"{run_id}-{name}.jpg"
+            reference.write_bytes(f"{run_id}-bytes-{name}".encode())
+            row = ReferenceRow(
+                index=index,
+                file_name=reference.name,
+                relative_path=f"{run_id}/{reference.name}",
+                absolute_path=reference,
+                width=100,
+                height=200,
+                size_mb=0.1,
+                purpose_category="手部佩戴图",
+                bracelet_applicability="是：可用于手链/手串",
+                default_strategy="常规可优先使用",
+                style_category=f"暗调闪光-{name}",
+                scene_keywords=f"场景-{name}",
+                jewelry_type="手链/手串",
+                recommended_usage="左手腕近景完整露出",
+                notes=f"正面视角，主体位于画面{name}区，无文字或 UI",
+                confidence="高",
+                file_exists=True,
+                framing=f"手部近景-{name}",
+                visible_body_regions="左手腕 / 前臂完整露出",
+                product_visibility="展示面积充足，大于 35%",
+                collar_type="无衣领",
+                clothing_occlusion_risk="衣物无遮挡",
+                pose_keywords=f"身体未入镜，前臂{name}方向自然抬起",
+                existing_jewelry="左手腕原有手链可完整识别并移除",
+                crop_risk="裁切风险低",
+                hand_side="左手",
+                hand_orientation="手背朝向镜头",
+            )
+            candidates.append(
+                ScoredReference(row, 100 - index, index, ["匹配"], [], [])
+            )
+        old_selected = [
+            ScoredReference(
+                item.row,
+                item.score,
+                rank,
+                item.reason,
+                item.risk,
+                item.ignored_reference_jewelry,
+            )
+            for rank, item in enumerate(reversed(candidates[1:]), start=1)
+        ]
+        product = load_product_analysis(paths.analysis_dir / "product_analysis.json")
+        write_review_package(
+            paths,
+            product_image,
+            old_selected,
+            candidates,
+            composition_snapshots=[
+                build_candidate_snapshot(product, item, "hand_worn")
+                for item in old_selected
+            ],
+        )
+        package_before[run_id] = {
+            path.relative_to(paths.root).as_posix(): path.read_bytes()
+            for path in (
+                paths.analysis_dir / "reference_candidates.json",
+                paths.analysis_dir / "selected_references.json",
+                paths.analysis_dir / "reference_composition_snapshots.json",
+                *sorted(file for file in paths.review_dir.rglob("*") if file.is_file()),
+            )
+        }
+
+    real_replace = os.replace
+    failed = False
+
+    def fail_in_second_run(source, destination):
+        nonlocal failed
+        destination_path = Path(destination)
+        if (
+            not failed
+            and "second" in destination_path.parts
+            and destination_path.name == "selected_references.json"
+        ):
+            failed = True
+            raise OSError("模拟第二个运行提交失败")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("jewelry_on_hand.review_package.os.replace", fail_in_second_run)
+
+    with pytest.raises(OSError, match="模拟第二个运行提交失败"):
+        main(
+            [
+                "rerank-batch",
+                "--output-root",
+                str(output_root),
+                "--run-id",
+                "first",
+                "--run-id",
+                "second",
+            ]
+        )
+
+    for run_id in ("first", "second"):
+        paths = RunPaths(root=output_root / run_id)
+        package_after = {
+            path.relative_to(paths.root).as_posix(): path.read_bytes()
+            for path in (
+                paths.analysis_dir / "reference_candidates.json",
+                paths.analysis_dir / "selected_references.json",
+                paths.analysis_dir / "reference_composition_snapshots.json",
+                *sorted(file for file in paths.review_dir.rglob("*") if file.is_file()),
+            )
+        }
+        assert package_after == package_before[run_id]
+        assert not list(paths.root.glob(".review-package-*"))
+
+
+def test_批量重排拒绝大小写别名运行且清理全部暂存目录(tmp_path, capsys):
+    from jewelry_on_hand.cli import main
+
+    product = tmp_path / "product.jpg"
+    product.write_bytes(b"product")
+    reference = tmp_path / "reference.jpg"
+    reference.write_bytes(b"reference")
+    catalog = tmp_path / "catalog.xlsx"
+    make_catalog(catalog, reference)
+    analysis = tmp_path / "analysis.json"
+    make_analysis(analysis)
+    output_root = tmp_path / "runs"
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product),
+            "--analysis-json",
+            str(analysis),
+            "--classification",
+            str(catalog),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "Run-A",
+            "--output-role",
+            "hand_worn",
+        ]
+    ) == 0
+
+    assert main(
+        [
+            "rerank-batch",
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            "Run-A",
+            "--run-id",
+            "run-a",
+        ]
+    ) != 0
+
+    assert "重复" in capsys.readouterr().err
+    assert not list((output_root / "Run-A").glob(".review-package-*"))

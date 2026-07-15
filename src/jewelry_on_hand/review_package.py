@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
+from dataclasses import dataclass
 from hashlib import sha256
 from html import escape
 from pathlib import Path
@@ -21,6 +23,14 @@ from jewelry_on_hand.reference_composition import (
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
+@dataclass(frozen=True)
+class _StagedReviewPackage:
+    paths: RunPaths
+    stage_root: Path
+    staged_files: dict[Path, Path]
+    stale_targets: frozenset[Path]
+
+
 def write_review_package(
     paths: RunPaths,
     product_image: str | Path,
@@ -29,6 +39,25 @@ def write_review_package(
     *,
     composition_snapshots: Sequence[ReferenceCompositionSnapshot],
 ) -> Path:
+    stage = _stage_review_package(
+        paths,
+        product_image,
+        selected,
+        candidates,
+        composition_snapshots=composition_snapshots,
+    )
+    _commit_review_packages((stage,))
+    return paths.review_dir / "review.html"
+
+
+def _stage_review_package(
+    paths: RunPaths,
+    product_image: str | Path,
+    selected: Sequence[ScoredReference],
+    candidates: Sequence[ScoredReference],
+    *,
+    composition_snapshots: Sequence[ReferenceCompositionSnapshot],
+) -> _StagedReviewPackage:
     selected_items = list(selected)
     candidate_items = list(candidates)
     snapshot_items = list(composition_snapshots)
@@ -39,46 +68,159 @@ def write_review_package(
         snapshot_items,
     )
 
-    copied_references = _copy_selected_references(paths.review_dir, selected_items)
-    reference_hashes = _validate_copied_reference_hashes(
-        selected_items,
-        copied_references,
-        snapshots_by_rank,
+    paths.root.mkdir(parents=True, exist_ok=True)
+    stage_root = Path(
+        tempfile.mkdtemp(prefix=".review-package-", dir=paths.root)
     )
-    write_json(
-        paths.analysis_dir / "reference_candidates.json",
-        [item.to_dict() for item in candidate_items],
-    )
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [
-            _selected_item_to_dict(
-                item,
-                copied_references[item.rank],
-                *reference_hashes[item.rank],
-            )
+    stage_analysis = stage_root / "analysis"
+    stage_review = stage_root / "review"
+    staged_files: dict[Path, Path] = {}
+    try:
+        staged_selected = _copy_selected_references(stage_review, selected_items)
+        final_selected = {
+            item.rank: _reference_destination(paths.review_dir, item)
             for item in selected_items
-        ],
-    )
-    write_json(
-        paths.analysis_dir / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME,
-        [snapshot.to_dict() for snapshot in snapshot_items],
-    )
-
-    html_path = paths.review_dir / "review.html"
-    html_path.parent.mkdir(parents=True, exist_ok=True)
-    html_path.write_text(
-        _render_html(
-            paths,
-            product_path,
-            selected_items,
+        }
+        staged_candidates = _copy_candidate_references(
+            stage_review,
             candidate_items,
-            copied_references,
+        )
+        final_candidates = {
+            identity: paths.review_dir / staged_path.name
+            for identity, staged_path in staged_candidates.items()
+        }
+        reference_hashes = _validate_copied_reference_hashes(
+            selected_items,
+            staged_selected,
             snapshots_by_rank,
-        ),
-        encoding="utf-8",
-    )
-    return html_path
+        )
+
+        candidate_json = stage_analysis / "reference_candidates.json"
+        selected_json = stage_analysis / "selected_references.json"
+        snapshot_json = (
+            stage_analysis / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME
+        )
+        write_json(candidate_json, [item.to_dict() for item in candidate_items])
+        write_json(
+            selected_json,
+            [
+                _selected_item_to_dict(
+                    item,
+                    final_selected[item.rank],
+                    *reference_hashes[item.rank],
+                )
+                for item in selected_items
+            ],
+        )
+        write_json(snapshot_json, [snapshot.to_dict() for snapshot in snapshot_items])
+        html_stage = stage_review / "review.html"
+        html_stage.write_text(
+            _render_html(
+                paths,
+                product_path,
+                selected_items,
+                candidate_items,
+                final_selected,
+                final_candidates,
+                snapshots_by_rank,
+            ),
+            encoding="utf-8",
+        )
+
+        staged_files.update(
+            {
+                paths.analysis_dir / "reference_candidates.json": candidate_json,
+                paths.analysis_dir / "selected_references.json": selected_json,
+                paths.analysis_dir
+                / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME: snapshot_json,
+                paths.review_dir / "review.html": html_stage,
+            }
+        )
+        staged_files.update(
+            {
+                final_selected[rank]: staged_path
+                for rank, staged_path in staged_selected.items()
+            }
+        )
+        staged_files.update(
+            {
+                final_candidates[identity]: staged_path
+                for identity, staged_path in staged_candidates.items()
+            }
+        )
+        managed_existing = {
+            path
+            for pattern in ("rank-*", "candidate-*")
+            for path in paths.review_dir.glob(pattern)
+            if path.is_file()
+        }
+        stale_targets = frozenset(managed_existing - staged_files.keys())
+        return _StagedReviewPackage(
+            paths=paths,
+            stage_root=stage_root,
+            staged_files=staged_files,
+            stale_targets=stale_targets,
+        )
+    except Exception:
+        shutil.rmtree(stage_root, ignore_errors=True)
+        raise
+
+
+def _commit_review_packages(stages: Sequence[_StagedReviewPackage]) -> None:
+    staged_items = list(stages)
+    if not staged_items:
+        return
+    try:
+        targets: dict[Path, Path] = {}
+        stale_targets: set[Path] = set()
+        for stage in staged_items:
+            for target, staged_source in stage.staged_files.items():
+                if target in targets:
+                    raise ValueError(f"审核包事务包含重复目标：{target}")
+                targets[target] = staged_source
+            stale_targets.update(stage.stale_targets)
+        stale_targets.difference_update(targets)
+
+        all_targets = set(targets) | stale_targets
+        backups: dict[Path, Path] = {}
+        original_targets = {target for target in all_targets if target.is_file()}
+        commit_started = False
+        try:
+            for index, target in enumerate(sorted(original_targets)):
+                backup = staged_items[0].stage_root / "backups" / f"{index:04d}"
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, backup)
+                backups[target] = backup
+
+            commit_started = True
+            for target, staged_source in sorted(
+                targets.items(),
+                key=lambda item: str(item[0]),
+            ):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(staged_source, target)
+            for target in sorted(stale_targets):
+                if target.is_file():
+                    target.unlink()
+        except Exception:
+            if commit_started:
+                for target in all_targets:
+                    if target in original_targets:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(backups[target], target)
+                    elif target.is_file():
+                        target.unlink()
+            raise
+    finally:
+        for stage in staged_items:
+            shutil.rmtree(stage.stage_root, ignore_errors=True)
+
+
+def _discard_staged_review_packages(
+    stages: Sequence[_StagedReviewPackage],
+) -> None:
+    for stage in stages:
+        shutil.rmtree(stage.stage_root, ignore_errors=True)
 
 
 def _copy_selected_references(
@@ -92,6 +234,22 @@ def _copy_selected_references(
         destination = _reference_destination(review_dir, item)
         shutil.copy2(source, destination)
         copied[item.rank] = destination
+    return copied
+
+
+def _copy_candidate_references(
+    review_dir: Path,
+    candidates: Sequence[ScoredReference],
+) -> dict[str, Path]:
+    review_dir.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, Path] = {}
+    for item in candidates:
+        identity = _reference_identity(item)
+        if identity in copied:
+            continue
+        destination = _candidate_destination(review_dir, item, identity)
+        shutil.copy2(item.row.absolute_path, destination)
+        copied[identity] = destination
     return copied
 
 
@@ -200,12 +358,28 @@ def _reference_destination(review_dir: Path, item: ScoredReference) -> Path:
     return review_dir / f"rank-{item.rank}-{Path(item.row.file_name).name}"
 
 
+def _reference_identity(item: ScoredReference) -> str:
+    source_path = str(item.row.absolute_path.resolve())
+    source_sha = _file_sha256(item.row.absolute_path)
+    return sha256(f"{source_path}\0{source_sha}".encode("utf-8")).hexdigest()
+
+
+def _candidate_destination(
+    review_dir: Path,
+    item: ScoredReference,
+    identity: str,
+) -> Path:
+    file_name = Path(item.row.file_name).name
+    return review_dir / f"candidate-{identity[:16]}-{file_name}"
+
+
 def _render_html(
     paths: RunPaths,
     product_image: Path,
     selected: Sequence[ScoredReference],
     candidates: Sequence[ScoredReference],
-    copied_references: dict[int, Path],
+    selected_references: dict[int, Path],
+    candidate_references: dict[str, Path],
     snapshots_by_rank: dict[int, ReferenceCompositionSnapshot],
 ) -> str:
     product_src = _html_path(product_image, paths.review_dir)
@@ -213,13 +387,18 @@ def _render_html(
         _render_card(
             item,
             paths.review_dir,
-            copied_references.get(item.rank),
+            selected_references.get(item.rank),
             snapshots_by_rank.get(item.rank),
         )
         for item in selected
     )
     candidate_cards = "\n".join(
-        _render_card(item, paths.review_dir, copied_references.get(item.rank), None)
+        _render_card(
+            item,
+            paths.review_dir,
+            candidate_references.get(_reference_identity(item)),
+            None,
+        )
         for item in candidates
     )
     return f"""<!doctype html>

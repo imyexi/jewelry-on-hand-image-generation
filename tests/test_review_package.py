@@ -1,4 +1,5 @@
 import re
+import os
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import unquote
@@ -12,6 +13,10 @@ from jewelry_on_hand.reference_composition import (
 )
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
+from jewelry_on_hand.scoring import (
+    composition_signature_for_row,
+    select_batch_diverse_references,
+)
 
 
 def constraints_data(review_status="pending"):
@@ -55,9 +60,10 @@ def make_scored(
     ignored_reference_jewelry: list[str] | None = None,
     reference_fields: dict[str, str] | None = None,
     notes: str = "正面视角，主体居中，无文字或 UI",
+    reference_bytes: bytes = b"ref",
 ) -> ScoredReference:
     ref = tmp_path / file_name
-    ref.write_bytes(b"ref")
+    ref.write_bytes(reference_bytes)
     complete_reference_fields = {
         "framing": "手部近景",
         "visible_body_regions": "左手腕 / 前臂",
@@ -138,6 +144,31 @@ def write_package(
         selected,
         candidates,
         composition_snapshots=make_snapshots(selected),
+    )
+
+
+def package_bytes(paths: RunPaths) -> dict[str, bytes]:
+    package_files = [
+        paths.analysis_dir / "reference_candidates.json",
+        paths.analysis_dir / "selected_references.json",
+        paths.analysis_dir / "reference_composition_snapshots.json",
+        *sorted(path for path in paths.review_dir.rglob("*") if path.is_file()),
+    ]
+    return {
+        path.relative_to(paths.root).as_posix(): path.read_bytes()
+        for path in package_files
+        if path.is_file()
+    }
+
+
+def reranked_reference(item: ScoredReference, rank: int) -> ScoredReference:
+    return ScoredReference(
+        item.row,
+        item.score,
+        rank,
+        item.reason,
+        item.risk,
+        item.ignored_reference_jewelry,
     )
 
 
@@ -476,3 +507,125 @@ def test_审核包拒绝快照与已选_rank_集合不一致且不写产物(tmp_
         paths.analysis_dir / "reference_composition_snapshots.json"
     ).exists()
     assert not (paths.review_dir / "review_decision.json").exists()
+
+
+def test_审核包后段渲染失败时旧包逐字节不变且无临时文件(tmp_path):
+    paths = RunPaths.create(tmp_path, "run-1")
+    product_image = paths.input_dir / "product-on-hand.jpg"
+    product_image.write_bytes(b"product")
+    old_selected = [
+        make_scored(tmp_path, rank, file_name=f"old-{rank}.jpg")
+        for rank in (1, 2, 3)
+    ]
+    write_package(paths, product_image, old_selected, old_selected)
+    old_package = package_bytes(paths)
+    write_json(
+        paths.analysis_dir / "product_fidelity_constraints.json",
+        {"损坏约束": True},
+    )
+    new_selected = [
+        make_scored(
+            tmp_path,
+            rank,
+            file_name=f"new-{rank}.jpg",
+            reference_bytes=f"new-{rank}".encode(),
+        )
+        for rank in (1, 2, 3)
+    ]
+
+    with pytest.raises(ValueError):
+        write_package(paths, product_image, new_selected, new_selected)
+
+    assert package_bytes(paths) == old_package
+    assert not list(paths.root.glob(".review-package-*"))
+
+
+def test_审核包最终替换中途失败时回滚全部旧文件(tmp_path, monkeypatch):
+    paths = RunPaths.create(tmp_path, "run-1")
+    product_image = paths.input_dir / "product-on-hand.jpg"
+    product_image.write_bytes(b"product")
+    old_selected = [
+        make_scored(tmp_path, rank, file_name=f"old-{rank}.jpg")
+        for rank in (1, 2, 3)
+    ]
+    write_package(paths, product_image, old_selected, old_selected)
+    old_package = package_bytes(paths)
+    new_selected = [
+        make_scored(
+            tmp_path,
+            rank,
+            file_name=f"new-{rank}.jpg",
+            reference_bytes=f"new-{rank}".encode(),
+        )
+        for rank in (1, 2, 3)
+    ]
+    real_replace = os.replace
+    replace_count = 0
+
+    def fail_during_commit(source, destination):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 3:
+            raise OSError("模拟审核包最终替换失败")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr("jewelry_on_hand.review_package.os.replace", fail_during_commit)
+
+    with pytest.raises(OSError, match="模拟审核包最终替换失败"):
+        write_package(paths, product_image, new_selected, new_selected)
+
+    assert package_bytes(paths) == old_package
+    assert not list(paths.root.glob(".review-package-*"))
+
+
+def test_真实批次重排后全部候选卡片图片按源参考身份匹配(tmp_path):
+    paths = RunPaths.create(tmp_path, "run-1")
+    product_image = paths.input_dir / "product-on-hand.jpg"
+    product_image.write_bytes(b"product")
+    candidates = [
+        make_scored(
+            tmp_path,
+            index,
+            file_name=f"candidate-{name}.jpg",
+            scene_keywords=f"场景-{name}",
+            notes=f"正面视角，主体{name}位于画面中央，无文字或 UI",
+            reference_bytes=f"bytes-{name}".encode(),
+        )
+        for index, name in enumerate(("a", "b", "c", "d"), start=1)
+    ]
+    usage = {
+        composition_signature_for_row(item.row, "hand_worn"): count
+        for item, count in zip(candidates, (9, 8, 7, 0), strict=True)
+    }
+    [selected] = select_batch_diverse_references(
+        [candidates],
+        ["hand_worn"],
+        initial_signature_usage=usage,
+    )
+    assert selected[0].row.file_name == "candidate-d.jpg"
+
+    html_path = write_review_package(
+        paths,
+        product_image,
+        selected,
+        candidates,
+        composition_snapshots=make_snapshots(selected),
+    )
+
+    candidate_html = html_path.read_text(encoding="utf-8").split(
+        "<h2>全部候选参考图</h2>",
+        1,
+    )[1]
+    cards = re.findall(r'<article class="card">(.*?)</article>', candidate_html, re.S)
+    assert len(cards) == 4
+    expected_bytes = {
+        item.row.file_name: item.row.absolute_path.read_bytes()
+        for item in candidates
+    }
+    for card in cards:
+        file_name = re.search(r"<h3>([^<]+)</h3>", card).group(1)
+        image_src = re.search(r'<img class="reference-image" src="([^"]+)"', card)
+        assert image_src is not None
+        assert (paths.review_dir / unquote(image_src.group(1))).read_bytes() == (
+            expected_bytes[file_name]
+        )

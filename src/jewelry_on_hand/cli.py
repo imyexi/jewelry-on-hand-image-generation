@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,12 @@ from jewelry_on_hand.review_decision import (
     require_generation_decision,
     write_review_decision,
 )
-from jewelry_on_hand.review_package import write_review_package
+from jewelry_on_hand.review_package import (
+    _commit_review_packages,
+    _discard_staged_review_packages,
+    _stage_review_package,
+    write_review_package,
+)
 from jewelry_on_hand.run_paths import RunPaths, create_run_id, read_json, write_json
 from jewelry_on_hand.scoring import (
     select_batch_diverse_references,
@@ -230,6 +236,12 @@ def _rerank_batch(args: argparse.Namespace) -> int:
         _existing_batch_run_paths(args.output_root, run_id)
         for run_id in run_ids
     ]
+    normalized_roots = [
+        os.path.normcase(str(paths.root.resolve()))
+        for paths in paths_list
+    ]
+    if len(normalized_roots) != len(set(normalized_roots)):
+        raise ValueError("rerank-batch 的 run-id 解析后不能指向重复运行")
     products = []
     output_roles = []
     candidate_sets = []
@@ -269,21 +281,28 @@ def _rerank_batch(args: argparse.Namespace) -> int:
         )
     ]
 
-    for paths, selected, candidates, snapshots in zip(
-        paths_list,
-        selections,
-        candidate_sets,
-        snapshots_by_run,
-        strict=True,
-    ):
-        _remove_old_review_reference_copies(paths)
-        write_review_package(
-            paths,
-            paths.input_dir / "product-on-hand.jpg",
-            selected,
-            candidates,
-            composition_snapshots=snapshots,
-        )
+    stages = []
+    try:
+        for paths, selected, candidates, snapshots in zip(
+            paths_list,
+            selections,
+            candidate_sets,
+            snapshots_by_run,
+            strict=True,
+        ):
+            stages.append(
+                _stage_review_package(
+                    paths,
+                    paths.input_dir / "product-on-hand.jpg",
+                    selected,
+                    candidates,
+                    composition_snapshots=snapshots,
+                )
+            )
+    except Exception:
+        _discard_staged_review_packages(stages)
+        raise
+    _commit_review_packages(stages)
     return 0
 
 
@@ -298,12 +317,6 @@ def _existing_batch_run_paths(
     if not run_root.is_dir():
         raise FileNotFoundError(run_root)
     return RunPaths(root=run_root)
-
-
-def _remove_old_review_reference_copies(paths: RunPaths) -> None:
-    for path in paths.review_dir.glob("rank-*"):
-        if path.is_file():
-            path.unlink()
 
 
 def _record_output_role(
