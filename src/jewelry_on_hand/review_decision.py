@@ -11,15 +11,22 @@ from jewelry_on_hand.display_modes import validate_product_mode
 from jewelry_on_hand.models import (
     ProductAnalysis,
     ProductConfirmationSnapshot,
+    ProductFidelityConstraints,
     ReferenceRow,
     ReviewDecision,
     ScoredReference,
 )
 from jewelry_on_hand.output_roles import normalize_output_role
 from jewelry_on_hand.product_types import ProductType
+from jewelry_on_hand.product_analysis import (
+    validate_analysis_ready_for_reference_selection,
+)
 from jewelry_on_hand.product_fidelity import (
+    build_product_fidelity_constraints,
     load_product_fidelity_constraints,
+    product_analysis_sha256,
     require_confirmed_constraints,
+    validate_product_fidelity_constraints,
 )
 from jewelry_on_hand.reference_composition import (
     REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
@@ -55,7 +62,7 @@ def write_review_decision(paths: RunPaths, data: dict[str, Any]) -> Path:
             raise
         raise ReviewGateError(f"无法写入 Review 决策：{exc}") from exc
     decision_path = paths.review_dir / DECISION_FILE_NAME
-    write_json(decision_path, _decision_to_dict(decision))
+    write_json(decision_path, decision.to_dict())
     return decision_path
 
 
@@ -80,7 +87,7 @@ def write_analysis_and_review_decision(
     _commit_json_transaction(
         [
             (paths.analysis_dir / "product_analysis.json", analysis_data),
-            (decision_path, _decision_to_dict(decision)),
+            (decision_path, decision.to_dict()),
         ]
     )
     return decision_path
@@ -133,6 +140,32 @@ def write_review_bundle(
             if not constraints_path.is_file():
                 raise ReviewGateError(f"缺少产品保真约束导入源：{constraints_path}")
             constraints = load_product_fidelity_constraints(constraints_path)
+            if (
+                analysis is not None
+                and analysis_data is not None
+                and import_source == CANONICAL_CONSTRAINTS_RELATIVE_PATH
+            ):
+                previous_analysis = _load_optional_analysis(paths)
+                if (
+                    previous_analysis is not None
+                    and previous_analysis.confirmed_product_type
+                    is not analysis.confirmed_product_type
+                ):
+                    raise ReviewGateError(
+                        "最终产品品类发生变化；不得沿用旧品类 canonical 的 must_keep，"
+                        "请使用 --fidelity-constraints-path 显式导入基于最终 analysis "
+                        "重新生成并确认的产品保真约束"
+                    )
+                rebound = constraints.to_dict()
+                rebound["source"]["product_analysis_sha256"] = (
+                    product_analysis_sha256(analysis)
+                )
+                rebound["must_not_change"] = list(
+                    build_product_fidelity_constraints(analysis).must_not_change
+                )
+                constraints = ProductFidelityConstraints.from_dict(rebound)
+            if analysis is not None:
+                validate_product_fidelity_constraints(analysis, constraints)
             constraints_payload = constraints.to_dict()
             if constraints.review_status == "pending":
                 constraints_payload["review_status"] = "confirmed"
@@ -163,7 +196,7 @@ def write_review_bundle(
     entries: list[tuple[Path, Any]] = []
     if analysis_payload is not None:
         entries.append((paths.analysis_dir / "product_analysis.json", analysis_payload))
-    entries.append((decision_path, _decision_to_dict(decision)))
+    entries.append((decision_path, decision.to_dict()))
     if constraints_payload is not None:
         entries.append(
             (
@@ -188,7 +221,30 @@ def require_generation_decision(paths: RunPaths) -> ReviewDecision:
         raise ReviewGateError(f"缺少生成前 Review 决策文件：{decision_path}")
 
     try:
-        decision = ReviewDecision.from_dict(read_json(decision_path))
+        decision_data = read_json(decision_path)
+        try:
+            decision = ReviewDecision.from_dict(
+                decision_data,
+                require_reference_snapshot_sha256=True,
+            )
+        except ValueError as strict_exc:
+            if (
+                isinstance(decision_data, dict)
+                and decision_data.get("action") not in _GENERATION_ACTIONS
+            ):
+                decision = ReviewDecision.from_dict(decision_data)
+            elif (
+                isinstance(decision_data, dict)
+                and decision_data.get("action") in _GENERATION_ACTIONS
+            ):
+                raise ReviewGateError(
+                    f"无效的 Review 决策文件：{decision_path}；{strict_exc}；"
+                    "请重新执行 prepare-review 并确认参考构图快照"
+                ) from strict_exc
+            else:
+                raise
+    except ReviewGateError:
+        raise
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewGateError(f"无效的 Review 决策文件：{decision_path}；{exc}") from exc
     if decision.action == "rerank":
@@ -216,7 +272,9 @@ def require_generation_decision(paths: RunPaths) -> ReviewDecision:
     if not constraints_path.is_file():
         raise ReviewGateError(f"缺少产品保真约束文件：{constraints_path}")
     try:
-        require_confirmed_constraints(constraints_path)
+        constraints = require_confirmed_constraints(constraints_path)
+        if analysis is not None:
+            validate_product_fidelity_constraints(analysis, constraints)
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewGateError(f"无效的产品保真约束文件：{constraints_path}；{exc}") from exc
     return decision
@@ -240,6 +298,9 @@ def validate_decision_against_analysis(
     if product_type in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}:
         if decision.confirmation_snapshot is None:
             raise ReviewGateError("项链生成决策缺少完整产品确认快照")
+    elif product_type is ProductType.RING:
+        if decision.confirmation_snapshot is None:
+            raise ReviewGateError("戒指生成决策缺少完整产品确认快照")
     elif product_type is ProductType.BRACELET and decision.confirmation_snapshot is None:
         return
 
@@ -263,6 +324,7 @@ def validate_confirmed_analysis(analysis: ProductAnalysis) -> None:
     if not isinstance(analysis, ProductAnalysis):
         raise ReviewGateError("analysis 必须是 ProductAnalysis")
     try:
+        validate_analysis_ready_for_reference_selection(analysis)
         validate_product_mode(
             analysis.confirmed_product_type,
             analysis.display_mode,
@@ -274,27 +336,6 @@ def validate_confirmed_analysis(analysis: ProductAnalysis) -> None:
         )
     except ValueError as exc:
         raise ReviewGateError(str(exc)) from exc
-
-
-def _decision_to_dict(decision: ReviewDecision) -> dict[str, Any]:
-    data: dict[str, Any] = {
-        "action": decision.action,
-        "selected_ranks": list(decision.selected_ranks),
-    }
-    if decision.manual_reference is not None:
-        data["manual_reference"] = decision.manual_reference
-    if decision.action in {"generate_rank_1", "generate_selected", "generate_multiple"}:
-        data["fidelity_confirmed"] = decision.fidelity_confirmed
-        data["fidelity_constraints_path"] = decision.fidelity_constraints_path
-    if decision.fidelity_notes is not None:
-        data["fidelity_notes"] = decision.fidelity_notes
-    if decision.confirmation_snapshot is not None:
-        data["confirmation_snapshot"] = decision.confirmation_snapshot.to_dict()
-    if decision.output_role is not None:
-        data["output_role"] = decision.output_role.value
-    if decision.reference_snapshot_sha256 is not None:
-        data["reference_snapshot_sha256"] = decision.reference_snapshot_sha256
-    return data
 
 
 def _confirmed_reference_snapshot(
