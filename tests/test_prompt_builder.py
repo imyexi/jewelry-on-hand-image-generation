@@ -728,6 +728,72 @@ def test_四输入analysis与Prompt协调篡改ring_count类型仍拒绝(
     assert errors, "ring_count 必须严格是 JSON 整数 1"
 
 
+@pytest.mark.parametrize(
+    ("field", "raw_value"),
+    (
+        ("bead_diameter_mm", 10),
+        ("length_mm", 450),
+        ("width_mm", 8),
+        ("height_mm", 12),
+    ),
+)
+def test_四输入合法整数尺寸按ProductDimensions规范化后通过(
+    tmp_path,
+    field,
+    raw_value,
+):
+    raw_analysis = _analysis_data(_product())
+    raw_analysis["product_dimensions"] = {
+        "length_mm": None,
+        "width_mm": None,
+        "height_mm": None,
+        "bead_diameter_mm": None,
+        "dimension_source": "用户录入",
+    }
+    raw_analysis["product_dimensions"][field] = raw_value
+    product = ProductAnalysis.from_dict(raw_analysis)
+    assert getattr(product.product_dimensions, field) == float(raw_value)
+    assert isinstance(getattr(product.product_dimensions, field), float)
+    constraints = _constraints()
+    snapshot = _snapshot_for_product(product)
+    prompt = build_generation_prompt(
+        product,
+        _scored(_row()),
+        constraints,
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
+    prompt_path = tmp_path / f"integer-dimension-{field}-prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    snapshot_path = _write_snapshot(tmp_path, snapshot)
+    analysis_path, canonical_path = _write_modern_sources(
+        tmp_path,
+        product,
+        constraints,
+        f"integer-dimension-{field}",
+    )
+    analysis_path.write_text(
+        json.dumps(raw_analysis, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    validator = run_path(
+        str(
+            Path(__file__).parents[1]
+            / "skills"
+            / "jewelry-on-hand-workflow"
+            / "scripts"
+            / "validate_prompt_contract.py"
+        )
+    )
+
+    assert validator["validate_prompt"](
+        prompt_path,
+        snapshot_path,
+        analysis_path,
+        canonical_path,
+    ) == []
+
+
 def test_四输入保真约束JSON拒绝篡改并绑定canonical文件(tmp_path):
     product = _product()
     constraints = _constraints()

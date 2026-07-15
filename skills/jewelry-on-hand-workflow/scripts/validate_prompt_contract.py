@@ -632,15 +632,23 @@ def _project_dimensions(
         value, PRODUCT_DIMENSION_FIELDS, "产品分析 product_dimensions", errors
     ):
         return None
+    projection: dict[str, object] = {}
     for field in PRODUCT_DIMENSION_FIELDS[:-1]:
         item = value[field]
-        if item is not None and (
-            isinstance(item, bool)
-            or not isinstance(item, (int, float))
-            or not math.isfinite(item)
-            or item <= 0
-        ):
+        if item is None:
+            continue
+        if isinstance(item, bool):
             errors.append(f"产品分析 product_dimensions.{field} 必须是有限正数或 null")
+            continue
+        try:
+            number = float(item)
+        except (TypeError, ValueError, OverflowError):
+            errors.append(f"产品分析 product_dimensions.{field} 必须是有限正数或 null")
+            continue
+        if not math.isfinite(number) or number <= 0:
+            errors.append(f"产品分析 product_dimensions.{field} 必须是有限正数或 null")
+            continue
+        projection[field] = number
     source = value["dimension_source"]
     if source is not None and (
         not isinstance(source, str) or not source.strip()
@@ -648,13 +656,8 @@ def _project_dimensions(
         errors.append(
             "产品分析 product_dimensions.dimension_source 必须是非空字符串或 null"
         )
-    projection = {
-        field: value[field]
-        for field in PRODUCT_DIMENSION_FIELDS[:-1]
-        if value[field] is not None
-    }
-    if projection and value["dimension_source"] is not None:
-        projection["dimension_source"] = value["dimension_source"]
+    if projection and isinstance(source, str) and source.strip():
+        projection["dimension_source"] = source.strip()
     return projection
 
 
