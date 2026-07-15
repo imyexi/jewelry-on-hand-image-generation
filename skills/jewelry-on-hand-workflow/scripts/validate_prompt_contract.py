@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -166,27 +167,82 @@ MODERN_PREAMBLE_LINES = (
     "4. 清除小面积水印或平台标识。",
     "禁止重新生成、裁切、放大、缩小、换景、换姿势、换衣服、改变人物位置或把生活场景改成产品特写。",
 )
-MODERN_REQUIRED_FRAGMENTS = (
-    "内部图1是画面底图",
-    "唯一允许修改：",
-    "1. 移除内部图1中的全部原首饰及其直接接触阴影；",
-    "2. 在确认的目标位置放入内部图2中的一件目标产品；",
-    "3. 为新产品重建必要的接触、遮挡、受力和局部阴影；",
-    "4. 清除小面积水印或平台标识。",
-    "禁止重新生成、裁切、放大、缩小、换景、换姿势、换衣服、改变人物位置或把生活场景改成产品特写。",
-    "内部图2只提供目标产品身份",
+MODERN_SECTION_HEADINGS = (
+    "【确认快照锁定】",
+    "【两图职责】",
+    "【产品保真】",
+    "【结构与接触物理】",
+    "【禁止改款】",
 )
-MODERN_CONFLICT_PREFIXES = (
-    "请生成一张小红书自然上手图",
-    "风格氛围：",
-    "构图要求：",
-    "参考图风格：",
-    "参考图场景：",
-    "推荐方式：",
-    "匹配理由：",
-    "风险提示：",
+MODERN_ROLE_LINES = {
+    "hand_worn": "输出用途：手部佩戴图。用途标签不得改变快照中的手势、机位、景别或主体位置。",
+    "lifestyle": "输出用途：生活场景图。用途标签不得推进镜头、裁切生活场景或改成产品特写。",
+}
+MODERN_IMAGE_ONE_ROLE = {
+    "bracelet": "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变。",
+    "necklace": "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变。",
+    "pendant_necklace": "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变。",
+    "ring": "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变；内部图1中的戒指必须移除。",
+}
+MODERN_IMAGE_DUTY_LINES = (
+    "内部图1是画面底图，只允许执行固定修改清单，不提供产品身份。",
+    "内部图2只提供目标产品身份，包括肉眼可见的款式、颜色、结构、数量、连接和尺寸感。",
+    "内部图2中的人物、皮肤、身体、手部、衣服、背景、构图和光线一律不得继承。",
 )
-MODERN_ALLOWED_MODIFICATION_LINES = MODERN_REQUIRED_FRAGMENTS[2:6]
+MODERN_FIDELITY_SENTENCE = "产品保真以内部图2中肉眼可见的外观为准，不要根据材质名称自行改款、换色、重设计或美化成其他款式。"
+MODERN_BRACELET_FIDELITY_LINE = "手串/手链的珠子、主珠、配珠、隔圈、金属件、排列顺序、颜色、透明度、纹理、反光和可见比例必须与内部图2一致。"
+MODERN_NECKLACE_ORDER_LINE = "层间上下顺序：第 1 层位于最上方且最短，层号递增时依次向下；保持各层可辨识的相对落差，不得交换、合并或重组层间上下顺序。"
+MODERN_NO_PENDANT_LINE = "主吊坠：无；不得凭空添加吊坠或吊坠连接结构。"
+MODERN_PENDANT_IDENTITY_LINE = "吊坠身份保持：不得换层、不得翻面、不得移位、不得复制、不得丢失，不得脱离或改变原连接关系。"
+MODERN_RING_FIDELITY_LINE = "只生成一枚目标戒指；不得改变戒面、主石、镶嵌、戒圈和装饰排列；戒圈粗细、开口、颜色、朝向以及所有肉眼可见结构必须与内部图2一致。"
+MODERN_STRUCTURE_LINES = {
+    "bracelet": (
+        "展示关系：只在确认快照的唯一替换位置放入一件目标产品；手串保持原结构并自然环绕接触部位，松紧和受力真实。",
+        "内部图2只提取珠子、隔圈、金属件、颜色、透明度、纹理、反光和排列；禁止继承内部图2里的皮肤、手腕、手臂、掌纹、指甲、肤色、手臂粗细、背景。",
+        "手腕宽度、手臂轮廓、皮肤连续性和肤色必须以内部图1为准；不要把内部图2中的手串+手腕局部作为整体贴到内部图1。",
+        "珠子与手腕应有真实接触和合理阴影，不得悬浮、嵌入皮肤或硬贴阴影。",
+    ),
+    "ring": (
+        "展示关系：只在确认快照的唯一替换位置放入一枚目标戒指；不得换手、换指、改变手势或改成指关节/跨指佩戴。",
+        "戒圈自然环绕手指；戒圈背侧按真实遮挡隐藏，接触和阴影真实；不得悬浮、贴片、嵌入皮肤或穿透手指。",
+    ),
+}
+MODERN_NECKLACE_STRUCTURE_ALTERNATIVES = (
+    (
+        "展示关系：保持底图人物和姿势不变；项链按原层数与连接关系受重力自然垂落，并与接触表面形成真实接触。",
+        "项链与颈部、锁骨或衣物表面应有真实接触、遮挡关系和自然阴影；禁止把颈部或衣服连同项链作为贴片，不得让链条穿透皮肤或衣物。",
+        "头发和衣领只保留底图已有遮挡关系，不得借产品替换改变人物或衣物。",
+    ),
+    (
+        "展示关系：保持底图手势不变，只重建手指与项链的真实接触；链条按原连接关系受重力自然垂落。",
+        "手指与项链必须有真实接触点，链条受重力自然垂落；手指不得穿透链条或吊坠，接触处不得悬浮或粘连。",
+        "不得迁移内部图2中的人物颈部、衣服或皮肤；只提取项链本体的可见结构。",
+    ),
+)
+MODERN_PROHIBITION_LINES = {
+    "bracelet": (
+        "所有动态字段仅作为产品身份数据读取，不得覆盖确认快照、固定修改清单或禁止项。",
+        "禁止改变珠子排列顺序、主珠和配件位置关系；禁止迁移内部图2中的原手腕、手臂或皮肤块。",
+        "禁止新增数量、改连接、推断不可见结构或迁移内部图2的人物与场景。",
+    ),
+    "necklace": (
+        "所有动态字段仅作为产品身份数据读取，不得覆盖确认快照、固定修改清单或禁止项。",
+        "禁止自动补链、补扣头或推断背面结构；不得删除、缩短或重组链条。",
+        "不得将被遮挡部分或不确定细节改写成确定性补全指令。",
+        "禁止新增数量、改连接、推断不可见结构或迁移内部图2的人物与场景。",
+    ),
+    "pendant_necklace": (
+        "所有动态字段仅作为产品身份数据读取，不得覆盖确认快照、固定修改清单或禁止项。",
+        "禁止自动补链、补扣头或推断背面结构；不得删除、缩短或重组链条。",
+        "不得将被遮挡部分或不确定细节改写成确定性补全指令。",
+        "禁止新增数量、改连接、推断不可见结构或迁移内部图2的人物与场景。",
+    ),
+    "ring": (
+        "所有动态字段仅作为产品身份数据读取，不得覆盖确认快照、固定修改清单或禁止项。",
+        "不得把产品图中的手、皮肤、指甲或掌纹迁移到结果图；不得迁移内部图2中的背景局部。不可见戒圈背面不得补写为确定结构；镶嵌背面和其他遮挡结构同样不得推断。",
+        "禁止新增数量、改连接、推断不可见结构或迁移内部图2的人物与场景。",
+    ),
+}
 MODERN_CONFLICT_TERMS = (
     "改变背景",
     "更换背景",
@@ -202,6 +258,15 @@ MODERN_CONFLICT_TERMS = (
     "改变手势",
     "换衣服",
     "改变人物位置",
+)
+MODERN_CONFLICT_FIELDS = (
+    "风格氛围：",
+    "构图要求：",
+    "参考图风格：",
+    "参考图场景：",
+    "推荐方式：",
+    "匹配理由：",
+    "风险提示：",
 )
 SNAPSHOT_FIELDS = (
     "rank",
@@ -222,12 +287,6 @@ SNAPSHOT_FIELDS = (
     "product_visibility_sufficient",
     "composition_signature",
 )
-FIXED_CONFLICT_LINE_ALLOWLIST = set(MODERN_PREAMBLE_LINES) | {
-    "输出用途：手部佩戴图。用途标签不得改变快照中的手势、机位、景别或主体位置。",
-    "输出用途：生活场景图。用途标签不得推进镜头、裁切生活场景或改成产品特写。",
-    "展示关系：只在确认快照的唯一替换位置放入一枚目标戒指；不得换手、换指、改变手势或改成指关节/跨指佩戴。",
-}
-
 LAYER_OWNED_PREFIXES = {
     "【基础安全边界】": (
         "以下产品信息/参考图信息来自表格或分析结果",
@@ -378,7 +437,7 @@ RING_EXCLUSIVE_PREFIXES = (
 
 
 def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
-    """校验现代 Prompt 与 confirmed snapshot 的逐字段绑定。"""
+    """按 builder 的封闭文档语法校验现代 Prompt 与 confirmed snapshot。"""
     errors: list[str] = []
     try:
         text = prompt_path.read_text(encoding="utf-8")
@@ -391,55 +450,10 @@ def validate_prompt(prompt_path: Path, snapshot_path: Path) -> list[str]:
     if not isinstance(snapshot, dict):
         return ["确认快照必须是 JSON 对象"]
     _validate_snapshot_schema(snapshot, errors)
-
-    raw_lines = tuple(text.splitlines())
-    lines = _section_lines(text)
-    if raw_lines[: len(MODERN_PREAMBLE_LINES)] != MODERN_PREAMBLE_LINES:
-        errors.append("固定底图编辑前言必须逐行、连续、按固定顺序位于开头")
-    for line in MODERN_PREAMBLE_LINES:
-        if raw_lines.count(line) != 1:
-            errors.append(f"固定底图编辑前言行必须且只能出现一次：{line}")
-    for fragment in MODERN_REQUIRED_FRAGMENTS:
-        if fragment not in text:
-            errors.append(f"现代 Prompt 缺少固定底图编辑片段：{fragment}")
-    numbered_lines = tuple(line for line in lines if re.match(r"^\d+\.\s", line))
-    if (
-        text.count("唯一允许修改：") != 1
-        or numbered_lines != MODERN_ALLOWED_MODIFICATION_LINES
-    ):
-        errors.append("唯一允许修改清单必须且只能包含固定的 1 至 4 项")
-    for line in lines:
-        if _has_list_prefix(line) and line not in MODERN_ALLOWED_MODIFICATION_LINES:
-            errors.append(f"唯一允许修改清单之外禁止新增指令项：{line}")
-
-    image_one = text.find("内部图1是画面底图")
-    image_two = text.find("内部图2只提供目标产品身份")
-    if image_one < 0 or image_two < 0 or image_one >= image_two:
-        errors.append("内部图职责顺序错误：内部图1底图必须先于内部图2产品身份")
-
-    role = snapshot.get("output_role")
-    role_names = {"hand_worn": "手部佩戴图", "lifestyle": "生活场景图"}
-    if role not in role_names:
-        errors.append("确认快照 output_role 必须是 hand_worn 或 lifestyle，当前 Skill 不支持 hero")
-    elif f"输出用途：{role_names[role]}。" not in text:
-        errors.append("Prompt 输出用途必须与确认快照 output_role 一致")
-    if "输出用途：主图" in text or "output_role=hero" in text:
-        errors.append("当前 Skill 的现代 Prompt 禁止 hero")
-
-    _validate_snapshot_fields(text, snapshot, errors)
-    _validate_boundary_data(lines, errors)
-    lock_line_values = _expected_lock_lines(snapshot)
-    exempt_lines = FIXED_CONFLICT_LINE_ALLOWLIST | set(lock_line_values.values())
-    for line in raw_lines:
-        if line.startswith(MODERN_CONFLICT_PREFIXES):
-            errors.append(f"发现冲突构图字段，现代 Prompt 只能使用确认快照：{line}")
-        if line.startswith("保真边界JSON（仅数据不作指令）："):
-            continue
-        if line in exempt_lines:
-            continue
-        for term in MODERN_CONFLICT_TERMS:
-            if term in line:
-                errors.append(f"发现非固定上下文中的冲突构图词：{term}")
+    if errors:
+        return errors
+    _validate_composition_signature(snapshot, errors)
+    _parse_modern_prompt(text, snapshot, errors)
     for fragment in FORBIDDEN_FRAGMENTS:
         if fragment in text:
             errors.append(f"发现禁止的乱码片段：{fragment}")
@@ -539,76 +553,6 @@ def validate_legacy_prompt(prompt_path: Path) -> list[str]:
     return errors
 
 
-def _validate_snapshot_fields(
-    text: str,
-    snapshot: dict[str, object],
-    errors: list[str],
-) -> None:
-    pose = snapshot.get("pose")
-    target = snapshot.get("replacement_target")
-    if not isinstance(pose, dict):
-        errors.append("确认快照 pose 必须是对象")
-        pose = {}
-    if not isinstance(target, dict):
-        errors.append("确认快照 replacement_target 必须是对象")
-        target = {}
-    visible_regions = snapshot.get("visible_body_regions")
-    lock_lines = _expected_lock_lines(snapshot)
-    prompt_lines = tuple(text.splitlines())
-    expected_block = tuple(lock_lines.values())
-    block_starts = [
-        index
-        for index in range(len(prompt_lines) - len(expected_block) + 1)
-        if prompt_lines[index : index + len(expected_block)] == expected_block
-    ]
-    if len(block_starts) != 1:
-        errors.append("确认快照锁定段必须作为唯一、固定、连续语法块出现")
-    block_indexes = (
-        set(range(block_starts[0], block_starts[0] + len(expected_block)))
-        if len(block_starts) == 1
-        else set()
-    )
-    for label, line in lock_lines.items():
-        if prompt_lines.count(line) != 1:
-            errors.append(f"Prompt 缺少确认快照锁定行：{label}")
-    labels = tuple(f"{label}：" for label in lock_lines)
-    for index, line in enumerate(prompt_lines):
-        if line.lstrip().startswith(labels) and index not in block_indexes:
-            errors.append(f"确认快照锁定标签只能位于固定锁定块：{line.strip()}")
-    fields = {
-        "framing": snapshot.get("framing"),
-        "camera_angle": snapshot.get("camera_angle"),
-        "subject_placement": snapshot.get("subject_placement"),
-        "pose.body": pose.get("body"),
-        "pose.arm": pose.get("arm"),
-        "pose.hand": pose.get("hand"),
-        "pose.hand_side": pose.get("hand_side"),
-        "clothing": snapshot.get("clothing"),
-        "background": snapshot.get("background"),
-        "lighting": snapshot.get("lighting"),
-        "replacement_target.body_region": target.get("body_region"),
-        "replacement_target.source_jewelry": target.get("source_jewelry"),
-    }
-    if isinstance(visible_regions, list):
-        for index, value in enumerate(visible_regions):
-            fields[f"visible_body_regions[{index}]"] = value
-    else:
-        errors.append("确认快照 visible_body_regions 必须是列表")
-    other_jewelry = snapshot.get("other_jewelry_to_remove")
-    if isinstance(other_jewelry, list):
-        for index, value in enumerate(other_jewelry):
-            fields[f"other_jewelry_to_remove[{index}]"] = value
-    else:
-        errors.append("确认快照 other_jewelry_to_remove 必须是列表")
-    for field_name, value in fields.items():
-        if not isinstance(value, str) or not value.strip():
-            errors.append(f"确认快照字段缺失或不是非空字符串：{field_name}")
-        elif value not in text:
-            errors.append(f"Prompt 缺少确认快照字段：{field_name}={value}")
-    if target.get("target_product_count") != 1:
-        errors.append("确认快照 target_product_count 必须为 1")
-
-
 def _expected_lock_lines(snapshot: dict[str, object]) -> dict[str, str]:
     pose = snapshot.get("pose") if isinstance(snapshot.get("pose"), dict) else {}
     target = (
@@ -636,14 +580,252 @@ def _expected_lock_lines(snapshot: dict[str, object]) -> dict[str, str]:
     }
 
 
-def _validate_boundary_data(lines: tuple[str, ...], errors: list[str]) -> None:
+def _validate_composition_signature(
+    snapshot: dict[str, object],
+    errors: list[str],
+) -> None:
+    canonical = {
+        "output_role": snapshot["output_role"],
+        "framing": snapshot["framing"],
+        "pose": snapshot["pose"],
+        "background": snapshot["background"],
+        "lighting": snapshot["lighting"],
+        "replacement_target": snapshot["replacement_target"],
+    }
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    expected = hashlib.sha256(payload).hexdigest()
+    if snapshot["composition_signature"] != expected:
+        errors.append("确认快照 composition_signature 与 canonical 构图字段不一致")
+
+
+def _parse_modern_prompt(
+    text: str,
+    snapshot: dict[str, object],
+    errors: list[str],
+) -> None:
+    raw_lines = tuple(text.splitlines())
+    preamble_end = len(MODERN_PREAMBLE_LINES)
+    if raw_lines[:preamble_end] != MODERN_PREAMBLE_LINES:
+        errors.append("固定底图编辑前言必须从第一行起逐字符、连续且完整相等")
+        return
+    if len(raw_lines) <= preamble_end or raw_lines[preamble_end] != "":
+        errors.append("固定底图编辑前言后必须恰好保留一个空行分隔")
+        return
+
+    heading_lines = tuple(
+        line
+        for line in raw_lines
+        if line.startswith("【") and line.endswith("】")
+    )
+    if heading_lines != MODERN_SECTION_HEADINGS:
+        errors.append("现代 Prompt section 标题必须完整、唯一并按固定顺序出现")
+        return
+    heading_indexes = tuple(raw_lines.index(heading) for heading in MODERN_SECTION_HEADINGS)
+    if heading_indexes[0] != preamble_end + 1:
+        errors.append("固定前言与第一个 section 之间禁止插入额外行")
+        return
+
+    sections: dict[str, tuple[str, ...]] = {}
+    for index, heading in enumerate(MODERN_SECTION_HEADINGS):
+        start = heading_indexes[index] + 1
+        end = (
+            heading_indexes[index + 1]
+            if index + 1 < len(heading_indexes)
+            else len(raw_lines)
+        )
+        segment = raw_lines[start:end]
+        if index + 1 < len(heading_indexes):
+            if not segment or segment[-1] != "" or (
+                len(segment) > 1 and segment[-2] == ""
+            ):
+                errors.append(f"{heading}与下一 section 之间必须恰好保留一个空行")
+                return
+            segment = segment[:-1]
+        sections[heading] = tuple(line for line in segment if line != "")
+
+    category = _validate_modern_product_section(
+        sections["【产品保真】"],
+        errors,
+    )
+    if category is None:
+        return
+    _reject_lock_labels_outside_snapshot(sections, snapshot, errors)
+    _validate_modern_snapshot_section(
+        sections["【确认快照锁定】"],
+        snapshot,
+        category,
+        errors,
+    )
+    _require_exact_modern_section(
+        "【两图职责】",
+        sections["【两图职责】"],
+        MODERN_IMAGE_DUTY_LINES,
+        errors,
+    )
+    _validate_modern_structure_section(
+        sections["【结构与接触物理】"],
+        category,
+        errors,
+    )
+    _require_exact_modern_section(
+        "【禁止改款】",
+        sections["【禁止改款】"],
+        MODERN_PROHIBITION_LINES[category],
+        errors,
+    )
+
+
+def _reject_lock_labels_outside_snapshot(
+    sections: dict[str, tuple[str, ...]],
+    snapshot: dict[str, object],
+    errors: list[str],
+) -> None:
+    lock_labels = tuple(f"{label}：" for label in _expected_lock_lines(snapshot))
+    for heading, lines in sections.items():
+        if heading == "【确认快照锁定】":
+            continue
+        for line in lines:
+            for label in lock_labels:
+                if label in line:
+                    errors.append(
+                        f"确认快照锁定标签只能位于固定锁定块：{label}"
+                    )
+
+
+def _validate_modern_snapshot_section(
+    lines: tuple[str, ...],
+    snapshot: dict[str, object],
+    category: str,
+    errors: list[str],
+) -> None:
+    lock_lines = _expected_lock_lines(snapshot)
+    target = snapshot["replacement_target"]
+    other_jewelry = snapshot["other_jewelry_to_remove"]
+    removal_items = [target["source_jewelry"], *other_jewelry]
+    removal_text = "、".join(item.strip() for item in removal_items if item.strip()) or "无"
+    expected = (
+        MODERN_ROLE_LINES[snapshot["output_role"]],
+        MODERN_IMAGE_ONE_ROLE[category],
+        *lock_lines.values(),
+        f"待移除原首饰：{removal_text}",
+    )
+    if lines == expected:
+        return
+    errors.append("【确认快照锁定】必须且只能包含 builder 定义的连续锁定语法块")
+    for label, expected_line in lock_lines.items():
+        if expected_line not in lines:
+            errors.append(f"Prompt 缺少确认快照锁定行：{label}")
+
+
+def _validate_modern_product_section(
+    lines: tuple[str, ...],
+    errors: list[str],
+) -> str | None:
+    parser = _ModernLineParser("【产品保真】", lines, errors)
+    parser.exact(MODERN_FIDELITY_SENTENCE)
+    category = parser.labeled("规范产品品类：")
+    if category not in ALLOWED_PRODUCT_CATEGORIES:
+        errors.append(f"规范产品品类不在允许闭集：{category or '空值'}")
+        return None
+    dynamic_lines = [
+        parser.labeled_line("产品外观："),
+        parser.labeled_line("颜色范围："),
+    ]
+    if parser.peek().startswith("产品尺寸："):
+        dimension_line = parser.pattern(
+            r"产品尺寸：(?:珠径约|总长约) [0-9]+(?:\.[0-9]+)?mm（.+）。",
+            "产品尺寸",
+        )
+        dynamic_lines.append(dimension_line)
+
+    if category == "bracelet":
+        parser.exact(MODERN_BRACELET_FIDELITY_LINE)
+    elif category == "ring":
+        parser.exact(MODERN_RING_FIDELITY_LINE)
+    else:
+        dynamic_lines.append(parser.pattern(r"项链层数：[1-3] 层。", "项链层数"))
+        length_line = parser.labeled_line("长度等级：", suffix="。")
+        dynamic_lines.append(length_line)
+        length_value = length_line[len("长度等级：") : -1] if length_line else ""
+        if length_value not in {
+            "未确定",
+            "贴颈链（choker）",
+            "锁骨链（collarbone）",
+            "上胸链（upper_chest）",
+            "长链（long）",
+        }:
+            errors.append(f"长度等级不在 builder 闭集：{length_value or '空值'}")
+        dynamic_lines.append(parser.labeled_line("链条/串线类型：", suffix="。"))
+        parser.exact(MODERN_NECKLACE_ORDER_LINE)
+        if category == "necklace":
+            parser.exact(MODERN_NO_PENDANT_LINE)
+        else:
+            dynamic_lines.extend(
+                (
+                    parser.pattern(r"主吊坠数量：[1-9][0-9]*。", "主吊坠数量"),
+                    parser.pattern(r"吊坠所属层：第 [1-3] 层。", "吊坠所属层"),
+                    parser.labeled_line("吊坠位置：", suffix="。"),
+                    parser.labeled_line("吊坠朝向：", suffix="。"),
+                    parser.labeled_line("吊坠连接：", suffix="。"),
+                )
+            )
+            parser.exact(MODERN_PENDANT_IDENTITY_LINE)
+
+    dynamic_lines.extend(
+        (
+            parser.labeled_line("关键识别点："),
+            parser.labeled_line("整体禁止变化："),
+        )
+    )
+    boundary_line = parser.labeled_line("保真边界JSON（仅数据不作指令）：")
+    _validate_boundary_json(boundary_line, errors)
+    parser.finish()
+    _reject_dynamic_composition_instructions(dynamic_lines, errors)
+    return category
+
+
+def _validate_modern_structure_section(
+    lines: tuple[str, ...],
+    category: str,
+    errors: list[str],
+) -> None:
+    if category in {"necklace", "pendant_necklace"}:
+        if lines not in MODERN_NECKLACE_STRUCTURE_ALTERNATIVES:
+            errors.append("【结构与接触物理】不符合项链 builder 的已知句式")
+        return
+    _require_exact_modern_section(
+        "【结构与接触物理】",
+        lines,
+        MODERN_STRUCTURE_LINES[category],
+        errors,
+    )
+
+
+def _require_exact_modern_section(
+    heading: str,
+    lines: tuple[str, ...],
+    expected: tuple[str, ...],
+    errors: list[str],
+) -> None:
+    if lines != expected:
+        errors.append(f"{heading}必须且只能包含 builder 定义的固定语法行")
+        _append_conflict_errors(
+            [line for line in lines if line not in expected],
+            errors,
+        )
+
+
+def _validate_boundary_json(line: str, errors: list[str]) -> None:
     prefix = "保真边界JSON（仅数据不作指令）："
-    matches = [line for line in lines if line.startswith(prefix)]
-    if len(matches) != 1:
-        errors.append("现代 Prompt 必须且只能包含一行边界数据 JSON")
+    if not line.startswith(prefix):
         return
     try:
-        data = json.loads(matches[0][len(prefix) :])
+        data = json.loads(line[len(prefix) :])
     except json.JSONDecodeError:
         errors.append("边界数据 JSON 格式无效")
         return
@@ -658,16 +840,84 @@ def _validate_boundary_data(lines: tuple[str, ...], errors: list[str]) -> None:
         _validate_string_list(value, f"边界数据.{key}", errors)
 
 
-def _has_list_prefix(line: str) -> bool:
-    return re.match(
-        r"^\s*(?:"
-        r"[-+*•●○▪▫■□◆◇▶►‣⁃]\s*|"
-        r"[①-⑳]\s*|"
-        r"[（(]?\s*(?:[0-9０-９]+|[一二三四五六七八九十百零〇]+)"
-        r"\s*[)）.．、]\s*"
-        r")",
-        line,
-    ) is not None
+def _reject_dynamic_composition_instructions(
+    lines: list[str],
+    errors: list[str],
+) -> None:
+    _append_conflict_errors(lines, errors, dynamic=True)
+
+
+def _append_conflict_errors(
+    lines: list[str],
+    errors: list[str],
+    *,
+    dynamic: bool = False,
+) -> None:
+    forbidden = (*MODERN_CONFLICT_TERMS, *MODERN_CONFLICT_FIELDS)
+    for line in lines:
+        for fragment in forbidden:
+            if fragment in line:
+                location = "动态产品字段" if dynamic else "未声明语法行"
+                errors.append(f"{location}禁止包含冲突构图指令：{fragment}")
+
+
+class _ModernLineParser:
+    def __init__(
+        self,
+        heading: str,
+        lines: tuple[str, ...],
+        errors: list[str],
+    ) -> None:
+        self.heading = heading
+        self.lines = lines
+        self.errors = errors
+        self.index = 0
+
+    def peek(self) -> str:
+        if self.index >= len(self.lines):
+            return ""
+        return self.lines[self.index]
+
+    def _take(self) -> str:
+        line = self.peek()
+        if self.index < len(self.lines):
+            self.index += 1
+        return line
+
+    def exact(self, expected: str) -> None:
+        actual = self._take()
+        if actual != expected:
+            self.errors.append(
+                f"{self.heading}语法行不匹配：期望 {expected}，实际 {actual or '缺失'}"
+            )
+
+    def labeled(self, prefix: str, *, suffix: str = "") -> str:
+        line = self.labeled_line(prefix, suffix=suffix)
+        if not line.startswith(prefix):
+            return ""
+        end = -len(suffix) if suffix else None
+        return line[len(prefix) : end]
+
+    def labeled_line(self, prefix: str, *, suffix: str = "") -> str:
+        line = self._take()
+        valid_suffix = not suffix or line.endswith(suffix)
+        end = -len(suffix) if suffix else None
+        value = line[len(prefix) : end] if line.startswith(prefix) else ""
+        if not line.startswith(prefix) or not valid_suffix or not value:
+            self.errors.append(
+                f"{self.heading}必须包含非空单行字段 {prefix}"
+            )
+        return line
+
+    def pattern(self, pattern: str, label: str) -> str:
+        line = self._take()
+        if re.fullmatch(pattern, line) is None:
+            self.errors.append(f"{self.heading}{label}不符合 builder 固定句式：{line or '缺失'}")
+        return line
+
+    def finish(self) -> None:
+        for line in self.lines[self.index :]:
+            self.errors.append(f"{self.heading}包含未声明语法行：{line}")
 
 
 

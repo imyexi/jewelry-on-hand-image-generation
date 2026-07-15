@@ -1,3 +1,4 @@
+import hashlib
 import json
 from copy import deepcopy
 from dataclasses import replace
@@ -190,6 +191,24 @@ def _constraints(**overrides):
     return ProductFidelityConstraints.from_dict(data)
 
 
+def _canonical_composition_signature(snapshot_data):
+    payload = {
+        "output_role": snapshot_data["output_role"].value,
+        "framing": snapshot_data["framing"],
+        "pose": snapshot_data["pose"].to_dict(),
+        "background": snapshot_data["background"],
+        "lighting": snapshot_data["lighting"],
+        "replacement_target": snapshot_data["replacement_target"].to_dict(),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _snapshot(
     output_role=OutputRole.LIFESTYLE,
     body_region="左手腕外侧",
@@ -221,9 +240,9 @@ def _snapshot(
         "other_jewelry_to_remove": ("右手食指原戒指",),
         "text_or_ui_risk": "small_removable",
         "product_visibility_sufficient": True,
-        "composition_signature": "b" * 64,
     }
     data.update(overrides)
+    data.setdefault("composition_signature", _canonical_composition_signature(data))
     return ReferenceCompositionSnapshot(**data)
 
 
@@ -517,6 +536,91 @@ def test_base_image_现代校验器严格拒绝语法绕过(tmp_path, case, payl
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    (
+        "包装景别标签",
+        "包装背景标签",
+        "缩进风格字段",
+        "带圈二十一",
+        "黑底五号",
+        "点运算符列表",
+        "未知说明行",
+        "未知段落",
+        "重复段落",
+        "段落乱序",
+        "合法段内未知行",
+        "合法动态字段包装锁定标签",
+    ),
+)
+def test_base_image_现代封闭语法拒绝所有未声明行和段落(tmp_path, mutation):
+    snapshot = _snapshot()
+    prompt = build_generation_prompt(
+        _product(), _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    suffixes = {
+        "包装景别标签": "\n备注：景别：全身景",
+        "包装背景标签": "\n说明（背景：户外）",
+        "缩进风格字段": "\n  风格氛围：暗调",
+        "带圈二十一": "\n㉑ 附加说明",
+        "黑底五号": "\n❺ 附加说明",
+        "点运算符列表": "\n∙ 附加说明",
+        "未知说明行": "\n补充说明：保持清晰",
+        "重复段落": "\n【两图职责】",
+    }
+    if mutation in suffixes:
+        prompt += suffixes[mutation]
+    elif mutation == "未知段落":
+        prompt = prompt.replace(
+            "【两图职责】",
+            "【额外说明】\n保持原图即可。\n\n【两图职责】",
+        )
+    elif mutation == "段落乱序":
+        prompt = (
+            prompt.replace("【两图职责】", "【临时段落】")
+            .replace("【产品保真】", "【两图职责】")
+            .replace("【临时段落】", "【产品保真】")
+        )
+    elif mutation == "合法动态字段包装锁定标签":
+        prompt = prompt.replace(
+            "产品外观：深红主珠居中，两侧透明茶金纹理珠",
+            "产品外观：备注：景别：全身景",
+        )
+    else:
+        prompt = prompt.replace(
+            "【两图职责】\n",
+            "【两图职责】\n补充说明：保持清晰\n",
+        )
+
+    errors = _modern_contract_errors(
+        tmp_path,
+        prompt,
+        snapshot.to_dict(),
+        f"closed-{mutation}",
+    )
+    assert errors, f"现代封闭语法不得接受：{mutation}"
+
+
+@pytest.mark.parametrize("case", ("构图字段篡改后保留旧签名", "格式正确但签名错误"))
+def test_reference_preservation_现代校验器重算构图签名(tmp_path, case):
+    snapshot = _snapshot()
+    prompt = build_generation_prompt(
+        _product(), _scored(_row()), _constraints(), OutputRole.LIFESTYLE, snapshot
+    )
+    data = snapshot.to_dict()
+    if case == "构图字段篡改后保留旧签名":
+        data["background"] = "户外街景"
+        prompt = prompt.replace(
+            f"背景：{snapshot.background}",
+            "背景：户外街景",
+        )
+    else:
+        data["composition_signature"] = "0" * 64
+
+    errors = _modern_contract_errors(tmp_path, prompt, data, f"signature-{case}")
+    assert any("composition_signature" in error for error in errors)
+
+
+@pytest.mark.parametrize(
     "field_name",
     (
         "rank",
@@ -694,7 +798,7 @@ def test_base_image_现代便携校验器绑定快照并拒绝冲突构图(tmp_p
         encoding="utf-8",
     )
     errors = validate_prompt(prompt_path, snapshot_path)
-    assert any("唯一允许修改清单" in error for error in errors)
+    assert any("固定语法" in error for error in errors)
 
     prompt_path.write_text(
         prompt.replace(
