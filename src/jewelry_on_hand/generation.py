@@ -418,7 +418,7 @@ def _build_ring_retry_prompt(
         )
         compacted_section = re.sub(
             r"(?m)^输出用途：手部佩戴图[^\r\n]*$",
-            "输出用途：手部佩戴图。深色背景；产品完整清晰；"
+            "输出用途：手部佩戴图。产品完整清晰；"
             "无文字/水印/logo/平台标识；佩戴在确认手指根部；接触和阴影真实。",
             compacted_section,
             count=1,

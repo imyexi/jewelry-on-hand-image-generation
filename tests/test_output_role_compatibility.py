@@ -56,6 +56,18 @@ def test_output_role_instruction_rejects_hero(role):
         )
 
 
+def test_output_role_instruction_has_no_fixed_background_brightness():
+    instruction = output_role_instruction(
+        OutputRole.HAND_WORN,
+        ProductType.BRACELET,
+        DisplayMode.WORN,
+    )
+
+    assert "使用深色背景" not in instruction
+    assert "深色背景" not in instruction
+    assert "产品完整清晰" in instruction
+
+
 def _analysis_payload() -> dict:
     return {
         "product_type": "普通项链",
@@ -161,6 +173,22 @@ def test_build_prompt_without_output_role_omits_role_line_and_passes_validator(
 
     assert _output_role_lines(prompt) == []
     assert _prompt_contract_errors(tmp_path, prompt) == []
+
+
+def test_build_prompt_keeps_reference_scene_without_fixed_dark_instruction(tmp_path):
+    reference_path = tmp_path / "reference.jpg"
+    reference_path.write_bytes(b"reference")
+    product = ProductAnalysis.from_dict(_analysis_payload())
+    prompt = build_prompt(
+        product,
+        _scored_reference(reference_path),
+        build_product_fidelity_constraints(product),
+        output_role=OutputRole.LIFESTYLE,
+    )
+
+    assert "使用深色背景" not in prompt
+    assert "参考图场景：正面颈胸 浅色背景" in prompt
+    assert "生活场景图" in prompt
 
 
 def test_cli_generate_without_output_role_rejects_before_provider_call(

@@ -62,7 +62,7 @@ def output_role_instruction(
     if output_role is None:
         return ""
     role = require_scene_replacement_role(output_role, stage="Prompt")
-    common = "使用深色背景，产品完整清晰，画面不得出现文字、水印、logo 或平台标识。"
+    common = "产品完整清晰，画面不得出现文字、水印、logo 或平台标识。"
     if role is OutputRole.LIFESTYLE:
         return f"输出用途：{role.display_name}。{common} 保留日常生活环境氛围，但不得遮挡产品主体。"
     if product_type in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}:

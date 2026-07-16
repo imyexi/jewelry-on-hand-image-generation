@@ -15,6 +15,7 @@ from jewelry_on_hand.product_fidelity import (
     product_analysis_sha256,
 )
 from jewelry_on_hand.review_decision import ReviewGateError
+from jewelry_on_hand.reference_selection import reference_selection_sha256
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
@@ -370,7 +371,8 @@ def test_ring_retry_compacts_contract_fields_when_correction_exceeds_prompt_limi
     assert "参考图文件：hand-reference.jpg；" in retry_prompt
     assert original_reference not in retry_prompt
     assert "输出用途：手部佩戴图" in retry_prompt
-    assert "深色背景" in retry_prompt
+    assert "使用深色背景" not in retry_prompt
+    assert "输出用途：手部佩戴图。深色背景" not in retry_prompt
     assert "产品完整清晰" in retry_prompt
     assert "无文字/水印/logo/平台标识" in retry_prompt
     assert "确认手指根部" in retry_prompt
@@ -500,7 +502,7 @@ def test_ring_retry_prompt_still_fails_when_equivalent_compaction_is_insufficien
         1,
     ).replace(
         output_role,
-        "输出用途：手部佩戴图。深色背景；产品完整清晰；无文字/水印/logo/平台标识；"
+        "输出用途：手部佩戴图。产品完整清晰；无文字/水印/logo/平台标识；"
         "佩戴在确认手指根部；接触和阴影真实。",
         1,
     )
@@ -571,9 +573,10 @@ def test_generation_assigns_unique_task_id_for_each_rank(tmp_path, monkeypatch):
     )
     ref_2 = tmp_path / "ref-2.jpg"
     ref_2.write_bytes(b"ref 2")
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, ref_1), _selected_reference(2, ref_2)],
+    _replace_selected_references(
+        paths,
+        _selected_reference(1, ref_1),
+        _selected_reference(2, ref_2),
     )
     calls = []
 
@@ -603,13 +606,10 @@ def test_generation_assigns_unique_task_id_for_each_rank(tmp_path, monkeypatch):
 
 
 def test_generation_requires_selected_references(tmp_path):
-    paths = RunPaths.create(tmp_path, "run-1")
-    product = paths.input_dir / "product-on-hand.jpg"
-    product.write_bytes(b"product")
-    _write_confirmed_constraints(paths)
-    write_json(paths.review_dir / "review_decision.json", {"action": "generate_rank_1", "fidelity_confirmed": True})
+    paths, product, _ref = _ready_run(tmp_path)
+    (paths.analysis_dir / "selected_references.json").unlink()
 
-    with pytest.raises(FileNotFoundError, match="selected_references.json"):
+    with pytest.raises(ReviewGateError, match="Top 3.*文件"):
         run_generation(paths, product, {1: "prompt text"}, HELPER, wait=False)
 
 
@@ -711,9 +711,10 @@ def test_generation_uses_selected_ranks_only(tmp_path, monkeypatch):
     )
     ref_2 = tmp_path / "ref-2.jpg"
     ref_2.write_bytes(b"ref 2")
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, ref_1), _selected_reference(2, ref_2)],
+    _replace_selected_references(
+        paths,
+        _selected_reference(1, ref_1),
+        _selected_reference(2, ref_2),
     )
     calls = []
 
@@ -754,13 +755,11 @@ def test_generation_uses_sequential_output_dirs_for_non_contiguous_ranks(
     ref_2.write_bytes(b"ref 2")
     ref_3 = tmp_path / "ref-3.jpg"
     ref_3.write_bytes(b"ref 3")
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [
-            _selected_reference(1, ref_1),
-            _selected_reference(2, ref_2),
-            _selected_reference(3, ref_3),
-        ],
+    _replace_selected_references(
+        paths,
+        _selected_reference(1, ref_1),
+        _selected_reference(2, ref_2),
+        _selected_reference(3, ref_3),
     )
     calls = []
 
@@ -806,9 +805,10 @@ def test_generation_preflight_rejects_later_non_empty_dir_without_submit(
     )
     ref_2 = tmp_path / "ref-2.jpg"
     ref_2.write_bytes(b"ref 2")
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, ref_1), _selected_reference(2, ref_2)],
+    _replace_selected_references(
+        paths,
+        _selected_reference(1, ref_1),
+        _selected_reference(2, ref_2),
     )
     existing_dir = paths.generation_dir / "02"
     existing_dir.mkdir()
@@ -877,9 +877,10 @@ def test_generation_preflight_rejects_later_unwritable_dir_without_submit(
     )
     ref_2 = tmp_path / "ref-2.jpg"
     ref_2.write_bytes(b"ref 2")
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, ref_1), _selected_reference(2, ref_2)],
+    _replace_selected_references(
+        paths,
+        _selected_reference(1, ref_1),
+        _selected_reference(2, ref_2),
     )
     unwritable_dir = paths.generation_dir / "02"
     unwritable_dir.mkdir()
@@ -949,26 +950,22 @@ def test_generation_rejects_duplicate_reference_rank(tmp_path):
     paths, product, ref = _ready_run(tmp_path)
     other_ref = tmp_path / "ref-other.jpg"
     other_ref.write_bytes(b"other")
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, ref), _selected_reference(1, other_ref)],
-    )
+    references_path = paths.analysis_dir / "selected_references.json"
+    references = read_json(references_path)
+    references[1].update(_selected_reference(1, other_ref))
+    write_json(references_path, references)
 
-    with pytest.raises(GenerationError) as exc_info:
+    with pytest.raises(ReviewGateError) as exc_info:
         run_generation(paths, product, {1: "prompt text"}, HELPER, wait=False)
 
-    assert "重复" in str(exc_info.value)
-    assert "rank 1" in str(exc_info.value)
+    assert "rank 1、2、3" in str(exc_info.value)
 
 
 def test_generation_copies_reference_with_source_extension(tmp_path, monkeypatch):
     paths, product, _ref = _ready_run(tmp_path)
     ref_png = tmp_path / "ref.png"
     ref_png.write_bytes(b"png")
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, ref_png)],
-    )
+    _replace_selected_references(paths, _selected_reference(1, ref_png))
 
     def fake_run(command, capture_output, text, check=False):
         return Completed(
@@ -990,10 +987,7 @@ def test_generation_uses_review_copy_when_original_reference_is_missing(tmp_path
     review_copy = paths.review_dir / "rank-1-ref.jpg"
     review_copy.write_bytes(b"review-copy")
     original_ref.unlink()
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, review_copy)],
-    )
+    _replace_selected_references(paths, _selected_reference(1, review_copy))
     calls = []
 
     def fake_run(command, capture_output, text, check=False):
@@ -1017,10 +1011,7 @@ def test_generation_uses_review_copy_when_original_reference_is_missing(tmp_path
 def test_generation_rejects_missing_reference_file(tmp_path):
     paths, product, _ref = _ready_run(tmp_path)
     missing_ref = tmp_path / "missing.jpg"
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [_selected_reference(1, missing_ref)],
-    )
+    _replace_selected_references(paths, _selected_reference(1, missing_ref))
 
     with pytest.raises(FileNotFoundError, match="参考图不存在"):
         run_generation(paths, product, {1: "prompt text"}, HELPER, wait=False)
@@ -1434,7 +1425,6 @@ def test_generation_preflight_rejects_invalid_second_rank_without_submit(
         tmp_path,
         decision={"action": "generate_multiple", "selected_ranks": [1, 2]},
     )
-    first_reference = read_json(paths.analysis_dir / "selected_references.json")[0]
     source_2 = tmp_path / "ref-2.jpg"
     ref_2 = paths.review_dir / "rank-2-ref-2.jpg"
     if bad_second != "reference":
@@ -1448,9 +1438,9 @@ def test_generation_preflight_rejects_invalid_second_rank_without_submit(
         )
     else:
         second_metadata = {}
-    write_json(
-        paths.analysis_dir / "selected_references.json",
-        [first_reference, _selected_reference(2, ref_2, metadata=second_metadata)],
+    _replace_selected_references(
+        paths,
+        _selected_reference(2, ref_2, metadata=second_metadata),
     )
     prompts = {1: "prompt 1"}
     if bad_second != "prompt":
@@ -1811,7 +1801,7 @@ def test_ring_reference_gate_requires_exactly_rank_one_to_three(
     calls = []
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args))
 
-    with pytest.raises(GenerationError, match="恰好.*rank 1、2、3"):
+    with pytest.raises(ReviewGateError, match="恰好.*3 个条目"):
         run_generation(paths, product, {1: "ring prompt"}, HELPER, wait=False)
 
     assert calls == []
@@ -1971,6 +1961,7 @@ def _ready_run(tmp_path, decision=None):
         paths.analysis_dir / "selected_references.json",
         [_selected_reference(1, ref)],
     )
+    _bind_reference_selection(paths)
     return paths, product, ref
 
 
@@ -2009,6 +2000,7 @@ def _ready_ring_run(tmp_path, *, analysis_overrides=None, reference_count=3):
             )
         )
     write_json(paths.analysis_dir / "selected_references.json", references)
+    _bind_reference_selection(paths)
     return paths, product
 
 
@@ -2049,7 +2041,63 @@ def _ready_modern_run(
             )
         ],
     )
+    _bind_reference_selection(paths)
     return paths, product, review_copy
+
+
+def _bind_reference_selection(paths):
+    audit = {
+        "schema_version": 1,
+        "mode": "keyword_relevance_only",
+        "original_prompt": "",
+        "normalized_conditions": [],
+        "matched_fields": [],
+        "candidate_counts": {
+            "before_base_gates": 3,
+            "after_base_gates": 3,
+            "after_prompt_gates": 3,
+        },
+        "condition_match_counts": {},
+        "candidate_evaluations": [],
+    }
+    digest = reference_selection_sha256(audit)
+    write_json(
+        paths.analysis_dir / "reference_selection_constraints.json",
+        audit,
+    )
+    selected_path = paths.analysis_dir / "selected_references.json"
+    current = read_json(selected_path)
+    template = next(item for item in current if isinstance(item, dict))
+    by_rank = {item["rank"]: item for item in current}
+    selected = []
+    for rank in range(1, 4):
+        item = dict(by_rank.get(rank, template))
+        item["rank"] = rank
+        item["reference_selection_constraints_sha256"] = digest
+        selected.append(item)
+    write_json(selected_path, selected)
+
+    decision_path = paths.review_dir / "review_decision.json"
+    decision = read_json(decision_path)
+    decision["reference_selection_constraints_path"] = (
+        "analysis/reference_selection_constraints.json"
+    )
+    decision["reference_selection_constraints_sha256"] = digest
+    write_json(decision_path, decision)
+
+
+def _replace_selected_references(paths, *replacements):
+    selected_path = paths.analysis_dir / "selected_references.json"
+    selected = read_json(selected_path)
+    by_rank = {item["rank"]: item for item in selected}
+    digest = read_json(paths.review_dir / "review_decision.json")[
+        "reference_selection_constraints_sha256"
+    ]
+    for replacement in replacements:
+        item = dict(replacement)
+        item["reference_selection_constraints_sha256"] = digest
+        by_rank[item["rank"]] = item
+    write_json(selected_path, [by_rank[rank] for rank in sorted(by_rank)])
 
 
 def _modern_necklace_analysis(product_type="necklace", display_mode="worn"):

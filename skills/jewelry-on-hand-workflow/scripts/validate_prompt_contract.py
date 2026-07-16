@@ -502,7 +502,7 @@ def _validate_output_role(
     if role not in {"主图", "手部佩戴图", "生活场景图"}:
         errors.append("输出用途只能是主图、手部佩戴图或生活场景图")
         return
-    for required in ("深色背景", "产品完整清晰"):
+    for required in ("产品完整清晰",):
         if required not in line:
             errors.append(f"输出用途约束缺少：{required}")
     if role == "手部佩戴图" and category in {"necklace", "pendant_necklace"}:
