@@ -15,6 +15,7 @@ from jewelry_on_hand.product_fidelity import (
     build_product_fidelity_constraints,
     product_analysis_sha256,
 )
+from jewelry_on_hand.reference_selection import reference_selection_sha256
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
@@ -69,6 +70,113 @@ def _write_confirmed_constraints(paths):
         paths.analysis_dir / "product_fidelity_constraints.json",
         _constraints_data(analysis_data=analysis_data),
     )
+    _write_reference_selection_binding(paths)
+
+
+def _write_reference_selection_binding(paths):
+    audit = {
+        "schema_version": 1,
+        "mode": "keyword_relevance_only",
+        "original_prompt": "",
+        "normalized_conditions": [],
+        "matched_fields": [],
+        "candidate_counts": {
+            "before_base_gates": 3,
+            "after_base_gates": 3,
+            "after_prompt_gates": 3,
+        },
+        "condition_match_counts": {},
+        "candidate_evaluations": [],
+    }
+    digest = reference_selection_sha256(audit)
+    write_json(
+        paths.analysis_dir / "reference_selection_constraints.json",
+        audit,
+    )
+    write_json(
+        paths.analysis_dir / "selected_references.json",
+        [
+            {
+                "rank": rank,
+                "reference_selection_constraints_sha256": digest,
+            }
+            for rank in range(1, 4)
+        ],
+    )
+    return digest
+
+
+@pytest.fixture(autouse=True)
+def _seed_reference_selection_for_created_runs(monkeypatch):
+    original_create = RunPaths.create
+
+    def create_with_selection_binding(cls, output_root, run_id):
+        paths = original_create(output_root, run_id)
+        _write_reference_selection_binding(paths)
+        return paths
+
+    monkeypatch.setattr(
+        RunPaths,
+        "create",
+        classmethod(create_with_selection_binding),
+    )
+
+
+def test_write_review_decision_binds_reference_selection_constraints(tmp_path):
+    paths = RunPaths.create(tmp_path / "runs", "selection-binding")
+    _write_confirmed_constraints(paths)
+
+    decision_path = write_review_decision(
+        paths,
+        {"action": "generate_rank_1", "fidelity_confirmed": True},
+    )
+
+    decision = read_json(decision_path)
+    audit = read_json(
+        paths.analysis_dir / "reference_selection_constraints.json"
+    )
+    assert decision["reference_selection_constraints_path"] == (
+        "analysis/reference_selection_constraints.json"
+    )
+    assert decision["reference_selection_constraints_sha256"] == (
+        reference_selection_sha256(audit)
+    )
+
+
+def test_generation_decision_rejects_changed_reference_selection_constraints(
+    tmp_path,
+):
+    paths = RunPaths.create(tmp_path / "runs", "selection-tamper")
+    _write_confirmed_constraints(paths)
+    write_review_decision(
+        paths,
+        {"action": "generate_rank_1", "fidelity_confirmed": True},
+    )
+    audit_path = paths.analysis_dir / "reference_selection_constraints.json"
+    audit = read_json(audit_path)
+    audit["original_prompt"] = "被修改的提示词"
+    write_json(audit_path, audit)
+
+    with pytest.raises(ReviewGateError, match="选图约束.*摘要不一致"):
+        require_generation_decision(paths)
+
+
+def test_generation_decision_rejects_selected_reference_binding_mismatch(
+    tmp_path,
+):
+    paths = RunPaths.create(tmp_path / "runs", "selected-binding-tamper")
+    _write_confirmed_constraints(paths)
+    write_review_decision(
+        paths,
+        {"action": "generate_rank_1", "fidelity_confirmed": True},
+    )
+    selected_path = paths.analysis_dir / "selected_references.json"
+    selected = read_json(selected_path)
+    selected[1]["reference_selection_constraints_sha256"] = "0" * 64
+    write_json(selected_path, selected)
+
+    with pytest.raises(ReviewGateError, match="Top 3.*摘要不一致"):
+        require_generation_decision(paths)
 
 
 def _necklace_analysis_data(**overrides):
@@ -321,12 +429,18 @@ def test_write_review_decision_normalizes_generate_rank_1(tmp_path):
     written_path = write_review_decision(paths, {"action": "generate_rank_1", "fidelity_confirmed": True})
 
     assert written_path == paths.review_dir / "review_decision.json"
-    assert read_json(written_path) == {
+    written = read_json(written_path)
+    assert written == {
         "action": "generate_rank_1",
         "selected_ranks": [1],
         "fidelity_confirmed": True,
         "fidelity_constraints_path": "analysis/product_fidelity_constraints.json",
+        "reference_selection_constraints_path": "analysis/reference_selection_constraints.json",
+        "reference_selection_constraints_sha256": written[
+            "reference_selection_constraints_sha256"
+        ],
     }
+    assert len(written["reference_selection_constraints_sha256"]) == 64
 
 
 def test_write_review_decision_normalizes_json_payload(tmp_path):
@@ -336,7 +450,14 @@ def test_write_review_decision_normalizes_json_payload(tmp_path):
     written_path = write_review_decision(paths, data)
 
     assert written_path == paths.review_dir / "review_decision.json"
-    assert read_json(written_path) == data | {"fidelity_constraints_path": "analysis/product_fidelity_constraints.json"}
+    written = read_json(written_path)
+    assert written == data | {
+        "fidelity_constraints_path": "analysis/product_fidelity_constraints.json",
+        "reference_selection_constraints_path": "analysis/reference_selection_constraints.json",
+        "reference_selection_constraints_sha256": written[
+            "reference_selection_constraints_sha256"
+        ],
+    }
 
 
 def test_read_decision_wraps_malformed_json(tmp_path):
@@ -607,8 +728,8 @@ def test_historical_bracelet_generation_without_snapshot_remains_compatible(tmp_
         },
     )
     _write_confirmed_constraints(paths)
-    write_json(
-        paths.review_dir / "review_decision.json",
+    write_review_decision(
+        paths,
         {
             "action": "generate_rank_1",
             "selected_ranks": [1],

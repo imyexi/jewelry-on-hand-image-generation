@@ -26,10 +26,17 @@ from jewelry_on_hand.product_fidelity import (
     validate_product_fidelity_constraints,
 )
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
+from jewelry_on_hand.reference_selection import (
+    REFERENCE_SELECTION_FILE_NAME,
+    reference_selection_sha256,
+)
 
 
 DECISION_FILE_NAME = "review_decision.json"
 CANONICAL_CONSTRAINTS_RELATIVE_PATH = "analysis/product_fidelity_constraints.json"
+REFERENCE_SELECTION_CONSTRAINTS_RELATIVE_PATH = (
+    f"analysis/{REFERENCE_SELECTION_FILE_NAME}"
+)
 _GENERATION_ACTIONS = {"generate_rank_1", "generate_selected", "generate_multiple"}
 
 
@@ -39,7 +46,8 @@ class ReviewGateError(RuntimeError):
 
 def write_review_decision(paths: RunPaths, data: dict[str, Any]) -> Path:
     try:
-        decision = ReviewDecision.from_dict(data)
+        normalized_data = _bind_reference_selection(paths, data)
+        decision = ReviewDecision.from_dict(normalized_data)
         analysis = _load_optional_analysis(paths)
         if analysis is not None:
             validate_decision_against_analysis(decision, analysis)
@@ -63,7 +71,8 @@ def write_analysis_and_review_decision(
     try:
         analysis = ProductAnalysis.from_dict(analysis_data)
         validate_confirmed_analysis(analysis)
-        decision = ReviewDecision.from_dict(decision_data)
+        normalized_decision_data = _bind_reference_selection(paths, decision_data)
+        decision = ReviewDecision.from_dict(normalized_decision_data)
         validate_decision_against_analysis(decision, analysis)
     except (TypeError, ValueError, ReviewGateError) as exc:
         if isinstance(exc, ReviewGateError):
@@ -98,6 +107,10 @@ def write_review_bundle(
             )
         else:
             import_source = None
+        normalized_decision_data = _bind_reference_selection(
+            paths,
+            normalized_decision_data,
+        )
 
         if analysis_data is None:
             analysis = _load_optional_analysis(paths)
@@ -204,6 +217,10 @@ def require_generation_decision(paths: RunPaths) -> ReviewDecision:
             validate_product_fidelity_constraints(analysis, constraints)
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewGateError(f"无效的产品保真约束文件：{constraints_path}；{exc}") from exc
+    validate_reference_selection_binding(
+        paths,
+        decision.reference_selection_constraints_sha256,
+    )
     return decision
 
 
@@ -275,6 +292,12 @@ def _decision_to_dict(decision: ReviewDecision) -> dict[str, Any]:
     if decision.action in {"generate_rank_1", "generate_selected", "generate_multiple"}:
         data["fidelity_confirmed"] = decision.fidelity_confirmed
         data["fidelity_constraints_path"] = decision.fidelity_constraints_path
+        data["reference_selection_constraints_path"] = (
+            decision.reference_selection_constraints_path
+        )
+        data["reference_selection_constraints_sha256"] = (
+            decision.reference_selection_constraints_sha256
+        )
     if decision.fidelity_notes is not None:
         data["fidelity_notes"] = decision.fidelity_notes
     if decision.confirmation_snapshot is not None:
@@ -282,6 +305,68 @@ def _decision_to_dict(decision: ReviewDecision) -> dict[str, Any]:
     if decision.output_role is not None:
         data["output_role"] = decision.output_role.value
     return data
+
+
+def _bind_reference_selection(
+    paths: RunPaths,
+    decision_data: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(decision_data)
+    if normalized.get("action") not in _GENERATION_ACTIONS:
+        return normalized
+    audit_path = paths.root / REFERENCE_SELECTION_CONSTRAINTS_RELATIVE_PATH
+    if not audit_path.is_file():
+        raise ReviewGateError(f"缺少选图约束文件：{audit_path}")
+    audit = read_json(audit_path)
+    if not isinstance(audit, dict):
+        raise ReviewGateError(f"选图约束文件必须是 JSON 对象：{audit_path}")
+    digest = reference_selection_sha256(audit)
+    validate_reference_selection_binding(paths, digest)
+    normalized["reference_selection_constraints_path"] = (
+        REFERENCE_SELECTION_CONSTRAINTS_RELATIVE_PATH
+    )
+    normalized["reference_selection_constraints_sha256"] = digest
+    return normalized
+
+
+def validate_reference_selection_binding(
+    paths: RunPaths,
+    expected_sha256: str | None,
+) -> None:
+    audit_path = paths.root / REFERENCE_SELECTION_CONSTRAINTS_RELATIVE_PATH
+    if not audit_path.is_file():
+        raise ReviewGateError(f"缺少选图约束文件：{audit_path}")
+    audit = read_json(audit_path)
+    if not isinstance(audit, dict):
+        raise ReviewGateError(f"选图约束文件必须是 JSON 对象：{audit_path}")
+    actual_sha256 = reference_selection_sha256(audit)
+    if expected_sha256 is None:
+        raise ReviewGateError("生成决策缺少选图约束摘要，请重新执行 record-decision")
+    if expected_sha256 != actual_sha256:
+        raise ReviewGateError(
+            "选图约束文件摘要不一致；旧 Top 3 与旧决策已失效，"
+            "请重新执行 prepare-review"
+        )
+
+    selected_path = paths.analysis_dir / "selected_references.json"
+    if not selected_path.is_file():
+        raise ReviewGateError(f"缺少 Top 3 参考图文件：{selected_path}")
+    selected = read_json(selected_path)
+    if not isinstance(selected, list) or len(selected) != 3:
+        raise ReviewGateError("Top 3 参考图必须恰好包含 3 个条目")
+    ranks = {
+        item.get("rank")
+        for item in selected
+        if isinstance(item, dict)
+    }
+    if ranks != {1, 2, 3}:
+        raise ReviewGateError("Top 3 参考图必须包含互异的 rank 1、2、3")
+    if any(
+        not isinstance(item, dict)
+        or item.get("reference_selection_constraints_sha256") != actual_sha256
+        for item in selected
+    ):
+        raise ReviewGateError("Top 3 参考图的选图约束摘要不一致")
 
 
 def _load_optional_analysis(paths: RunPaths) -> ProductAnalysis | None:

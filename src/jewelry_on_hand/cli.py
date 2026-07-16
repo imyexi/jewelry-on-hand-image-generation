@@ -612,11 +612,11 @@ def _parse_nullable_integer(value: str, field_name: str) -> int | None:
 
 def _generate(args: argparse.Namespace) -> int:
     paths = _paths_from_run_root(args.run_root)
-    decision = require_generation_decision(paths)
     output_role = require_scene_replacement_role(
         _load_run_output_role(paths),
         stage="generate",
     )
+    decision = require_generation_decision(paths)
     decision_output_role = require_scene_replacement_role(
         decision.output_role,
         stage="generate review-decision",

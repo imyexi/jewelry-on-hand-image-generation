@@ -1568,6 +1568,10 @@ class ReviewDecision:
     fidelity_constraints_path: str = "analysis/product_fidelity_constraints.json"
     confirmation_snapshot: ProductConfirmationSnapshot | None = None
     output_role: OutputRole | str | None = None
+    reference_selection_constraints_path: str = (
+        "analysis/reference_selection_constraints.json"
+    )
+    reference_selection_constraints_sha256: str | None = None
 
     def __post_init__(self) -> None:
         supported_actions = {
@@ -1623,6 +1627,30 @@ class ReviewDecision:
             raise ValueError("confirmation_snapshot 必须是产品确认快照或 null")
         object.__setattr__(self, "confirmation_snapshot", snapshot)
         object.__setattr__(self, "output_role", normalize_output_role(self.output_role))
+        object.__setattr__(
+            self,
+            "reference_selection_constraints_path",
+            _required_string_value(
+                self.reference_selection_constraints_path,
+                "reference_selection_constraints_path",
+            ),
+        )
+        selection_sha256 = _optional_non_empty_string(
+            self.reference_selection_constraints_sha256,
+            "reference_selection_constraints_sha256",
+        )
+        if selection_sha256 is not None and (
+            len(selection_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in selection_sha256)
+        ):
+            raise ValueError(
+                "reference_selection_constraints_sha256 必须是 64 位小写十六进制摘要"
+            )
+        object.__setattr__(
+            self,
+            "reference_selection_constraints_sha256",
+            selection_sha256,
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ReviewDecision":
@@ -1690,6 +1718,13 @@ class ReviewDecision:
             fidelity_constraints_path=fidelity_constraints_path,
             confirmation_snapshot=confirmation_snapshot,
             output_role=source.get("output_role"),
+            reference_selection_constraints_path=source.get(
+                "reference_selection_constraints_path",
+                "analysis/reference_selection_constraints.json",
+            ),
+            reference_selection_constraints_sha256=source.get(
+                "reference_selection_constraints_sha256"
+            ),
         )
 
     @staticmethod

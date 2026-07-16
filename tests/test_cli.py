@@ -215,6 +215,61 @@ def declare_scene_output_role(run_root, role="hand_worn"):
         Path(run_root) / "analysis" / "output_role.json",
         {"output_role": role},
     )
+    _declare_reference_selection_binding(run_root)
+
+
+def _declare_reference_selection_binding(run_root):
+    analysis_dir = Path(run_root) / "analysis"
+    audit = {
+        "schema_version": 1,
+        "mode": "keyword_relevance_only",
+        "original_prompt": "",
+        "normalized_conditions": [],
+        "matched_fields": [],
+        "candidate_counts": {
+            "before_base_gates": 3,
+            "after_base_gates": 3,
+            "after_prompt_gates": 3,
+        },
+        "condition_match_counts": {},
+        "candidate_evaluations": [],
+    }
+    digest = reference_selection_sha256(audit)
+    write_json(analysis_dir / "reference_selection_constraints.json", audit)
+
+    selected_path = analysis_dir / "selected_references.json"
+    if selected_path.is_file():
+        current = read_json(selected_path)
+        template = next(
+            (item for item in current if isinstance(item, dict)),
+            {},
+        )
+    else:
+        current = []
+        template = {}
+    by_rank = {
+        item.get("rank"): item
+        for item in current
+        if isinstance(item, dict)
+    }
+    selected = []
+    for rank in range(1, 4):
+        item = dict(by_rank.get(rank, template))
+        item["rank"] = rank
+        item["reference_selection_constraints_sha256"] = digest
+        selected.append(item)
+    write_json(selected_path, selected)
+    return digest
+
+
+def write_bound_review_decision(run_root, data):
+    digest = _declare_reference_selection_binding(run_root)
+    payload = dict(data)
+    payload["reference_selection_constraints_path"] = (
+        "analysis/reference_selection_constraints.json"
+    )
+    payload["reference_selection_constraints_sha256"] = digest
+    write_json(Path(run_root) / "review" / "review_decision.json", payload)
 
 
 def make_constraints(
@@ -587,13 +642,19 @@ def test_record_decision_cli_writes_and_normalizes_generate_rank_1(tmp_path):
         == 0
     )
 
-    assert read_json(run_root / "review" / "review_decision.json") == {
+    written = read_json(run_root / "review" / "review_decision.json")
+    assert written == {
         "action": "generate_rank_1",
         "selected_ranks": [1],
         "fidelity_confirmed": True,
         "fidelity_constraints_path": "analysis/product_fidelity_constraints.json",
         "output_role": "hand_worn",
+        "reference_selection_constraints_path": "analysis/reference_selection_constraints.json",
+        "reference_selection_constraints_sha256": written[
+            "reference_selection_constraints_sha256"
+        ],
     }
+    assert len(written["reference_selection_constraints_sha256"]) == 64
 
 
 def test_record_decision_cli_returns_nonzero_for_invalid_selected_rank(tmp_path):
@@ -1607,7 +1668,7 @@ def test_generate_cli_builds_prompts_after_review_gate(tmp_path, monkeypatch):
     )
     make_constraints(analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
-    write_json(review_dir / "review_decision.json", {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
+    write_bound_review_decision(run_root, {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
     calls = []
 
     def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
@@ -1680,7 +1741,7 @@ def test_generate_cli_accepts_selected_reference_without_metadata(tmp_path, monk
     )
     make_constraints(analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
-    write_json(review_dir / "review_decision.json", {"action": "generate_selected", "selected_ranks": [2], "fidelity_confirmed": True, "output_role": "hand_worn"})
+    write_bound_review_decision(run_root, {"action": "generate_selected", "selected_ranks": [2], "fidelity_confirmed": True, "output_role": "hand_worn"})
     calls = []
 
     def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
@@ -1750,7 +1811,7 @@ def test_generate_cli_only_builds_prompts_for_approved_selected_ranks(tmp_path, 
     write_json(analysis_dir / "selected_references.json", references)
     make_constraints(analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
-    write_json(review_dir / "review_decision.json", {"action": "generate_selected", "selected_ranks": [2], "fidelity_confirmed": True, "output_role": "hand_worn"})
+    write_bound_review_decision(run_root, {"action": "generate_selected", "selected_ranks": [2], "fidelity_confirmed": True, "output_role": "hand_worn"})
     built_ranks = []
     calls = []
 
@@ -1819,7 +1880,12 @@ def test_generate_cli_returns_nonzero_when_decision_rank_is_missing(tmp_path, mo
     write_json(analysis_dir / "selected_references.json", references)
     make_constraints(analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
-    write_json(review_dir / "review_decision.json", {"action": "generate_selected", "selected_ranks": [3], "fidelity_confirmed": True, "output_role": "hand_worn"})
+    write_bound_review_decision(run_root, {"action": "generate_selected", "selected_ranks": [3], "fidelity_confirmed": True, "output_role": "hand_worn"})
+    bound_references = read_json(analysis_dir / "selected_references.json")
+    write_json(
+        analysis_dir / "selected_references.json",
+        [item for item in bound_references if item["rank"] != 3],
+    )
     calls = []
 
     def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
@@ -1851,7 +1917,7 @@ def test_generate_cli_reruns_supported_product_gate_before_generation(tmp_path, 
     write_json(analysis_dir / "selected_references.json", [_selected_reference_payload(1, ref)])
     make_constraints(analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
-    write_json(review_dir / "review_decision.json", {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
+    write_bound_review_decision(run_root, {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
     calls = []
 
     def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
@@ -1908,7 +1974,7 @@ def test_generate_cli_preserves_mirror_relative_path_from_review_package(tmp_pat
     write_review_package(paths, product, [scored], [scored])
     make_constraints(paths.analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
-    write_json(paths.review_dir / "review_decision.json", {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
+    write_bound_review_decision(run_root, {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
     calls = []
 
     def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
