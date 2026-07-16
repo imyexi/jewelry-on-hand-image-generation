@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 
 from jewelry_on_hand import reference_composition as _reference_composition
 from jewelry_on_hand.category_policies import get_category_policy
@@ -33,6 +35,48 @@ DIVERSITY_SCORE_WINDOW = 10
 DEFAULT_AUDIT_SEED = "reference-replacement-v1"
 
 
+@dataclass(frozen=True)
+class ReferenceReadinessExclusion:
+    row_index: int
+    file_name: str
+    field_name: str
+    reason: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "row_index": self.row_index,
+            "file_name": self.file_name,
+            "field_name": self.field_name,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class ReferenceSelectionResult:
+    output_role: OutputRole
+    source_count: int
+    existing_count: int
+    role_count: int
+    category_eligible_count: int
+    selected: tuple[ScoredReference, ...]
+    candidates: tuple[ScoredReference, ...]
+    readiness_exclusions: tuple[ReferenceReadinessExclusion, ...]
+
+    def readiness_audit(self) -> dict[str, object]:
+        return {
+            "output_role": self.output_role.value,
+            "source_count": self.source_count,
+            "existing_count": self.existing_count,
+            "role_count": self.role_count,
+            "category_eligible_count": self.category_eligible_count,
+            "eligible_count": len(self.candidates),
+            "selected_count": len(self.selected),
+            "exclusions": [
+                exclusion.to_dict() for exclusion in self.readiness_exclusions
+            ],
+        }
+
+
 def select_top_references(
     product: ProductAnalysis,
     rows: Iterable[ReferenceRow],
@@ -41,20 +85,66 @@ def select_top_references(
     signature_usage: Mapping[str, int] | None = None,
     audit_seed: str = DEFAULT_AUDIT_SEED,
 ) -> tuple[list[ScoredReference], list[ScoredReference]]:
+    result = select_reference_candidates(
+        product,
+        rows,
+        output_role,
+        signature_usage=signature_usage,
+        audit_seed=audit_seed,
+    )
+    if (
+        product.confirmed_product_type is ProductType.RING
+        and len(result.candidates) < 3
+    ):
+        exclusion_text = _readiness_exclusion_summary(
+            result.readiness_exclusions
+        )
+        raise ValueError(
+            "戒指参考图至少 3 张合格候选，"
+            f"当前 {len(result.candidates)} 张"
+            f"（存在文件 {result.existing_count} 张）"
+            f"{exclusion_text}"
+        )
+    return list(result.selected), list(result.candidates)
+
+
+def select_reference_candidates(
+    product: ProductAnalysis,
+    rows: Iterable[ReferenceRow],
+    output_role: OutputRole | str,
+    *,
+    signature_usage: Mapping[str, int] | None = None,
+    audit_seed: str = DEFAULT_AUDIT_SEED,
+) -> ReferenceSelectionResult:
     role = require_scene_replacement_role(output_role, stage="参考图选择")
-    existing_rows = [row for row in rows if row.file_exists]
+    source_rows = list(rows)
+    existing_rows = [row for row in source_rows if row.file_exists]
     role_rows = [
         row for row in existing_rows if row.purpose_category.strip() == role.display_name
     ]
     if not role_rows:
         raise ValueError(f"没有飞书用途分类为{role.display_name}的参考图")
     filtered_rows = _filter_reference_rows(product, role_rows)
-    if product.confirmed_product_type is ProductType.RING and len(filtered_rows) < 3:
-        raise ValueError(
-            "戒指参考图至少 3 张合格候选，"
-            f"当前 {len(filtered_rows)} 张（存在文件 {len(existing_rows)} 张）"
+    ready_rows: list[ReferenceRow] = []
+    readiness_exclusions: list[ReferenceReadinessExclusion] = []
+    for row in filtered_rows:
+        readiness = _reference_composition.assess_candidate_snapshot_readiness(
+            product,
+            row,
+            role,
         )
-    scored = [score_reference(product, row) for row in filtered_rows]
+        if readiness.ready:
+            ready_rows.append(row)
+            continue
+        readiness_exclusions.append(
+            ReferenceReadinessExclusion(
+                row_index=row.index,
+                file_name=row.file_name,
+                field_name=readiness.field_name or "unknown",
+                reason=readiness.reason or "无法确认快照完整性",
+            )
+        )
+    scored = [score_reference(product, row) for row in ready_rows]
     ordered = sorted(scored, key=lambda item: (-item.score, item.row.index))
     candidates = _rerank(ordered)
     selected = select_diverse_eligible_references(
@@ -63,7 +153,45 @@ def select_top_references(
         signature_usage=signature_usage,
         audit_seed=audit_seed,
     )
-    return selected, candidates
+    return ReferenceSelectionResult(
+        output_role=role,
+        source_count=len(source_rows),
+        existing_count=len(existing_rows),
+        role_count=len(role_rows),
+        category_eligible_count=len(filtered_rows),
+        selected=tuple(selected),
+        candidates=tuple(candidates),
+        readiness_exclusions=tuple(readiness_exclusions),
+    )
+
+
+def require_three_review_candidates(result: ReferenceSelectionResult) -> None:
+    if len(result.selected) == 3:
+        return
+    details = [
+        f"{result.output_role.display_name}可审核候选不足 3 张",
+        f"合格候选 {len(result.selected)} 张",
+        f"快照完整且通过硬门 {len(result.candidates)} 张",
+    ]
+    if len(result.selected) < len(result.candidates):
+        details.append(f"十分质量窗口内 {len(result.selected)} 张")
+    summary = _readiness_exclusion_summary(result.readiness_exclusions)
+    if summary:
+        details.append(summary.lstrip("；"))
+    raise ValueError("：".join((details[0], "；".join(details[1:]))))
+
+
+def _readiness_exclusion_summary(
+    exclusions: Sequence[ReferenceReadinessExclusion],
+) -> str:
+    if not exclusions:
+        return ""
+    counts = Counter(exclusion.field_name for exclusion in exclusions)
+    fields = "、".join(
+        f"{field_name} {count} 张"
+        for field_name, count in sorted(counts.items())
+    )
+    return f"；快照完整性排除 {len(exclusions)} 张（{fields}）"
 
 
 def composition_signature_for_row(

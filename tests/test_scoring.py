@@ -38,13 +38,28 @@ def row(index, exists=True, strategy="常规可优先使用", file_name=None, **
         "confidence": "高",
         "product_visibility": "高",
         "crop_risk": "低",
+        "applicable_product_types": "",
+        "applicable_display_modes": "",
+        "framing": "手部近景",
+        "visible_body_regions": "左手腕、前臂",
+        "hand_visibility": "完整可见",
+        "collar_type": "无可见服装",
+        "clothing_occlusion_risk": "无遮挡",
+        "hair_occlusion_risk": "无遮挡",
+        "pose_keywords": "身体未入镜；前臂自然抬起",
+        "existing_jewelry": "左手腕单条手链",
+        "hand_side": "左手",
+        "hand_orientation": "手背朝向镜头",
     }
     data.update(overrides)
+    data["notes"] = (
+        f"正面视角；主体居中；{data['notes']}；无文字或平台界面"
+    )
     return ReferenceRow(
         index,
         file_name or f"{index}.jpg",
         f"ref/{index}.jpg",
-        Path(f"C:/tmp/{index}.jpg"),
+        Path(__file__).resolve(),
         100,
         200,
         0.1,
@@ -58,8 +73,20 @@ def row(index, exists=True, strategy="常规可优先使用", file_name=None, **
         data["notes"],
         data["confidence"],
         exists,
+        applicable_product_types=data["applicable_product_types"],
+        applicable_display_modes=data["applicable_display_modes"],
+        framing=data["framing"],
+        visible_body_regions=data["visible_body_regions"],
         product_visibility=data["product_visibility"],
+        hand_visibility=data["hand_visibility"],
+        collar_type=data["collar_type"],
+        clothing_occlusion_risk=data["clothing_occlusion_risk"],
+        hair_occlusion_risk=data["hair_occlusion_risk"],
+        pose_keywords=data["pose_keywords"],
+        existing_jewelry=data["existing_jewelry"],
         crop_risk=data["crop_risk"],
+        hand_side=data["hand_side"],
+        hand_orientation=data["hand_orientation"],
     )
 
 
@@ -89,6 +116,34 @@ def test_角色硬门只读取飞书用途分类字段():
 
     with pytest.raises(ValueError, match="手部佩戴图"):
         select_top_references(product(), [wrong_type], OutputRole.HAND_WORN)
+
+
+def test_快照不完整行在评分与低重复选择前排除并记录原因():
+    incomplete = replace(row(1), collar_type="")
+    complete = [
+        replace(row(2), framing="手腕近景"),
+        replace(row(3), framing="手部中景"),
+        replace(row(4), framing="半身手部构图"),
+    ]
+    usage = {
+        composition_signature_for_row(complete[0], OutputRole.HAND_WORN): 5,
+        composition_signature_for_row(complete[1], OutputRole.HAND_WORN): 0,
+        composition_signature_for_row(complete[2], OutputRole.HAND_WORN): 1,
+    }
+
+    result = scoring_module.select_reference_candidates(
+        product(),
+        [incomplete, *complete],
+        OutputRole.HAND_WORN,
+        signature_usage=usage,
+        audit_seed="快照就绪硬门",
+    )
+
+    assert {item.row.index for item in result.candidates} == {2, 3, 4}
+    assert [item.row.index for item in result.selected] == [3, 4, 2]
+    assert len(result.readiness_exclusions) == 1
+    assert result.readiness_exclusions[0].row_index == 1
+    assert result.readiness_exclusions[0].field_name == "clothing"
 
 
 def test_低重复选择绝不越过十分质量窗口():
@@ -327,7 +382,7 @@ def test_candidate_pool_keeps_clean_rows_and_adds_combined_jewelry_for_batch_div
     )
 
     assert {item.row.file_name for item in candidates} == {"clean.jpg", "combined.jpg"}
-    assert selected[0].row.file_name == "clean.jpg"
+    assert selected[0].row.file_name == "combined.jpg"
     combined_candidate = next(
         item for item in candidates if item.row.file_name == "combined.jpg"
     )
@@ -689,7 +744,7 @@ def ring_row(index, **overrides):
         "index": index,
         "file_name": f"ring-{index}.jpg",
         "relative_path": f"ring-{index}.jpg",
-        "absolute_path": Path(f"C:/tmp/ring-{index}.jpg"),
+        "absolute_path": Path(__file__).resolve(),
         "width": 1000,
         "height": 1200,
         "size_mb": 1,
@@ -697,7 +752,7 @@ def ring_row(index, **overrides):
         "bracelet_applicability": "",
         "default_strategy": "常规可优先使用",
         "style_category": "清透自然光",
-        "scene_keywords": "手背 手指近景",
+        "scene_keywords": "深色背景 手背 手指近景",
         "jewelry_type": "戒指",
         "recommended_usage": "戒指真人佩戴展示",
         "notes": "手指完整，无裁切",
@@ -705,9 +760,14 @@ def ring_row(index, **overrides):
         "file_exists": True,
         "applicable_product_types": "ring",
         "applicable_display_modes": "worn",
+        "framing": "手部近景",
         "visible_body_regions": "左手全部手指",
         "product_visibility": "高",
         "hand_visibility": "高",
+        "collar_type": "无可见服装",
+        "clothing_occlusion_risk": "无遮挡",
+        "hair_occlusion_risk": "无遮挡",
+        "pose_keywords": "身体未入镜；前臂自然抬起",
         "existing_jewelry": "戒指",
         "crop_risk": "低",
         "hand_side": "left",
@@ -718,6 +778,9 @@ def ring_row(index, **overrides):
         "finger_occlusion_risk": "低",
     }
     data.update(overrides)
+    data["notes"] = (
+        f"正面视角；主体居中；{data['notes']}；无文字或平台界面"
+    )
     return ReferenceRow(**data)
 
 
@@ -792,7 +855,7 @@ def necklace_row(index, **overrides):
         "index": index,
         "file_name": f"necklace-{index}.jpg",
         "relative_path": f"necklace-{index}.jpg",
-        "absolute_path": Path(f"C:/tmp/necklace-{index}.jpg"),
+        "absolute_path": Path(__file__).resolve(),
         "width": 1000,
         "height": 1200,
         "size_mb": 1,
@@ -800,7 +863,7 @@ def necklace_row(index, **overrides):
         "bracelet_applicability": "",
         "default_strategy": "常规可优先使用",
         "style_category": "清透自然光",
-        "scene_keywords": "锁骨 胸前",
+        "scene_keywords": "深色背景 锁骨 胸前",
         "jewelry_type": "项链",
         "recommended_usage": "项链真人佩戴展示",
         "notes": "颈部和胸前完整，无裁切",
@@ -818,10 +881,16 @@ def necklace_row(index, **overrides):
         "collar_type": "低领",
         "clothing_occlusion_risk": "低",
         "hair_occlusion_risk": "低",
+        "pose_keywords": "上半身直立；手臂自然下垂",
         "existing_jewelry": "细项链",
         "crop_risk": "低",
+        "hand_side": "双手未入镜",
+        "hand_orientation": "手部未入镜",
     }
     data.update(overrides)
+    data["notes"] = (
+        f"正面视角；主体居中；{data['notes']}；无文字或平台界面"
+    )
     return ReferenceRow(**data)
 
 
@@ -849,7 +918,7 @@ def _三品类候选索引(品类, candidate):
 
 def _三品类参考行(品类, index, **overrides):
     if 品类 == "手串":
-        return replace(row(index), **overrides)
+        return row(index, **overrides)
     if 品类 == "项链":
         return necklace_row(index, **overrides)
     return ring_row(index, **overrides)

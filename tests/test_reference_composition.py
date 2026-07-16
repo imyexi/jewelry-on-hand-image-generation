@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from jewelry_on_hand import reference_composition as reference_composition_module
 from jewelry_on_hand.models import (
     ProductAnalysis,
     ProductDimensions,
@@ -167,6 +168,59 @@ def test_参考构图快照可完整往返并绑定真实文件(
     assert restored.pose.body == "身体未入镜"
     assert restored.pose.arm == "前臂斜向右上"
     assert restored.pose.hand == "掌心朝上"
+
+
+def test_候选快照就绪检查复用构建器并保留结构化排除原因(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+) -> None:
+    source_row = 已评分参考图.row
+    incomplete_row = replace(source_row, collar_type="")
+
+    readiness = reference_composition_module.assess_candidate_snapshot_readiness(
+        手链产品,
+        incomplete_row,
+        OutputRole.HAND_WORN,
+    )
+
+    assert readiness.ready is False
+    assert readiness.field_name == "clothing"
+    assert "同步字段为空" in readiness.reason
+    assert incomplete_row.collar_type == ""
+    assert source_row.collar_type == "无可见服装"
+
+
+def test_候选快照就绪检查不吞掉非候选数据错误(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+) -> None:
+    with pytest.raises(ValueError, match="hero"):
+        reference_composition_module.assess_candidate_snapshot_readiness(
+            手链产品,
+            已评分参考图.row,
+            OutputRole.HERO,
+        )
+
+
+def test_候选草稿接受明确否定的文字界面风险(
+    手链产品: ProductAnalysis,
+    已评分参考图: ScoredReference,
+) -> None:
+    row = replace(
+        已评分参考图.row,
+        notes=(
+            "正面视角；主体位于画面中下部；"
+            "无大面积文字，不含 blocking 风险；无文字或平台界面"
+        ),
+    )
+
+    snapshot = build_candidate_snapshot(
+        手链产品,
+        replace(已评分参考图, row=row),
+        OutputRole.HAND_WORN,
+    )
+
+    assert snapshot.text_or_ui_risk == "none"
 
 
 def test_参考构图快照及其嵌套对象均不可修改(

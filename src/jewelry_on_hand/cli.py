@@ -64,7 +64,11 @@ from jewelry_on_hand.review_decision import (
 )
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, create_run_id, read_json, write_json
-from jewelry_on_hand.scoring import select_batch_diverse_references, select_top_references
+from jewelry_on_hand.scoring import (
+    require_three_review_candidates,
+    select_batch_diverse_references,
+    select_reference_candidates,
+)
 
 
 DEFAULT_OUTPUT_ROOT = "outputs/auto_reference_runs"
@@ -310,11 +314,18 @@ def _prepare_review(args: argparse.Namespace) -> int:
         paths.analysis_dir / OUTPUT_ROLE_FILE_NAME,
         {"output_role": output_role.value},
     )
-    selected, candidates = select_top_references(
+    selection = select_reference_candidates(
         product,
         rows,
         output_role=output_role,
     )
+    write_json(
+        paths.analysis_dir / "reference_snapshot_readiness.json",
+        selection.readiness_audit(),
+    )
+    require_three_review_candidates(selection)
+    selected = list(selection.selected)
+    candidates = list(selection.candidates)
     composition_snapshots = [
         build_candidate_snapshot(product, item, output_role) for item in selected
     ]

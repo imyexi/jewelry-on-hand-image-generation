@@ -9,10 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from jewelry_on_hand.category_policies.base import contains_unnegated_any
 from jewelry_on_hand.models import (
     ProductAnalysis,
     ProductConfirmationSnapshot,
     ProductFidelityConstraints,
+    ReferenceRow,
     ReviewDecision,
     ScoredReference,
 )
@@ -144,6 +146,23 @@ _LEGACY_REJECT_FAILURE_TERMS = (
     "严重穿模",
     "严重穿透",
 )
+
+
+class ReferenceSnapshotNotReadyError(ValueError):
+    def __init__(self, field_name: str, detail: str) -> None:
+        self.field_name = field_name
+        self.detail = detail
+        super().__init__(
+            f"无法构建参考构图快照：{field_name} {detail}；"
+            "请补全同步字段并重新运行 prepare-review"
+        )
+
+
+@dataclass(frozen=True)
+class CandidateSnapshotReadiness:
+    ready: bool
+    field_name: str | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -485,6 +504,32 @@ def build_candidate_snapshot(
         product_visibility_sufficient=product_visibility_sufficient,
         composition_signature=signature,
     )
+
+
+def assess_candidate_snapshot_readiness(
+    product: ProductAnalysis,
+    row: ReferenceRow,
+    output_role: OutputRole | str,
+) -> CandidateSnapshotReadiness:
+    if not isinstance(row, ReferenceRow):
+        raise ValueError("row 必须是 ReferenceRow")
+    provisional = ScoredReference(
+        row=row,
+        score=0,
+        rank=1,
+        reason=(),
+        risk=(),
+        ignored_reference_jewelry=(),
+    )
+    try:
+        build_candidate_snapshot(product, provisional, output_role)
+    except ReferenceSnapshotNotReadyError as exc:
+        return CandidateSnapshotReadiness(
+            ready=False,
+            field_name=exc.field_name,
+            reason=exc.detail,
+        )
+    return CandidateSnapshotReadiness(ready=True)
 
 
 def load_reference_composition_snapshot(
@@ -1591,26 +1636,26 @@ def _parse_text_or_ui_risk(notes: str) -> TextOrUiRisk:
         if marker in risk_text:
             safe_found = True
             risk_text = risk_text.replace(marker, "")
-    small_found = any(
-        marker in risk_text
-        for marker in (
+    small_found = contains_unnegated_any(
+        risk_text,
+        (
             "小面积文字",
             "少量文字",
             "可移除文字",
             "可移除界面",
             "small_removable",
-        )
+        ),
     )
-    blocking_found = any(
-        marker in risk_text
-        for marker in (
+    blocking_found = contains_unnegated_any(
+        risk_text,
+        (
             "大面积文字",
             "状态栏",
             "平台 ui",
             "平台ui",
             "平台界面",
             "blocking",
-        )
+        ),
     )
     if safe_found and (small_found or blocking_found):
         _prepare_review_error(
@@ -1722,10 +1767,7 @@ def _unique_target_selector(text: str) -> str | None:
 
 
 def _prepare_review_error(field_name: str, detail: str) -> None:
-    raise ValueError(
-        f"无法构建参考构图快照：{field_name} {detail}；"
-        "请补全同步字段并重新运行 prepare-review"
-    )
+    raise ReferenceSnapshotNotReadyError(field_name, detail)
 
 
 def _binding_error(field_name: str, detail: str) -> None:
@@ -1738,11 +1780,13 @@ def _binding_error(field_name: str, detail: str) -> None:
 __all__ = [
     "REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME",
     "REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME",
+    "CandidateSnapshotReadiness",
     "ReferenceCompositionSnapshot",
     "ReferencePose",
     "ReferenceRunState",
     "ReplacementTarget",
     "build_candidate_snapshot",
+    "assess_candidate_snapshot_readiness",
     "classify_reference_run",
     "load_reference_composition_snapshot",
     "reference_composition_sha256",

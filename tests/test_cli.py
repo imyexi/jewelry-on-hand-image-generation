@@ -3,7 +3,7 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from jewelry_on_hand.models import (
     ProductAnalysis,
@@ -255,15 +255,31 @@ def make_catalog(path, ref):
             "推荐使用方式",
             "备注",
             "判断置信度",
+            "适用产品类型",
+            "适用展示模式",
+            "人物取景范围",
+            "可见身体区域",
+            "产品预计展示面积",
+            "手部可见度",
+            "衣领类型",
+            "衣物遮挡风险",
+            "头发遮挡风险",
+            "姿势关键词",
+            "原有首饰类型",
+            "裁切风险",
+            "左右手",
+            "手部朝向",
         ]
     )
     for i in range(1, 4):
+        candidate = Path(ref).with_name(f"ref{i}{Path(ref).suffix}")
+        candidate.write_bytes(Path(ref).read_bytes())
         ws.append(
             [
                 i,
-                f"ref{i}.jpg",
-                f"ref{i}.jpg",
-                str(ref),
+                candidate.name,
+                candidate.name,
+                str(candidate),
                 100,
                 200,
                 0.1,
@@ -274,12 +290,77 @@ def make_catalog(path, ref):
                 "车内 闪光",
                 "手链/手串",
                 "近景手腕",
-                "手腕/前臂露出面积足",
+                "正面视角；主体居中；手腕/前臂露出面积足；无文字或平台界面",
                 "高",
+                "手链",
+                "佩戴",
+                "手部近景",
+                "左手腕、前臂",
+                "展示面积充足",
+                "完整可见",
+                "无可见服装",
+                "无遮挡",
+                "无遮挡",
+                "身体未入镜；前臂自然抬起",
+                "左手腕单条手链",
+                "低",
+                "左手",
+                "手背朝向镜头",
             ]
         )
         ws.cell(row=ws.max_row, column=8, value="手部佩戴图")
     wb.save(path)
+
+
+def test_准备审核命令在完整候选不足三张时失败且不写审核半成品(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from jewelry_on_hand.cli import main
+
+    product = tmp_path / "product.jpg"
+    product.write_bytes(b"product")
+    reference = tmp_path / "reference.jpg"
+    reference.write_bytes(b"reference")
+    catalog = tmp_path / "catalog.xlsx"
+    make_catalog(catalog, reference)
+    workbook = load_workbook(catalog)
+    sheet = workbook["分类明细"]
+    headers = {cell.value: cell.column for cell in sheet[1]}
+    sheet.cell(row=2, column=headers["衣领类型"]).value = None
+    workbook.save(catalog)
+    analysis = tmp_path / "analysis.json"
+    make_analysis(analysis)
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        lambda config: __import__(
+            "jewelry_on_hand.reference_catalog",
+            fromlist=["load_reference_rows"],
+        ).load_reference_rows(catalog),
+    )
+
+    output_root = tmp_path / "runs"
+    assert main([
+        "prepare-review",
+        "--product-image", str(product),
+        "--analysis-json", str(analysis),
+        "--output-root", str(output_root),
+        "--run-id", "snapshot-shortage",
+        "--output-role", "hand_worn",
+    ]) == 1
+
+    run_root = output_root / "snapshot-shortage"
+    error = capsys.readouterr().err
+    assert "手部佩戴图" in error
+    assert "合格候选 2 张" in error
+    assert "clothing" in error
+    audit = read_json(run_root / "analysis" / "reference_snapshot_readiness.json")
+    assert audit["eligible_count"] == 2
+    assert audit["exclusions"][0]["field_name"] == "clothing"
+    assert not (run_root / "review" / "review.html").exists()
+    assert not (run_root / "analysis" / "selected_references.json").exists()
+    assert not (run_root / "analysis" / "reference_composition_snapshots.json").exists()
 
 
 def make_analysis(path):
