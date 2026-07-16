@@ -5,6 +5,7 @@ skills/aireiter-image-generation/references/config.json
 output/
 .pytest_cache/
 .codex-tmp/
+.worktrees/
 
 # Python caches.
 __pycache__/
