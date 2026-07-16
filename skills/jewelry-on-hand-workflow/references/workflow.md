@@ -1,96 +1,130 @@
-# Workflow
+# 真人参考底图首饰替换 Workflow
 
-## 适用范围
+## 范围与不变量
 
-使用此流程处理手链/手串类产品上手图：从飞书 Base 或本地 SKU 列表读取产品图，选择手部参考图，等待用户确认 rank，再调用 AIReiter 生成并做 QC。
+本 Skill 只处理 `hand_worn` 与 `lifestyle`；`hero` 必须交给独立主图 Skill。参考底图是人物、姿势、手势、构图、景别、服装、背景、光线、留白和替换位置的唯一来源，产品上手图只提供珠宝身份。只允许移除原首饰、在原位置换入一件目标产品，以及重建必要接触和局部阴影。
 
-## 完整流程
+支持 `bracelet`、`necklace`、`pendant_necklace`、`ring`。`necklace` 与 `pendant_necklace` 可为 `worn` 或 `hand_held`、同一产品 1 至 3 层；`pendant_only`、`unknown` 只分析不生成。输入必须是 `worn_source`；拒绝多件独立项链、无链吊坠自动补链，以及对不可见结构的推断。
 
-1. 解析用户输入：飞书 Base URL、日期批次、货盘表名、SKU 列表、是否重跑。模型默认由规则选择，不把 nanobanana 当作首选。
-2. 如果用户提供飞书 Base URL，使用 `lark-base` 读取目标表和记录；只读数据，不默认写回。
-3. 下载或定位“产品上手图”，保存到项目 `output/`。
-4. 为每个 SKU 建立独立 run 目录，并把产品图复制为 `input/product-on-hand.jpg`。
-5. 写入或读取 `analysis/product_analysis.json`，确认 `product_type` 是手链/手串。
-6. 读取参考图分类表，自动筛选 Top 3，并写入 `analysis/selected_references.json`。
-7. 生成 `review/` 包：候选图副本、contact sheet、`review.html` 和候选说明。
-8. 停止并请用户为每个 SKU 选择 rank 1、2 或 3；不要自动默认 rank 1。
-9. 用户选择后写入 `review/review_decision.json`。
-10. 生成前再次校验：产品图存在、参考图存在、决策可生成、所选 rank 在 Top 3 中。
-11. 使用项目 `jewelry_on_hand.prompt_builder.build_prompt` 构建 prompt。
-12. 使用 `scripts/validate_prompt_contract.py` 检查 prompt。
-13. 选择模型：默认使用 `gpt_image_2`；统计同一 run 内 `generation/NN/qc.json` 中 `status != "pass"` 的记录，超过 1 次后下一次生成才使用 `nano_banana_v2` 兜底。
-14. 调用 `aireiter-image-generation`，并把实际模型写入 `generation/NN/model.txt`。
-15. 保存 `model.txt`、`prompt.txt`、`hand-reference.*`、`submit.json`、`result.json`、`result.png`。
-16. 按 `references/qc-checklist.md` 做 QC，并写入 `generation/NN/qc.json`。
-17. 如果 QC 为 `rerun` 或 `reject`，同一 run 内下一次生成写入后续 `generation/NN/`，不覆盖旧产物；跨批或重新拉货盘时才创建新的带时间戳 rerun 目录。
-18. 最终汇总只收录 QC 为 `pass` 且通过原图手腕/手臂迁移检查的图片。
-19. 如生成最终汇总 JSON，使用 `scripts/inspect_run_artifacts.py <run-root> <final-summary.json>` 校验汇总只引用当前 run 内 QC 为 `pass` 的结果图。
+四阶段顺序固定为 `prepare-review -> record-decision -> generate -> qc`。
 
-## Review Gate
+## 参考源
 
-生成前必须存在合法 `review/review_decision.json`。允许进入生成的形式：
+默认同步飞书素材表；`图片类型` 字段是角色唯一来源：
 
-```json
-{"action":"generate_rank_1","selected_ranks":[1]}
-{"action":"generate_selected","selected_ranks":[2]}
-{"action":"generate_multiple","selected_ranks":[1,3]}
+- `hand_worn` 只接收“手部佩戴图”；
+- `lifestyle` 只接收“生活场景图”；
+- 关键词、风格、推荐使用方式和视觉判断不得替代该字段。
+
+默认任一 `pending_enrichment=true` 都阻断。用户明确批准临时排除待补全记录时才可传 `--ignore-pending-enrichment`；系统仍完整分页同步并把过滤审计写入 `analysis/reference_source_snapshot.json`，不写回飞书。显式传入 `--classification <xlsx>` 时，本地 Excel 作为历史兼容导入源并优先于飞书；它与 `--ignore-pending-enrichment` 互斥。
+
+## 1. `prepare-review`
+
+先准备产品上手原图和产品分析 JSON；戒指可额外提供细节图，但细节图只用于 review、结构分析和 QC。命令必须显式传入支持角色：
+
+```powershell
+jewelry-on-hand prepare-review `
+  --product-image <产品上手图> `
+  --analysis-json <产品分析.json> `
+  --output-role hand_worn `
+  --output-root <输出目录>
 ```
 
-禁止进入生成：
+使用本地分类表时额外传 `--classification <参考图库.xlsx>`。需要人工纠正时，在评分前使用 `--confirmed-product-type`、`--source-image-type`、`--display-mode`、`--layer-count` 等参数；项链还可纠正长度和 `pendant_semantics`，戒指分析需确认 `ring_count`、`hand_side`、`finger_position`、`ring_wear_style`。
 
-```json
-{"action":"rerank","selected_ranks":[]}
-{"action":"manual_reference","manual_reference":"..."}
+该阶段输出并冻结：
+
+- `input/product-on-hand.*` 与 `analysis/product_analysis.json`；
+- `analysis/product_fidelity_constraints.json` canonical；
+- `analysis/output_role.json` 与 `analysis/reference_source_snapshot.json`；
+- Top 3 的 `analysis/selected_references.json`、run 内 review 副本；
+- `analysis/reference_composition_snapshots.json` 候选草稿；
+- 展示产品图、候选参考图与结构字段的 `review/review.html`。
+
+人工逐张确认画面结构、唯一替换位置、需移除首饰、目标展示面积和文字/UI 风险。Top 3 只是候选，不能自动成为决策。构图描述错误时必须修复飞书语义源并重新执行本阶段，不能直接编辑候选 JSON。
+
+## 2. `record-decision`
+
+人工只能选择一个 rank。角色必须与 `analysis/output_role.json` 一致，并显式确认保真：
+
+```powershell
+jewelry-on-hand record-decision `
+  --run-root <run目录> `
+  --output-role hand_worn `
+  --action generate_rank_1 `
+  --selected-ranks 1 `
+  --fidelity-confirmed
 ```
 
-`selected_ranks` 必须在 1..3 内、不能重复，并且必须存在于 `analysis/selected_references.json`。
+外部约束只能通过 `--fidelity-constraints-path <文件>` 作为导入源。系统必须校验其 analysis 摘要，再把标准 canonical 固化到 `analysis/product_fidelity_constraints.json`；非标准路径、晚期重绑或摘要不一致一律拒绝。
 
-## Prompt Gate
+写入前交叉校验最终 analysis、完整产品确认快照、canonical、单一 selected rank、源/review 双 SHA、角色与候选参考快照。成功后原子写入 `review/review_decision.json` 和 `review/reference_composition_snapshot.json`，decision 绑定确认快照摘要并记录 `fidelity_confirmed=true`。失败时不得留下部分决策。
 
-生成前必须重新构建并校验 prompt，不要复用旧 prompt。prompt 必须明确：
+## 3. `generate`
 
-- 内部图1是手部参考图。
-- 内部图2是产品上手原图。
-- 产品身份来自内部图2，但手腕、手臂、皮肤来源必须来自内部图1。
-- 禁止把内部图2里的手串和原手腕作为整体贴到内部图1。
-
-## Model Selection Gate
-
-生成前必须先检查当前 run 的 `generation/` 历史：
-
-- 默认模型是 `gpt_image_2`。
-- `generation/NN/qc.json` 中 `status != "pass"` 计为一次 QC 未通过，`rerun` 和 `reject` 都计入。
-- QC 未通过次数为 0 或 1 时，继续使用 `gpt_image_2`。
-- QC 未通过次数超过 1 次时，下一次生成使用 `nano_banana_v2` 兜底。
-- 已有非空 `generation/NN/` 如果缺少 `qc.json`，必须停止，不得跳过目录继续生成。
-- 每个生成目录必须写入 `model.txt`，内容为本次实际提交的模型名。
-
-## QC Gate
-
-QC 是交付前 gate，不是可选总结。QC 记录必须包含：
-
-- `status`: `pass`、`rerun` 或 `reject`。
-- `passed`: 通过项列表。
-- `failed`: 失败项列表。
-- `notes`: 文字说明。
-
-QC 必须明确写到“原图手腕/手臂/皮肤块是否随手串迁移”。只写“手部自然”不够。
-
-## Final Summary Gate
-
-最终汇总只能引用当前 run 内 `generation/NN/result.png`，并且对应 `generation/NN/qc.json` 的 `status` 必须是 `pass`。不要把 `rerun`、`reject` 或未写 QC 的图片放入最终交付列表。
-
-## 重跑命名
-
-使用新的时间戳目录：
-
-```text
-output/auto_reference_runs/feishu-<date>-<SKU>-gpt-image-2-<timestamp>/
-output/auto_reference_runs/feishu-<date>-<SKU>-rerun-<timestamp>/
+```powershell
+jewelry-on-hand generate `
+  --run-root <run目录> `
+  --helper-script skills/aireiter-image-generation/scripts/aireiter_image_helper.py
 ```
 
-不要覆盖已有 `generation/01/result.png`。同一 run 的重跑使用后续 `generation/NN/`；如果发现非空 `generation/NN/` 缺少 `qc.json`，先补 QC 或人工处理，不要跳过。
+在创建 generation、写 submit 或调用 provider 前再次验证角色、rank、确认快照、参考文件 SHA、analysis 与 canonical。每个现代 generation 采用五输入固化：
 
-## Dry Run 规则
+1. `scene-reference.*`：参考底图；
+2. `product-reference.*`：产品身份图；
+3. `reference-composition-snapshot.json`：已确认参考结构；
+4. `product-analysis.json`：已确认产品分析；
+5. `product-fidelity-constraints.json`：canonical 产品保真约束。
 
-dry run 只能检查 gate 和列风险，不调用 AIReiter，不下载新结果，不写回飞书，不伪造 `qc.json` 或 `result.png`。
+`input-manifest.json` 使用 `schema_version=1`，记录 `output_role`、两张有序图片及 snapshot/analysis/canonical 的 `copied_file` 与 SHA-256。实际副本、源文件和 manifest 摘要必须一致；模型输入顺序只能是 scene 后 product。任何固化失败都不得发布半成品目录或提交任一 job。
+
+Prompt 必须以参考底图编辑声明开头；产品分析只能约束珠宝结构和佩戴物理，不能覆盖已确认构图。详细规则见 `prompt-contract.md`。
+
+## 4. `qc`
+
+先人工查看四栏页面：参考底图、产品身份图、结果、已确认构图快照。逐项填写三层 JSON：
+
+```powershell
+jewelry-on-hand qc `
+  --generation-dir <generation/NN> `
+  --status pass `
+  --reference-preservation-checks-json <reference.json> `
+  --fidelity-checks-json <fidelity.json> `
+  --checklist-checks-json <checklist.json>
+```
+
+存在严重参考姿势错误时，`reject` 示例必须传实际错误码：
+
+```powershell
+jewelry-on-hand qc `
+  --generation-dir <generation/NN> `
+  --status reject `
+  --reference-preservation-checks-json <reference.json> `
+  --fidelity-checks-json <fidelity.json> `
+  --checklist-checks-json <checklist.json> `
+  --critical-failures reference_pose_changed
+```
+
+- `reference_preservation`：十项参考画面证据；
+- `fidelity_checks`：canonical `must_keep` 与产品身份；
+- `checklist_checks`：runtime 品类、佩戴物理和通用质量清单。
+
+三层必须完全覆盖、备注可验证且与 `critical_failures` 一致。参考结构改变、原首饰泄漏、替换位置改变或目标产品复制直接 `reject`。只有局部融合或阴影问题可 `rerun`；参考构图问题固定纠偏重跑一次，再次失败则停用该参考并重新 `prepare-review`。
+
+## Dry run
+
+不调用 provider 的 dry run 只执行 `prepare-review`，人工审阅 Top 3 与候选快照，然后运行便携快照/Prompt/产物检查器。不要执行 `generate`，也不要伪造 decision、manifest 或 QC。dry run 用于验证路由、数据和 gate，不等于真实生成。
+
+## 三态迁移
+
+- `modern_snapshot`：候选快照、确认快照、decision digest 完整；若已有 generation，还要求 manifest 与五份固化副本完整。只有此态可生成。
+- `legacy_read_only`：上述现代快照链全部不存在的历史 run。允许读取、检查和审计，不得追加 decision、generation 或 QC。
+- `damaged`：现代链部分存在、摘要不一致或 generation 固化不完整。停止并报告损坏，不得删除单个文件伪装成历史。
+
+历史 run 只读且不得追加。历史手串也只能检查和审计；需要重做时，新建 run 并重新执行 `prepare-review`，不能续写原目录。历史 v1 canonical 只读，不得补写 `pendant_semantics` 或自动升级。
+
+五个现代分类字段 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。
+
+## 验收边界
+
+最终只汇总当前 run 内 `qc.json` 为 `pass` 的结果。严格 QC 必须让 `fidelity_checks` 与 `must_keep` 完全一致，`critical_failures` 采用合法非空代码；严重错误必须 `reject` 并以中文说明。真实第三方模型 proof 属于 Task 12，尚未完成。

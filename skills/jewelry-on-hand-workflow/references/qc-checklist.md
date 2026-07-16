@@ -1,149 +1,110 @@
-# 多品类 QC 检查清单
+# 真人参考底图替换 QC
 
-本清单适用于手串/手链真人佩戴图、普通项链和带链吊坠的真人佩戴图，以及普通项链和带链吊坠的手持展示图。无链独立吊坠和无法识别品类当前不得进入生成，因此也不能通过 QC 补救或自动补链。
+## 总体规则
 
-QC 结果只能使用以下状态：
+每个 generation 必须人工对照四栏：参考底图、产品身份图、生成结果、已确认构图快照。`pass` 必须同时覆盖 `reference_preservation`、`fidelity_checks`、`checklist_checks` 三层；任一层缺失、重复、类型错误、与状态冲突或备注不可验证，都拒绝写入。
 
-- `pass`：所有通用项、品类项、展示模式项和 `must_keep` 均通过。
-- `rerun`：产品方向正确，只有局部轻微变形、遮挡或接触问题，整体结构仍可辨认，可通过重新生成修复。
-- `reject`：品类、核心结构、多层关系或物理关系存在严重错误，需要回到产品分析、参考图或提示词阶段。
+状态只允许：
 
-不得使用 `pending`、`ok`、`fail` 等其他整体状态。
+- `pass`：三层全部通过，`failed=[]`，不存在 `critical_failures`；
+- `rerun`：只有允许纠偏的局部问题，必须记录失败项和下一次动作；
+- `reject`：存在严重结构错误、参考画面破坏、产品身份错误或来源污染。
 
-## 清单来源与记录方式
+## 第一层：reference_preservation
 
-运行时清单由三部分合并：通用项、品类策略提供的基础项与展示模式项，以及 `product_fidelity_constraints.json` 中每个 `must_keep[].qc_question`。人工 QC 必须逐项检查，并把通过项写入 `passed`、失败项写入 `failed`；不得用布尔值、数字、空字符串或“未检查”代替结论。
+十项 reference evidence 必须逐项记录 `id`、`question`、`result`、`notes`，不得用一条“人工检查通过”批量代替：
 
-标准 run 的记录路径为 `<run>/generation/<rank>/qc.json`。写入器和便携校验器会从该路径自动反推 `<run>/analysis/product_fidelity_constraints.json`；只要约束文件存在，就必须执行 `must_keep` 完整覆盖校验，调用方不能选择跳过。
+1. `framing_preserved`：景别、镜头、裁切和留白是否保留；
+2. `pose_preserved`：身体姿势、手势、手臂角度、掌向和手指关系是否保留；
+3. `subject_placement_preserved`：人物/手部位置与画面占比是否保留；
+4. `person_preserved`：人物身份、脸、肤色和可见身体区域是否保留；
+5. `clothing_preserved`：服装、发型及遮挡关系是否保留；
+6. `background_preserved`：背景、道具和环境元素是否保留；
+7. `lighting_preserved`：光向、明暗、色温和整体色调是否保留；
+8. `source_jewelry_removed`：参考底图原首饰是否全部清除；
+9. `replacement_target_preserved`：目标产品是否位于快照确认的同一位置；
+10. `single_target_product`：画面是否只有一件目标产品，没有复制或新增同类首饰。
 
-每次都要检查以下通用项：
+任一 reference evidence 失败都不能 `pass`。景别、姿势、人物、服装、背景、光线、替换位置或目标数量改变属于严重错误并 `reject`；小面积原首饰残留可在首次出现时 `rerun`，再次出现则 `reject`。
 
-1. 产品颜色、材质、透明度、纹理、反光和比例与产品图一致。
-2. 元件数量、排列和关键识别点与产品图一致，没有新增、删除或重组结构。
-3. 没有迁移产品图中的人物、皮肤、手腕、手臂、颈部、胸部、服装、头发、脸或背景局部。
-4. 参考图原有首饰已移除，没有混入戒指、手串、项链或其他饰品。
-5. 人物、皮肤、手指、脸部和服装没有明显畸变。
-6. 没有文字、水印、平台标识或无关 logo。
-7. 不推断产品图不可见的扣头、背面结构或连接细节。
+## 第二层：fidelity_checks
 
-## 手串/手链真人佩戴
+从 `product-fidelity-constraints.json` 的 canonical `must_keep` 重建完整检查集合；`name` 与 `question` 的组合必须完全一致，不得少项、改题、重复或用自由文本代替。
 
-除通用项外，必须检查：
+公共保真项目：品类、数量、颜色、材质、透明度、纹理、尺寸感、排列、连接、方向和核心配件。产品上手图只提供珠宝身份，不得把其中的人物、手腕、手臂、手指、颈胸、服装、头发、脸、皮肤块或背景迁移到结果。
 
-- 珠子、主珠、配珠、隔圈、金属件及排列顺序完整。
-- 手串真实环绕并贴合手腕，松紧、遮挡和接触阴影自然。
-- 手指、手掌、手腕和皮肤纹理自然，无多指、断指、融指或关节错位。
-- 手腕宽度、手臂轮廓、肤色和皮肤纹理来自参考图且连续。
-- 没有把产品图中的粗手腕、局部手臂、掌纹、指甲或皮肤块连同手串迁移到结果图。
+- 手串/手链：珠序、主珠、配珠、隔圈、金属件、环绕和松紧。
+- 普通项链：同一产品 1 至 3 层、长度等级和层间落差；`pendant_semantics=absent` 时不得新增吊坠。
+- 带链吊坠：恰好一个主吊坠、所属层、方向和连接关系不得改变。
+- 戒指：`ring_count=1`、`hand_side`、`finger_position`、`ring_wear_style=finger_base`，戒圈、戒面/主石和镶嵌结构一致；不可见戒圈背面不作推断。
 
-## 项链真人佩戴
+品类错误、核心结构缺失、产品复制、主吊坠结构改变、自动补链、戒指数量/指位/戒面结构错误或产品图人体迁移必须 `reject`。
 
-普通项链和带链吊坠均必须检查：
+## 第三层：checklist_checks
 
-- 层数为产品确认的一至三层，同一件多层产品的上下顺序正确，不是多件独立项链叠戴。
-- 长度等级正确；各层落点和层间相对落差与产品图一致。
-- 有吊坠时，吊坠所属层、位置、朝向、数量和连接关系正确；不得换层、翻面、复制、移位或脱离连接。
-- 链条真实绕颈并在胸前受重力自然垂落，没有断裂或异常悬空。
-- 链条没有穿肤、穿衣、穿发或陷入身体，遮挡和阴影符合真实前后关系。
-- 衣领和头发没有不合理遮住吊坠或主要结构。
-- 多层链没有错误交叉、合并、复制、重排或自动补链。
-- 没有迁移产品图中的颈部、胸部、衣服、头发、脸、皮肤块或背景局部。
+依据当前 analysis、角色、展示模式和 canonical 调用 runtime checklist，完整覆盖：
 
-## 项链手持展示
+- 参考底图原首饰及其他首饰已按快照清除；
+- 新产品只在确认位置替换，接触、遮挡、受力和局部阴影自然；
+- `hand_worn` 保持手侧、掌向、手势和景别；
+- `lifestyle` 保持人物、服装、道具和生活环境，不收敛成产品特写；
+- 项链不穿肤、穿衣、穿发，不虚构扣头或不可见连接；
+- 戒指自然环绕目标手指，无手指畸变或产品源手污染；
+- 无大面积文字、状态栏、平台 UI、logo 或残余水印；
+- 结果完整清晰，输出尺寸与格式符合运行约束。
 
-普通项链和带链吊坠均必须检查：
+`checklist_checks` 的稳定 ID 集合必须与 runtime checklist 完全一致。不得用 passed/failed 摘要替代逐项记录。
 
-- 产品结构完整，链条、吊坠、连接件和关键识别点可辨认。
-- 手部与链条存在真实接触点，链条受重力自然垂落。
-- 手指没有穿透、切断、粘连或不合理夹住链条和吊坠。
-- 吊坠和关键结构没有被手指或画面裁切过度遮挡。
-- 产品比例合理，没有因近景明显放大或缩小。
-- 没有虚构绕颈佩戴链路，也没有自动补链、补扣头或补充不存在的结构。
-- 没有迁移产品图中的人物、颈部、胸部、服装、头发、脸、皮肤块或背景局部。
+## critical_failures
 
-## `must_keep` 判定
+参考画面严重代码：
 
-每个 `must_keep` 都必须生成且只能生成一条 `fidelity_checks` 记录。记录数量必须与 `must_keep` 数量相等，`name` 必须匹配 `must_keep[].name`，`question` 必须匹配 `must_keep[].qc_question`，name/question 组合不得重复。`result` 只能是 `pass`、`rerun` 或 `fail`。
+- `reference_framing_changed`
+- `reference_pose_changed`
+- `reference_person_changed`
+- `reference_clothing_changed`
+- `reference_background_changed`
+- `reference_lighting_changed`
+- `reference_jewelry_leakage`
+- `replacement_target_changed`
+- `target_product_duplicated`
 
-- 所有结果均为 `pass` 时，整体才可能为 `pass`。
-- 关键结构轻微变形但仍可辨认时，可记为 `rerun`，整体不得为 `pass`。
-- 关键结构缺失、改款或泛化成普通珠子、链条、隔片时，应记为 `fail`；核心结构缺失时整体必须为 `reject`。
+产品与物理代码继续使用：`must_keep_failed`、`category_mismatch`、`core_structure_missing`、`layer_count_mismatch`、`length_category_mismatch`、`pendant_layer_changed`、`multi_layer_restructured`、`auto_chain_added`、`source_person_region_migrated`、`severe_intersection`。
 
-重点包括异形珠、跑环、双尖、回纹、雕刻、貔貅、桶珠、吊坠、流苏、链坠，以及它们的位置、方向和相邻连接关系。
+戒指代码为 `ring_count_mismatch`、`hand_side_mismatch`、`finger_position_mismatch`、`ring_structure_mismatch`、`centerpiece_mismatch`、`ring_contact_error`、`finger_deformation`、`source_hand_leakage`。
 
-## 严重错误 gate
+`critical_failures` 只能包含允许代码、不能重复。任何代码存在时不得 `pass`；参考结构、品类、核心结构、产品复制、自动补链、严重穿模、戒指数量/指位/结构/主石或来源手污染必须 `reject`。
 
-`critical_failures` 使用稳定错误代码。没有关键或严重错误时省略该字段；一旦出现，该字段必须是非空字符串列表，不能写空列表、布尔值或数字。
+## 重跑路由
 
-以下错误至少禁止整体 `pass`：
+| 失败 | 第一次动作 | 再次失败 |
+| --- | --- | --- |
+| 参考景别/姿势/人物/服装/背景/光线改变 | 固定原 rank，注入对应 reference 纠偏，仅重跑一次 | 停用该参考，重新 `prepare-review` |
+| 替换位置改变或产品复制 | `reject` | 新建 run，重新审核快照 |
+| 小面积原首饰残留 | 固定原 rank，强化清除范围 | `reject` 并换参考 |
+| 边缘、接触或阴影轻微不自然 | 固定原 rank `rerun` | 按产品保真策略切模型或换参考 |
+| 产品结构或 canonical 失败 | 按失败项纠偏；不得改快照构图 | 再次失败则 `reject` |
+| 五输入、SHA、manifest 或快照缺失 | 不进入 QC，判定 `damaged` | 重新 `prepare-review`，不修补旧 run |
 
-- `must_keep_failed`：任一 `must_keep` 未通过。
-- `layer_count_mismatch`：层数错误。
-- `length_category_mismatch`：长度等级错误。
-- `pendant_layer_changed`：吊坠换层。
-- `source_person_region_migrated`：迁移产品图人物局部。
+模型切换不能掩盖参考图不适用。参考结构失败优先走参考纠偏/换参考；产品结构失败才走产品保真纠偏或模型策略。
 
-以下严重错误必须使用 `reject`，不能降级为 `rerun`：
-
-- `category_mismatch`：产品品类错误。
-- `core_structure_missing`：核心结构缺失。
-- `multi_layer_restructured`：多层关系被重组、合并或复制。
-- `auto_chain_added`：自动补链或虚构连接结构。
-- `severe_intersection`：链条、吊坠或手部发生严重穿模。
-
-局部轻微变形且产品结构仍可辨认时使用 `rerun`；不要为轻微问题误填严重错误代码。
-
-## QC JSON
-
-带严重错误的记录示例：
+## QC JSON 形状
 
 ```json
 {
-  "status": "reject",
-  "passed": ["无文字、水印或无关 logo"],
-  "failed": ["第二层吊坠被自动补出的链条连接到第一层"],
-  "fidelity_checks": [
-    {
-      "name": "水滴吊坠",
-      "question": "水滴吊坠是否仍位于第二层中央并保持原连接？",
-      "result": "fail",
-      "notes": "吊坠换层且出现自动补链"
-    }
-  ],
-  "critical_failures": [
-    "pendant_layer_changed",
-    "auto_chain_added"
-  ],
-  "notes": "严重结构错误，返回产品分析和提示词阶段"
+  "status": "rerun",
+  "passed": ["已验证项目"],
+  "failed": ["lighting_preserved"],
+  "notes": "结果主光方向与参考底图不一致；固定同一 rank 纠偏重跑一次。",
+  "reference_preservation_checks": [],
+  "fidelity_checks": [],
+  "checklist_checks": [],
+  "critical_failures": ["reference_lighting_changed"]
 }
 ```
 
-通过记录中的 `failed` 必须为空，`fidelity_checks` 中所有结果必须为 `pass`，并省略 `critical_failures`：
+所有字段以 UTF-8 写入，`notes` 使用中文且指向可见证据。空 `critical_failures` 按 CLI 约定表达，不得伪造空字符串代码。
 
-```json
-{
-  "status": "pass",
-  "passed": [
-    "产品结构、层数和长度等级正确",
-    "没有迁移产品图中的人物局部，迁移检查通过"
-  ],
-  "failed": [],
-  "fidelity_checks": [
-    {
-      "name": "主吊坠",
-      "question": "主吊坠是否保持原连接？",
-      "result": "pass",
-      "notes": "位置、朝向和连接均保持"
-    }
-  ],
-  "notes": "所有适用品类和展示模式必检项均已通过"
-}
-```
+## 历史边界
 
-`status`、`notes` 和列表元素必须使用正确 JSON 类型。`passed` 与 `failed` 不能同时为空；`fidelity_checks` 若存在，必须是对象列表，且 `name`、`question`、`result`、`notes` 类型严格正确。
-
-## 历史手串兼容与模型兜底
-
-只有无法在标准 run 路径找到 `analysis/product_fidelity_constraints.json` 时，才进入明确的 legacy 兼容分支。历史手串 `qc.json` 不要求批量增加 `fidelity_checks` 或 `critical_failures`；便携校验仍接受旧字段结构，但继续要求明确记录原图手腕、手臂和皮肤块迁移检查。标准 run 不得通过删除、漏写或传空 `fidelity_checks` 绕过 `must_keep`，新记录也不得用宽松 truthy 值绕过类型或状态 gate。
-
-`pass` 不计入 QC 失败次数；`rerun` 和 `reject` 均计入。当前 run 的未通过次数为零或一次时继续使用默认 `gpt_image_2`，超过一次后下一次使用 `nano_banana_v2` 兜底。不得删除或跳过已有非空 `generation/NN/`；缺少 `qc.json` 的目录必须先处理。
+历史 run 只读，可由 inspector 按旧规则审计，但不得追加新的 QC 或 generation。现代三层 QC 只对 `modern_snapshot` 有效；部分现代文件存在时是 `damaged`，不能删除文件降级为历史。需要重做必须新建 run 并重新 `prepare-review`。

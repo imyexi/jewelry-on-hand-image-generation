@@ -1,117 +1,95 @@
-# 多品类 Troubleshooting
+# 真人参考底图替换 Troubleshooting
 
-所有命令与便携脚本使用 UTF-8 和中文错误文案。先根据错误定位阶段，不要通过直接编辑产物、删除约束或跳过 QC 绕过 gate。
+先停止写入，再依据中文错误定位最早失败的 gate。不得通过删除文件、改摘要、补写决策或绕过校验继续生成。
 
-## 品类、输入或展示模式被拒绝
+## SHA-256 或 manifest 不一致
 
-当前生成白名单只有 `bracelet`、`necklace`、`pendant_necklace`。`pendant_only` 和 `unknown` 可分析但不得生成；无链独立吊坠禁止自动补链。
+症状：源参考图、review 副本、generation 副本、确认快照或 `input-manifest.json` 的摘要不一致。
 
-三种可生成品类都只接受 `worn_source`。项链目标为 `hand_held` 时，输入仍不能是 `hand_held_source`；`flat_lay_source`、白底/平铺图和 `unknown_source` 也不兼容。不要修改 JSON 假装来源，应该换真人佩戴产品图或停止任务。
+恢复：
 
-项链只支持同一产品自身 1 至 3 层。`is_independent_multi_item: true` 表示多件独立叠戴，必须拒绝。扣头、背面或连接被遮挡时写入不可见/不确定字段，不得推断。
+1. 保留现场，只读运行 inspector，确认变化发生在源图、review 还是 generation 固化副本。
+2. generation 已发布但五输入不完整或摘要错误时，运行态为 `damaged`；不得局部重拷或改 manifest。
+3. 源参考图或产品图发生变化时，新建 run 并重新执行 `prepare-review`。
+4. 只有未发布 staging 复制失败时才允许由程序自动清理 staging；不得覆盖已发布 generation。
 
-## 项链缺少完整产品确认快照
+## output role 被拒绝
 
-症状：`generate` 或 `inspect_run_artifacts.py` 报“项链生成决策缺少完整产品确认快照”，或报告快照字段与最终 analysis 不一致。
+症状：`--output-role` 缺失、不一致，飞书 `图片类型` 不匹配，或传入 `hero`。
 
-处理：
+恢复：`hand_worn` 只选“手部佩戴图”，`lifestyle` 只选“生活场景图”；`图片类型` 字段是唯一来源。角色错误必须重新 `prepare-review`。`hero` 必须交给独立主图 Skill，不能改名、静默降级或在 decision 阶段重绑。
 
-1. 不要手补局部字段或复制旧手串决策。
-2. 用 `record-decision` 重新确认品类、`source_image_type`、`display_mode`、层数、长度等级、吊坠字段和多件标志。
-3. 同时传 `--fidelity-confirmed`。CLI 会从最终 analysis 生成完整快照，并将人工修正与决策原子提交。
+## 参考构图快照缺失或冲突
 
-## 非标准保真约束路径
+症状：候选快照为空、确认快照缺失、decision digest 不匹配、rank/角色/目标位置冲突，或 Prompt 出现快照外构图指令。
 
-症状：历史 `review_decision.json` 的 `fidelity_constraints_path` 指向外部或旧相对路径，`generate` 明确拒绝。
+恢复：
 
-`--fidelity-constraints-path` 只是 `record-decision` 的导入源，不是 generate 的动态配置。重新执行：
+- 候选字段不完整：补全飞书语义源，重新 `prepare-review`，不要直接编辑 JSON。
+- 确认前发现描述不准：选择其他合格 rank，或回到同步源修订后重跑。
+- 确认后任一字段、文件或 analysis 改变：新建 run 并重新执行 `prepare-review`。
+- 不能确认唯一替换位置、产品展示面积不足或 `text_or_ui_risk=blocking`：拒绝该参考图。
 
-```powershell
-jewelry-on-hand record-decision `
-  --run-root .\outputs\auto_reference_runs\<run-id> `
-  --action generate_rank_1 `
-  --fidelity-constraints-path .\path\to\confirmed-constraints.json `
-  --fidelity-confirmed
-```
+## 历史 run 与 damaged
 
-成功后 canonical 文件固定为 `<run>/analysis/product_fidelity_constraints.json`，决策固定记录 `analysis/product_fidelity_constraints.json`。不要直接改历史决策路径，也不要让 generate 读取外部文件。
+三态含义：
 
-## bracelet：原图手腕或手臂随产品迁移
+- `modern_snapshot`：候选、确认、decision digest 及已有 generation 的五输入链完整；
+- `legacy_read_only`：现代链全部不存在的完整历史 run；
+- `damaged`：部分现代文件存在、摘要冲突或固化不完整。
 
-这是手串/手链专属高频故障，不是系统只支持手腕场景的说明。
+历史 run 只读，不得追加 decision、generation 或 QC。历史 bracelet 有 `review_decision.json` 和旧参考副本但缺现代快照时，也只能审计；要重做必须新建 run 并重新执行 `prepare-review`。不要补写快照，不要删除现代文件把 `damaged` 伪装成 legacy。
 
-原因：内部图 2 是完整产品佩戴图，模型把手串与原手腕当成一个主体；或 Prompt 只强调尺寸和贴合，没有切断皮肤来源。
+历史 v1 canonical 只读，不得补写 `pendant_semantics` 或自动升级为 `schema_version=2`。历史手串可以保留合法旧字段，但显式非法的来源、模式或结构仍拒绝。
 
-处理：
+## 参考构图漂移
 
-- 确认 Prompt 明确内部图 2 只提供珠子、隔圈、金属件、颜色、纹理和排列。
-- 强调手腕宽度、手臂轮廓、皮肤连续性和肤色来自内部图 1。
-- 换手腕露出完整、背景简单的参考图；必要时提供清晰的产品细节 crop。
-- QC 分别写明原图手腕、手臂和皮肤块迁移检查，只写“手部自然”不够。
+症状：结果改变景别、姿势、人物位置、服装、背景、光线或留白，或把 `lifestyle` 收敛成产品特写。
 
-## 项链：产品图人物局部随产品迁移
+恢复：核对 `reference_preservation_checks` 与快照。第一次固定同一 rank，只注入对应 reference 纠偏并重跑一次；再次漂移，停用该参考图并重新 `prepare-review`。不得用裁切结果、改快照或切模型掩盖不合格参考。
 
-症状：结果带入产品图中的颈部、胸部、衣领、头发、脸、皮肤块或背景贴片。
+## 原首饰残留或替换位置改变
 
-处理：
+症状：参考底图原手串/项链/戒指仍在，目标产品换到不同身体部位，或出现第二件目标产品。
 
-- 确认内部图 2 只提供链条、层数、吊坠、颜色、纹理和肉眼可见连接。
-- `worn` 模式的人物、颈部、胸部、服装和头发均来自内部图 1。
-- `hand_held` 模式的手和场景来自内部图 1，不得虚构绕颈佩戴链路。
-- QC 明确写“没有迁移产品图中的人物局部，迁移检查通过”；严重人物贴片可记录 `source_person_region_migrated`，整体不能 `pass`。
+恢复：小面积残留第一次可强化清除范围 `rerun`；位置改变或产品复制直接 `reject`。确认 `replacement_target` 唯一且 `target_product_count=1`，必要时更换参考并重新 `prepare-review`。
 
-## 项链层数、吊坠或连接漂移
+## 产品源人物区域迁移
 
-常见症状包括层数变多/变少、上下层交换、吊坠换层/翻面/复制、链条合并、多件独立项链被当成一件、凭空补链或推断不可见扣头。
+症状：结果出现产品图手腕、手臂、手指、颈胸、服装、头发、脸、皮肤块、肤色或背景。
 
-处理：
+恢复：标记 `source_person_region_migrated`；戒指来源手污染标记 `source_hand_leakage`。两者都是严重错误并 `reject`。检查五输入顺序必须为 scene 后 product，Prompt 必须声明产品上手图只提供珠宝身份。
 
-- 回查最终 `product_analysis.json` 的 `layer_count`、`length_category`、`pendant_layer`、`connection_structure` 和 `is_independent_multi_item`。
-- 把关键吊坠与连接写入 `must_keep`，把层间关系写入 `must_not_change`，不要只在 Prompt 尾部临时补一句。
-- 核心结构缺失、多层关系重组、自动补链或严重穿模是严重错误，必须 `reject`，不能标为 `rerun`。
+## 产品 canonical 或确认快照冲突
 
-## 参考图首饰混入
+症状：`schema_version=2`、`pendant_semantics`、项链层数/长度/主吊坠，或戒指 `ring_count`、`hand_side`、`finger_position`、`ring_wear_style` 与 analysis 不一致。
 
-原因：参考图本来有戒指、手串、项链或其他饰品，或 `ignored_reference_jewelry` 未进入 Prompt。
+恢复：在 `prepare-review` 评分前纠正产品分析并重建 canonical。`--fidelity-constraints-path` 只作为 `record-decision` 导入源，摘要不匹配、非标准路径或晚期重绑一律拒绝。完整产品确认快照、analysis 与 canonical 必须完全一致。
 
-处理：换更干净的 rank，并确认 Prompt 明确“不要把内部图 1 的原有首饰迁移到新图”。产品身份只能来自内部图 2。
+## 戒指参考或 QC 失败
 
-## QC 报 `fidelity_checks` 不完整
+候选少于 Top 3 时，检查飞书“手部佩戴图”是否完整标注左右手、可见手指、手部朝向、戒面可见度、手指分离度、手指遮挡风险；不得用视觉猜测补字段。
 
-标准路径 `<run>/generation/NN/qc.json` 会自动反推 `<run>/analysis/product_fidelity_constraints.json`。每个 `must_keep` 必须对应且只能对应一条 `fidelity_checks`：
+`ring_count_mismatch`、`finger_position_mismatch`、`ring_structure_mismatch`、`centerpiece_mismatch`、`source_hand_leakage` 必须 `reject`。`hand_side_mismatch`、`ring_contact_error`、`finger_deformation` 至少不得 `pass`；按参考或产品责任分别路由。
 
-- 数量必须与 `must_keep` 完全一致。
-- `name` 与 `must_keep[].name` 完全一致。
-- `question` 与 `must_keep[].qc_question` 完全一致。
-- name/question 组合唯一且对应关系不变。
-- `result` 只能是 `pass`、`rerun` 或 `fail`；整体 `pass` 时每项都必须是 `pass`。
+## 三层 QC 不完整
 
-不要通过删除 canonical 约束、漏写检查或传空数组降级验证。
+症状：缺 `reference_preservation_checks`、`fidelity_checks` 或 `checklist_checks`，`must_keep` 项没有完全一致映射，或 `critical_failures` 与状态冲突。
 
-## `critical_failures` 或状态错误
+恢复：从确认快照重建十项 reference evidence，从 canonical 重建 `must_keep`，从 analysis/角色重建 runtime checklist。逐项人工填写，不复制统一结论。存在严重错误必须 `reject`；不能用空数组、truthy 值或宽松文本降级。
 
-`--critical-failures` 可重复使用或用逗号分隔。空参数、空分段、未知代码、重复代码、布尔值或数字都会收到中文错误。没有关键失败时省略字段，不要写空列表。
+## 飞书 pending/enrichment/CAS
 
-任何 `critical_failures` 都禁止 `pass`。品类错误、核心结构缺失、多层关系重组、自动补链和严重穿模必须 `reject`；轻微且结构仍可辨认的问题才使用 `rerun`。
+症状：同步返回 pending 阻断、导入发生 CAS 冲突、分页不完整或缓存 manifest 摘要变化。
 
-## Legacy 记录为什么仍被拒绝
+恢复：保留 `pending_enrichment.json` 与冲突审计，重新同步最新记录后基于新版本合并；不得强制覆盖。临时忽略 pending 仅在用户明确批准时使用 `--ignore-pending-enrichment`，仍完整分页、排除 pending 并保存 run 内来源快照，不写回飞书。
 
-历史手串自由文本、旧 JSON/run、缺现代快照的 bracelet 和无 canonical 约束的旧 QC 可以兼容。五个现代分类字段 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。
+## UTF-8、乱码与退出码
 
-历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。普通项链、带链吊坠、`pendant_only` 和 `unknown` 也不使用旧手串默认值。标准 run 只要能定位 canonical 约束，就必须执行现代 `must_keep` 校验。
+- 先设置 `PYTHONUTF8=1`，再确认 JSON/Markdown/Prompt 均以 UTF-8 读取；不要用替换字符修复损坏文本。
+- `0` 表示校验成功；`1` 表示契约或产物错误；同步命令的 `2` 表示存在待补全素材。以实际脚本帮助和 stderr 为准。
+- 乱码、JSON 解析失败或非零退出码都发生在 provider 调用前。修复源文件或重新同步后，从失败阶段重新运行；不得把失败命令当作成功。
 
-## Prompt 编码损坏
+## provider、轮询或结果下载失败
 
-症状：Prompt 出现问号占位、`锟` 或替换字符，`validate_prompt_contract.py` 返回中文错误。
-
-处理：用 UTF-8 重写 Prompt，重新从最终分析和约束构建，不要把乱码提交给 AIReiter。
-
-## 模型切换与未完成生成目录
-
-- 默认和第一次 QC 未通过后的重跑仍使用 `gpt_image_2`。
-- 同一 run 内非 `pass` QC 次数超过 1 次后，下一次才使用 `nano_banana_v2`。
-- 非空 `generation/NN/` 缺 `qc.json` 时先完成人工处理，不得跳过或覆盖。
-
-## AIReiter 轮询失败与验收边界
-
-先读取 `submit.json` 中的 `out_task_id` 并继续查询；不能确认提交失败时不要重复提交。当前本地自动化测试验证的是命令和产物契约。真实第三方模型 proof 属于 Task 11，尚未完成。没有真实调用证据时不得声称普通项链或带链吊坠已经完成真实模型验收。
+先确认 helper 尚未调用还是已得到任务 ID。未调用时修复本地 gate；已提交时保留 `submit.json` 与任务记录，只做幂等查询/下载，不重复付费提交。任何 provider 结果仍必须进入三层 QC；命令可运行不等于真实验收。

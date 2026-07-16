@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import runpy
 import shutil
 import subprocess
@@ -47,8 +48,37 @@ SNAPSHOT_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_reference_snapshot.p
 PROJECT_GUIDE = PROJECT_ROOT / "CLAUDE.md"
 MANUAL_WORKFLOW = PROJECT_ROOT / "reference" / "manual-workflow.md"
 FIDELITY_SCHEMA = PROJECT_ROOT / "reference" / "product-fidelity-constraints-schema.md"
+REVIEW_DECISION_SCHEMA = PROJECT_ROOT / "reference" / "review-decision-schema.md"
 PORTABLE_WORKFLOW = WORKFLOW_SKILL / "references" / "workflow.md"
 TROUBLESHOOTING = WORKFLOW_SKILL / "references" / "troubleshooting.md"
+PROMPT_CONTRACT = WORKFLOW_SKILL / "references" / "prompt-contract.md"
+REFERENCE_COMPOSITION_CONTRACT = (
+    WORKFLOW_SKILL / "references" / "reference-composition-contract.md"
+)
+PORTABLE_QC = WORKFLOW_SKILL / "references" / "qc-checklist.md"
+PROJECT_PROMPT = PROJECT_ROOT / "reference" / "prompt-template.md"
+PROJECT_QC = PROJECT_ROOT / "reference" / "qc-checklist.md"
+FEISHU_REFERENCE_SOURCE = PROJECT_ROOT / "reference" / "feishu-reference-source.md"
+WORKFLOW_DESIGN = (
+    PROJECT_ROOT
+    / "reference"
+    / "superpowers"
+    / "specs"
+    / "2026-06-12-jewelry-on-hand-generation-workflow-design.md"
+)
+REFERENCE_REPLACEMENT_DOCUMENTS = (
+    WORKFLOW_SKILL / "SKILL.md",
+    PORTABLE_WORKFLOW,
+    PROMPT_CONTRACT,
+    PORTABLE_QC,
+    TROUBLESHOOTING,
+    MANUAL_WORKFLOW,
+    PROJECT_PROMPT,
+    PROJECT_QC,
+    REVIEW_DECISION_SCHEMA,
+    FEISHU_REFERENCE_SOURCE,
+    WORKFLOW_DESIGN,
+)
 CURRENT_DOCUMENTS = (
     PROJECT_GUIDE,
     MANUAL_WORKFLOW,
@@ -65,11 +95,209 @@ LEGACY_EXPLICIT_CONTRACT = (
     "历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、"
     "`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。"
 )
-TASK11_PROOF_CONTRACT = "真实第三方模型 proof 属于 Task 11，尚未完成。"
 
 
 def _document_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
+
+
+def test_skill_declares_reference_base_replacement_scope_and_progressive_routes() -> None:
+    skill_path = WORKFLOW_SKILL / "SKILL.md"
+    text = _document_text(skill_path)
+    frontmatter = text.split("---", 2)[1]
+    keys = [line.split(":", 1)[0] for line in frontmatter.splitlines() if ":" in line]
+
+    assert keys == ["name", "description"]
+    assert "只支持 `hand_worn` 和 `lifestyle`" in text
+    assert "参考底图是画面结构唯一来源" in text
+    assert "产品上手图只提供珠宝身份" in text
+    assert "主图必须交给独立主图 Skill" in text
+    assert "hand-reference" not in text
+    for reference in (
+        "references/workflow.md",
+        "references/prompt-contract.md",
+        "references/reference-composition-contract.md",
+        "references/qc-checklist.md",
+        "references/troubleshooting.md",
+    ):
+        assert reference in text
+    for forbidden in (
+        "三图输出角色",
+        "分别创建独立 run",
+        "`hero` 为产品主体近景",
+        "深色背景主图例外",
+    ):
+        assert forbidden not in text
+
+
+@pytest.mark.parametrize("document", [MANUAL_WORKFLOW, PORTABLE_WORKFLOW, WORKFLOW_DESIGN])
+def test_operator_workflows_share_reference_replacement_lifecycle(document: Path) -> None:
+    text = _document_text(document)
+
+    assert "prepare-review -> record-decision -> generate -> qc" in text
+    assert "--output-role" in text
+    assert "`图片类型` 字段是角色唯一来源" in text
+    assert "五输入" in text and "input-manifest.json" in text
+    for input_name in (
+        "scene-reference",
+        "product-reference",
+        "reference-composition-snapshot.json",
+        "product-analysis.json",
+        "product-fidelity-constraints.json",
+    ):
+        assert input_name in text
+    for state in ("modern_snapshot", "legacy_read_only", "damaged"):
+        assert state in text
+    for layer in ("reference_preservation", "fidelity_checks", "checklist_checks"):
+        assert layer in text
+
+
+@pytest.mark.parametrize("document", [PROJECT_PROMPT, PROMPT_CONTRACT])
+def test_prompt_documents_lock_the_reference_base_and_product_identity_roles(
+    document: Path,
+) -> None:
+    text = _document_text(document)
+
+    assert "以参考底图为底图进行编辑" in text
+    assert "参考底图是人物、姿势、手势、构图、景别、服装、背景、光线、留白和替换位置的唯一来源" in text
+    assert "产品上手图只提供目标珠宝身份" in text
+    assert "只允许移除参考图原首饰并在同一位置换入一件目标产品" in text
+    assert "必要接触阴影" in text
+    assert "小面积水印" in text
+    assert "1200" in text
+
+
+@pytest.mark.parametrize("document", [PROJECT_QC, PORTABLE_QC])
+def test_qc_documents_require_three_layers_and_reference_evidence(document: Path) -> None:
+    text = _document_text(document)
+
+    for layer in ("reference_preservation", "fidelity_checks", "checklist_checks"):
+        assert layer in text
+    for outcome in ("pass", "rerun", "reject"):
+        assert outcome in text
+    assert "十项 reference evidence" in text
+    assert "critical_failures" in text
+
+
+def test_reference_replacement_documents_reject_legacy_writes_and_old_claims() -> None:
+    forbidden_claims = (
+        "参考图只提供氛围",
+        "参考图仅提供氛围",
+        "产品图提供构图",
+        "历史 run 可继续生成",
+        "人物和场景可以依据参考图重新生成",
+        "新 run 写 `hand-reference",
+    )
+
+    for document in REFERENCE_REPLACEMENT_DOCUMENTS:
+        text = _document_text(document)
+        assert not any(claim in text for claim in forbidden_claims), document
+
+    for document in (MANUAL_WORKFLOW, PORTABLE_WORKFLOW, TROUBLESHOOTING, WORKFLOW_DESIGN):
+        text = _document_text(document)
+        assert "历史 run" in text
+        assert "只读" in text
+        assert "不得追加" in text
+        assert "重新执行 `prepare-review`" in text
+
+
+def test_revised_documents_preserve_necklace_ring_fidelity_and_feishu_audit() -> None:
+    combined = "\n".join(_document_text(path) for path in REFERENCE_REPLACEMENT_DOCUMENTS)
+
+    for phrase in (
+        "schema_version=2",
+        "pendant_semantics",
+        "ring_count",
+        "hand_side",
+        "finger_position",
+        "ring_wear_style",
+        "canonical",
+        "pending_enrichment",
+        "CAS",
+    ):
+        assert phrase in combined
+
+
+@pytest.mark.parametrize("document", [MANUAL_WORKFLOW, PORTABLE_WORKFLOW])
+def test_documented_qc_pass_command_omits_empty_critical_failures_flag(
+    document: Path,
+) -> None:
+    text = _document_text(document)
+    match = re.search(
+        r"```powershell\s*\n(?P<command>jewelry-on-hand qc\b.*?)\n```",
+        text,
+        flags=re.DOTALL,
+    )
+
+    assert match is not None, f"{document} 缺少正式 qc PowerShell 示例"
+    command = match.group("command")
+    assert "--status pass" in command
+    assert "--critical-failures" not in command
+
+
+def test_qc_pass_argv_keeps_critical_failures_unset() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "qc",
+            "--generation-dir",
+            "generation/01",
+            "--status",
+            "pass",
+            "--reference-preservation-checks-json",
+            "reference.json",
+            "--fidelity-checks-json",
+            "fidelity.json",
+            "--checklist-checks-json",
+            "checklist.json",
+        ]
+    )
+
+    assert args.critical_failures is None
+
+
+def test_design_spec_scopes_output_role_to_the_commands_that_accept_it() -> None:
+    text = _document_text(WORKFLOW_DESIGN)
+
+    assert "所有命令显式使用 `--output-role" not in text
+    assert "`prepare-review` 与 `record-decision` 显式传 `--output-role`" in text
+    assert "`generate` 与 `qc` 从 run 固化角色读取并复核" in text
+
+
+def test_skill_structure_and_openai_metadata_are_deterministic() -> None:
+    skill_text = _document_text(WORKFLOW_SKILL / "SKILL.md")
+    links = re.findall(
+        r"\[[^]]+\]\((references/(?:workflow|prompt-contract|"
+        r"reference-composition-contract|qc-checklist|troubleshooting)\.md)\)",
+        skill_text,
+    )
+
+    assert len(skill_text.splitlines()) < 500
+    assert links == [
+        "references/workflow.md",
+        "references/prompt-contract.md",
+        "references/reference-composition-contract.md",
+        "references/qc-checklist.md",
+        "references/troubleshooting.md",
+    ]
+    assert _document_text(WORKFLOW_SKILL / "agents" / "openai.yaml") == (
+        'interface:\n'
+        '  display_name: "Jewelry Scene Replacement"\n'
+        '  short_description: "严格保留真人参考图构图、人物与光线并仅替换为目标珠宝首饰"\n'
+        '  default_prompt: "Use $jewelry-on-hand-workflow to replace jewelry in a '
+        'hand-worn or lifestyle reference while preserving the reference composition."\n'
+    )
+
+
+@pytest.mark.parametrize(
+    "document",
+    [WORKFLOW_SKILL / "SKILL.md", PORTABLE_WORKFLOW, MANUAL_WORKFLOW],
+)
+def test_operator_documents_assign_real_provider_proof_to_task12(document: Path) -> None:
+    text = _document_text(document)
+
+    assert "真实第三方模型 proof 属于 Task 12" in text
+    assert "真实第三方模型 proof 属于 Task 11" not in text
 
 
 def test_base_image_便携提示词校验器公开快照绑定签名() -> None:
@@ -193,12 +421,11 @@ def test_documented_cli_flags_exist_on_the_real_subcommand_parsers() -> None:
 
 
 @pytest.mark.parametrize("document", CURRENT_DOCUMENTS)
-def test_current_documents_share_exact_legacy_and_task11_contracts(document: Path) -> None:
+def test_current_documents_share_exact_legacy_contracts(document: Path) -> None:
     text = _document_text(document)
 
     assert MODERN_ATOMIC_CONTRACT in text
     assert LEGACY_EXPLICIT_CONTRACT in text
-    assert TASK11_PROOF_CONTRACT in text
 
 
 def test_current_documents_never_describe_the_whole_system_as_bracelet_only() -> None:
