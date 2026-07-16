@@ -495,7 +495,16 @@ def validate_prompt(
     if errors:
         return errors
     _validate_composition_signature(snapshot, errors)
-    identity_projection = _project_product_identity(analysis, errors)
+    include_visible_appearance = not (
+        canonical.get("schema_version") == 2
+        and analysis.get("confirmed_product_type")
+        in {"necklace", "pendant_necklace"}
+    )
+    identity_projection = _project_product_identity(
+        analysis,
+        errors,
+        include_visible_appearance=include_visible_appearance,
+    )
     if identity_projection is None:
         return errors
     constraints_projection = _project_canonical_constraints(
@@ -544,6 +553,8 @@ def _load_json_object(
 def _project_product_identity(
     analysis: dict[str, object],
     errors: list[str],
+    *,
+    include_visible_appearance: bool = True,
 ) -> dict[str, object] | None:
     common_fields = (
         "confirmed_product_type",
@@ -589,12 +600,13 @@ def _project_product_identity(
     projection: dict[str, object] = {
         "confirmed_product_type": category,
         "display_mode": display_mode,
-        "visible_appearance": visible_appearance,
         "color_family": color_family,
         "special_requirements": special_requirements,
         "occluded_parts": occluded_parts,
         "uncertain_details": uncertain_details,
     }
+    if include_visible_appearance:
+        projection["visible_appearance"] = visible_appearance
     if dimensions:
         projection["product_dimensions"] = dimensions
     if category in {"necklace", "pendant_necklace"}:

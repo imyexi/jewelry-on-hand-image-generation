@@ -82,8 +82,16 @@ def build_generation_prompt(
     _validate_snapshot_binding(product, reference, reference_snapshot)
     policy = get_category_policy(product.confirmed_product_type)
     fragments = policy.build_prompt_fragments(product)
+    include_visible_appearance = not (
+        fidelity_constraints.schema_version == 2
+        and product.confirmed_product_type
+        in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}
+    )
     product_identity_json = _canonical_json(
-        _product_identity_projection(product)
+        _product_identity_projection(
+            product,
+            include_visible_appearance=include_visible_appearance,
+        )
     )
     constraints_json = _canonical_json(
         _canonical_constraints_projection(product, fidelity_constraints)
@@ -319,7 +327,11 @@ def _canonical_json(value: object) -> str:
     )
 
 
-def _product_identity_projection(product: ProductAnalysis) -> dict[str, object]:
+def _product_identity_projection(
+    product: ProductAnalysis,
+    *,
+    include_visible_appearance: bool = True,
+) -> dict[str, object]:
     dimensions = product.product_dimensions
     dimension_values = {
         key: value
@@ -336,12 +348,13 @@ def _product_identity_projection(product: ProductAnalysis) -> dict[str, object]:
     projection: dict[str, object] = {
         "confirmed_product_type": product.confirmed_product_type.value,
         "display_mode": product.display_mode.value,
-        "visible_appearance": product.visible_appearance,
         "color_family": list(product.color_family),
         "special_requirements": list(product.special_requirements),
         "occluded_parts": list(product.occluded_parts),
         "uncertain_details": list(product.uncertain_details),
     }
+    if include_visible_appearance:
+        projection["visible_appearance"] = product.visible_appearance
     if dimension_values:
         projection["product_dimensions"] = dimension_values
     if product.confirmed_product_type in {

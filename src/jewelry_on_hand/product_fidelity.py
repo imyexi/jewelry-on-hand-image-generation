@@ -221,13 +221,20 @@ def _build_necklace_v2_fidelity_constraints(
     must_keep, detected_keywords = _extract_non_pendant_necklace_items(product)
     if has_structured_pendant:
         assert product.pendant_layer is not None
+        assert semantics.position is not None
+        assert semantics.orientation is not None
+        assert semantics.connection is not None
         must_keep.append(
             MustKeepConstraint(
                 name="主吊坠可见结构",
                 source_text=product.visible_appearance,
                 normalized_keyword="吊坠",
                 location=product.pendant_position or "产品图中肉眼可见位置",
-                visual_shape=product.visible_appearance,
+                visual_shape=(
+                    f"位置：{semantics.position}；"
+                    f"朝向：{semantics.orientation}；"
+                    f"连接：{semantics.connection}"
+                ),
                 relationship=(
                     f"保持第 {product.pendant_layer} 层、原朝向和肉眼可见连接关系："
                     f"{product.connection_structure or '只按产品图可见连接'}"

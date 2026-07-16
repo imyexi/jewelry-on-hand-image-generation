@@ -462,7 +462,7 @@ def test_fidelity_schema_json_examples_parse_and_keep_auto_manual_sources_separa
     assert any("层" in item for item in corrected.must_not_change)
 
 
-def test_automatic_fidelity_extraction_does_not_fabricate_ring_or_layer_constraints() -> None:
+def _带链吊坠分析数据() -> dict[str, object]:
     data = _modern_analysis()
     data.update(
         {
@@ -477,12 +477,64 @@ def test_automatic_fidelity_extraction_does_not_fabricate_ring_or_layer_constrai
             "detected_product_type": "pendant_necklace",
         }
     )
+    return data
+
+
+def test_结构不完整的带链吊坠分析必须明确拒绝() -> None:
+    data = _带链吊坠分析数据()
+
+    with pytest.raises(ValueError, match="pendant_semantics.position 必须是非空字符串"):
+        build_product_fidelity_constraints(ProductAnalysis.from_dict(data))
+
+
+def test_完整结构化的带链吊坠分析可以构建保真约束() -> None:
+    data = _带链吊坠分析数据()
+    data.update(
+        {
+            "pendant_position": "第二层中央",
+            "pendant_orientation": "水滴尖端朝下",
+            "connection_structure": "闭口金属吊环连接第二层链条",
+        }
+    )
+
     automatic = build_product_fidelity_constraints(ProductAnalysis.from_dict(data))
 
     assert automatic.detected_keywords == ("吊坠",)
     assert [item.normalized_keyword for item in automatic.must_keep] == ["吊坠"]
-    assert "连接环" not in automatic.must_keep[0].relationship
-    assert all("第二层" not in item for item in automatic.must_not_change)
+    assert automatic.pendant_semantics is not None
+    assert automatic.pendant_semantics.position == "第二层中央"
+    assert automatic.pendant_semantics.orientation == "水滴尖端朝下"
+    assert automatic.pendant_semantics.connection == "闭口金属吊环连接第二层链条"
+
+
+def test_自由文本中的连接环和第二层不会提升为未确认字段() -> None:
+    data = _带链吊坠分析数据()
+    data.update(
+        {
+            "pendant_layer": 1,
+            "pendant_position": "胸前中线",
+            "pendant_orientation": "水滴尖端朝下",
+            "connection_structure": "闭口金属扣连接第一层链条",
+        }
+    )
+
+    automatic = build_product_fidelity_constraints(ProductAnalysis.from_dict(data))
+
+    assert automatic.pendant_semantics is not None
+    assert automatic.pendant_semantics.layer == 1
+    assert automatic.pendant_semantics.position == "胸前中线"
+    assert automatic.pendant_semantics.orientation == "水滴尖端朝下"
+    assert automatic.pendant_semantics.connection == "闭口金属扣连接第一层链条"
+    pendant_item = automatic.must_keep[0]
+    assert pendant_item.source_text == data["visible_appearance"]
+    assert pendant_item.visual_shape == (
+        "位置：胸前中线；朝向：水滴尖端朝下；"
+        "连接：闭口金属扣连接第一层链条"
+    )
+    assert "连接环" not in pendant_item.visual_shape
+    assert "第二层" not in pendant_item.visual_shape
+    assert "连接环" not in pendant_item.relationship
+    assert "第二层" not in pendant_item.relationship
 
 
 @pytest.mark.parametrize(
@@ -1532,6 +1584,110 @@ def test_reference_preservation_prompt_四输入与精确单次纠偏尾缀(tmp_
     assert namespace["validate_prompt"](*arguments) == []
     arguments[0].write_text(original.rstrip() + "\n\n" + suffix + suffix, encoding="utf-8")
     assert namespace["validate_prompt"](*arguments)
+
+
+@pytest.mark.parametrize("product_type", ("necklace", "pendant_necklace"))
+def test_严格v2项链安全提示与便携校验器保持同态(
+    tmp_path: Path,
+    product_type: str,
+) -> None:
+    _root, generation = _task9_modern_run(tmp_path / product_type)
+    data = _modern_analysis()
+    data["visible_appearance"] = "双层项链，可见连接环连接第二层链条"
+    if product_type == "pendant_necklace":
+        data.update(
+            {
+                "product_type": "带链吊坠",
+                "detected_product_type": "pendant_necklace",
+                "confirmed_product_type": "pendant_necklace",
+                "classification_evidence": ["完整链条与中央主吊坠清晰可见"],
+                "layer_count": 2,
+                "has_pendant": True,
+                "pendant_count": 1,
+                "pendant_layer": 1,
+                "pendant_position": "胸前中线",
+                "pendant_orientation": "水滴尖端朝下",
+                "connection_structure": "闭口金属扣连接第一层链条",
+            }
+        )
+    product = ProductAnalysis.from_dict(data)
+    analysis_data = product_analysis_to_dict(product)
+    canonical_data = build_product_fidelity_constraints(product).to_dict()
+    canonical_data["review_status"] = "confirmed"
+    constraints = ProductFidelityConstraints.from_dict(canonical_data)
+
+    snapshot_path = generation / "reference-composition-snapshot.json"
+    snapshot_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot_data["output_role"] = "lifestyle"
+    snapshot_data["visible_body_regions"] = ["颈部", "胸前"]
+    snapshot_data["replacement_target"] = {
+        "body_region": "颈部与胸前中线",
+        "source_jewelry": "原项链",
+        "target_product_count": 1,
+    }
+    snapshot_data["composition_signature"] = _task9_signature(snapshot_data)
+    snapshot = ReferenceCompositionSnapshot.from_dict(snapshot_data)
+    reference = ScoredReference(
+        ReferenceRow(
+            index=1,
+            file_name=snapshot.reference_file,
+            relative_path=snapshot.reference_file,
+            absolute_path=generation / "scene-reference.jpg",
+            width=1200,
+            height=1600,
+            size_mb=0.1,
+            purpose_category="生活场景图",
+            bracelet_applicability="否",
+            default_strategy="已确认",
+            style_category="暗调",
+            scene_keywords="深色木纹",
+            jewelry_type="项链",
+            recommended_usage="颈部与胸前构图",
+            notes="人工确认",
+            confidence="高",
+            file_exists=True,
+        ),
+        100,
+        1,
+        ("人工确认",),
+        (),
+        (),
+    )
+    prompt = build_generation_prompt(
+        product,
+        reference,
+        constraints,
+        OutputRole.LIFESTYLE,
+        snapshot,
+    )
+
+    prompt_path = generation / "prompt.txt"
+    analysis_path = generation / "product-analysis.json"
+    canonical_path = generation / "product-fidelity-constraints.json"
+    prompt_path.write_text(prompt, encoding="utf-8")
+    _write_json(snapshot_path, snapshot_data)
+    _write_json(analysis_path, analysis_data)
+    _write_json(canonical_path, canonical_data)
+    validate_prompt = runpy.run_path(str(PROMPT_VALIDATOR))["validate_prompt"]
+    arguments = (prompt_path, snapshot_path, analysis_path, canonical_path)
+
+    assert validate_prompt(*arguments) == []
+
+    prefix = "产品身份JSON："
+    identity_line = next(line for line in prompt.splitlines() if line.startswith(prefix))
+    identity = json.loads(identity_line.removeprefix(prefix))
+    identity.pop("layer_count")
+    tampered_identity = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    prompt_path.write_text(
+        prompt.replace(identity_line, prefix + tampered_identity, 1),
+        encoding="utf-8",
+    )
+    assert validate_prompt(*arguments)
 
 
 @pytest.mark.parametrize("mutation", ("missing", "analysis_type", "canonical_projection"))
