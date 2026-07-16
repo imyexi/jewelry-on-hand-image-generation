@@ -406,11 +406,16 @@ def _analysis_with_length(length_category: str | None) -> dict[str, object]:
     return data
 
 
-def _worn_necklace_reference(tmp_path: Path) -> ReferenceRow:
-    reference_path = tmp_path / "necklace-worn-reference.jpg"
+def _worn_necklace_reference(
+    tmp_path: Path,
+    *,
+    index: int = 1,
+    name: str = "necklace-worn-reference",
+) -> ReferenceRow:
+    reference_path = tmp_path / f"{name}.jpg"
     reference_path.write_bytes(b"reference")
     return ReferenceRow(
-        index=1,
+        index=index,
         file_name=reference_path.name,
         relative_path=reference_path.name,
         absolute_path=reference_path,
@@ -443,6 +448,21 @@ def _worn_necklace_reference(tmp_path: Path) -> ReferenceRow:
         existing_jewelry="无",
         crop_risk="低",
     )
+
+
+def _worn_necklace_references(tmp_path: Path) -> list[ReferenceRow]:
+    return [
+        _worn_necklace_reference(
+            tmp_path,
+            index=index,
+            name=(
+                "necklace-worn-reference"
+                if index == 1
+                else f"necklace-worn-reference-alt-{index}"
+            ),
+        )
+        for index in range(1, 4)
+    ]
 
 
 def _write_null_length_run(tmp_path: Path) -> tuple[RunPaths, ProductAnalysis]:
@@ -629,10 +649,10 @@ def test_unknown_can_be_corrected_before_scoring_through_formal_cli_e2e(
         }
     )
     write_json(analysis_path, analysis_data)
-    reference = _worn_necklace_reference(tmp_path)
+    references = _worn_necklace_references(tmp_path)
     monkeypatch.setattr(
         "jewelry_on_hand.cli.sync_and_load_reference_rows",
-        lambda _config: [reference],
+        lambda _config: references,
     )
     output_root = tmp_path / "runs"
     run_root = output_root / "unknown-corrected"
@@ -824,6 +844,28 @@ def _necklace_reference(
     )
 
 
+def _necklace_reference_set(
+    tmp_path: Path,
+    *,
+    start_index: int,
+    name: str,
+    display_mode: str,
+    framing: str,
+    multi_layer_space: bool = False,
+) -> list[ReferenceRow]:
+    return [
+        _necklace_reference(
+            tmp_path,
+            index=start_index + offset,
+            name=name if offset == 0 else f"{name}-alt-{offset}",
+            display_mode=display_mode,
+            framing=framing,
+            multi_layer_space=multi_layer_space,
+        )
+        for offset in range(3)
+    ]
+
+
 def _prepare_necklace_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -849,18 +891,16 @@ def _prepare_necklace_run(
     )
     write_json(analysis_path, analysis_data)
     if references is None:
-        references = [
-            _necklace_reference(
-                tmp_path,
-                index=1,
-                name=f"{run_id}-{display_mode}",
-                display_mode=display_mode,
-                framing=(
-                    "双手与胸前近景" if display_mode == "hand_held" else "颈部与锁骨近景"
-                ),
-                multi_layer_space=layer_count > 1,
-            )
-        ]
+        references = _necklace_reference_set(
+            tmp_path,
+            start_index=1,
+            name=f"{run_id}-{display_mode}",
+            display_mode=display_mode,
+            framing=(
+                "双手与胸前近景" if display_mode == "hand_held" else "颈部与锁骨近景"
+            ),
+            multi_layer_space=layer_count > 1,
+        )
     monkeypatch.setattr(
         "jewelry_on_hand.cli.sync_and_load_reference_rows",
         lambda _config: references,
@@ -962,30 +1002,30 @@ def test_prepare_review_applies_corrections_before_rescoring_references(
     expected_value: object,
 ) -> None:
     references = [
-        _necklace_reference(
+        *_necklace_reference_set(
             tmp_path,
-            index=1,
+            start_index=1,
             name="worn-close",
             display_mode="worn",
             framing="颈部与锁骨特写",
         ),
-        _necklace_reference(
+        *_necklace_reference_set(
             tmp_path,
-            index=2,
+            start_index=4,
             name="hand-held",
             display_mode="hand_held",
             framing="双手与胸前近景",
         ),
-        _necklace_reference(
+        *_necklace_reference_set(
             tmp_path,
-            index=3,
+            start_index=7,
             name="worn-long",
             display_mode="worn",
             framing="上半身与胸前完整取景",
         ),
-        _necklace_reference(
+        *_necklace_reference_set(
             tmp_path,
-            index=4,
+            start_index=10,
             name="worn-multi",
             display_mode="worn",
             framing="上半身与胸前完整取景",
