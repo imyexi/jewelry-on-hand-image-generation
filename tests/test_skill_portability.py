@@ -36,9 +36,11 @@ QC_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_qc_record.py"
 PROMPT_VALIDATOR = WORKFLOW_SKILL / "scripts" / "validate_prompt_contract.py"
 PROJECT_GUIDE = PROJECT_ROOT / "CLAUDE.md"
 MANUAL_WORKFLOW = PROJECT_ROOT / "reference" / "manual-workflow.md"
+PROMPT_TEMPLATE = PROJECT_ROOT / "reference" / "prompt-template.md"
 FIDELITY_SCHEMA = PROJECT_ROOT / "reference" / "product-fidelity-constraints-schema.md"
 REVIEW_DECISION_SCHEMA = PROJECT_ROOT / "reference" / "review-decision-schema.md"
 PORTABLE_WORKFLOW = WORKFLOW_SKILL / "references" / "workflow.md"
+PORTABLE_PROMPT_CONTRACT = WORKFLOW_SKILL / "references" / "prompt-contract.md"
 TROUBLESHOOTING = WORKFLOW_SKILL / "references" / "troubleshooting.md"
 CURRENT_DOCUMENTS = (
     PROJECT_GUIDE,
@@ -81,6 +83,34 @@ PORTABLE_PRESENT_PENDANT_CONFLICT_PHRASES = (
 
 def _document_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
+
+
+def test_skill_documents_reference_selection_prompt_without_default_dark_rule() -> None:
+    selection_documents = (
+        WORKFLOW_SKILL / "SKILL.md",
+        PORTABLE_WORKFLOW,
+        MANUAL_WORKFLOW,
+    )
+    for document in selection_documents:
+        text = _document_text(document)
+        assert "--reference-selection-prompt" in text
+        assert "有提示词" in text and "全部条件" in text and "硬约束" in text
+        assert "无提示词" in text and "适用品类" in text and "关键词" in text
+        assert "少于 3 张" in text and "阻断" in text
+        assert "analysis/reference_selection_constraints.json" in text
+        assert "reference_selection_constraints_sha256" in text
+
+    for document in selection_documents + (
+        PORTABLE_PROMPT_CONTRACT,
+        PROMPT_TEMPLATE,
+    ):
+        text = _document_text(document)
+        assert "选图提示词不得写入" in text
+        assert "三个角色均须同时通过深色背景 gate" not in text
+        assert "三个角色都要求深色背景" not in text
+        assert "使用深色背景" not in text
+        assert "USER_APPROVED_DARK" not in text
+        assert "DARK_BACKGROUND_TEXT_TERMS" not in text
 
 
 @pytest.mark.parametrize(

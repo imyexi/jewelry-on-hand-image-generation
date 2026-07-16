@@ -26,6 +26,13 @@
 
 戒指候选必须显式标记 `ring + worn`，并完整填写左右手、可见手指、手部朝向、戒面可见度、手指分离度和手指遮挡风险。元数据明确出现水印、logo、平台标识或人物宽场景区域时拒绝；有 `framing` 时必须是手部近景/特写、手指近景/特写或戒指特写。少于三张合格候选时停止，不得复制图片伪造 Top 3，人工仍需视觉检查未被元数据标出的水印。
 
+参考源基础 gate 通过后，再按可选选图提示词处理：
+
+- 有提示词时，通过 `--reference-selection-prompt` 输入；系统只按中英文逗号、分号和换行拆分并去重，空格不拆词。全部条件都是硬约束，每张候选都必须在允许匹配的语义字段中命中全部条件。
+- 无提示词时，只按适用品类、输出角色和参考图关键词与产品需求的贴合度选择，不增加深色、浅色或其他系统级风格默认值。
+- 任一模式下合格候选少于 3 张都阻断。报告包括基础 gate 前后数量；有提示词时还包括逐条件命中数量和全部条件同时命中数量。系统不会自动放宽条件。
+- 每次选择都写 `analysis/reference_selection_constraints.json`。候选、Top 3 和生成类决策使用同一个 `reference_selection_constraints_sha256` 绑定该审计；选图提示词不得写入 AIReiter Prompt。
+
 ## 四阶段流程
 
 ### 1. `prepare-review`
@@ -35,6 +42,7 @@ jewelry-on-hand prepare-review `
   --product-image .\path\to\product.jpg `
   --analysis-json .\path\to\product-analysis.json `
   --output-role lifestyle `
+  --reference-selection-prompt "自然光；右手；近景" `
   --output-root .\outputs\auto_reference_runs `
   --run-id demo
 ```
@@ -43,9 +51,9 @@ jewelry-on-hand prepare-review `
 
 项链若需人工纠正，必须在这条命令中传 `--confirmed-product-type`、`--source-image-type`、`--display-mode`、`--layer-count`、`--length-category` 和适用的吊坠/多件字段；系统先纠正再评分。`detected_product_type=unknown` 与项链 `length_category=null` 只能作为 correction-only，未纠正时不得产生 Top 3。
 
-如需本地 Excel，加 `--classification .\path\to\catalog.xlsx`。若是已获批准的线上临时批次，需要排除待补全素材时改加 `--ignore-pending-enrichment`，不得同时传本地 Excel；默认仍保持 pending 全局阻断。命令会拒绝非空 run，复制产品图，合并全部人工纠正并校验最终分析 JSON，再生成带 `product_analysis_sha256` 的 `schema_version=2` canonical，随后写候选与多样性 Top 3，将参考图复制到 run 的 `review/`，并渲染 `review.html`。普通项链写 `absent/0/null/forbid`，带链吊坠第一阶段写 `present/1/实际所属层/forbid`。此阶段不会创建 `review_decision.json`。
+如需本地 Excel，加 `--classification .\path\to\catalog.xlsx`。若是已获批准的线上临时批次，需要排除待补全素材时改加 `--ignore-pending-enrichment`，不得同时传本地 Excel；默认仍保持 pending 全局阻断。命令会拒绝非空 run，复制产品图，合并全部人工纠正并校验最终分析 JSON，再生成带 `product_analysis_sha256` 的 `schema_version=2` canonical，随后按选图模式写 `analysis/reference_selection_constraints.json`、候选与多样性 Top 3，将参考图复制到 run 的 `review/`，并渲染 `review.html`。即使候选不足 3 张，审计文件也会先写入，便于定位逐条件数量。普通项链写 `absent/0/null/forbid`，带链吊坠第一阶段写 `present/1/实际所属层/forbid`。此阶段不会创建 `review_decision.json`。
 
-若多个 SKU 的 Top 3 过度重复，可在未决策 run 上使用 `rerank-batch` 联合重排。单 run 保持无风险参考优先；批次重排为降低重复，可选择低复用但带可控“参考首饰/界面需移除”风险的候选。此类候选只提供姿势、构图、背景和光线，生成阶段仍须移除参考首饰、文字和平台元素；重排不得创建决策或绕过人工确认。
+若多个 SKU 的 Top 3 过度重复，可在未决策 run 上使用 `rerank-batch` 联合重排。重排只读取现有审计并保留同一 `reference_selection_constraints_sha256`，缺少审计的历史 run 必须阻断，不能在重排阶段创建、修改或放宽选图提示词。单 run 保持无风险参考优先；批次重排为降低重复，可选择低复用但带可控“参考首饰/界面需移除”风险的候选。此类候选只提供姿势、构图、背景和光线，生成阶段仍须移除参考首饰、文字和平台元素；重排不得创建决策或绕过人工确认。
 
 缺少 `--analysis-json` 时只生成分析 Prompt 并返回非零；补齐后换新 run-id。`product_analysis.json` 必须明确现代品类、来源、模式和结构字段；旧手串兼容例外见“Legacy 边界”。
 
@@ -63,7 +71,7 @@ jewelry-on-hand record-decision `
 
 允许的生成 action 是 `generate_rank_1`、`generate_selected`、`generate_multiple`。`selected_ranks` 必须在 1..3 内、不能重复并且存在于 Top 3；`rerank` 和 `manual_reference` 不得进入生成。
 
-普通项链、带链吊坠和戒指的生成决策必须包含完整产品确认快照。项链在本阶段只选择按最终 analysis 产生的 rank；系统会在写文件前交叉校验 analysis、快照、`schema_version=2`、`pendant_semantics`、摘要和 canonical 路径。任何冲突都以中文说明修复动作并拒绝，必须新建 run 并重新执行 `prepare-review`。戒指快照逐字段保存 `ring_count`、`hand_side`、`finger_position`、`ring_wear_style`；戒指人工纠正仍使用对应参数并与决策原子提交。
+普通项链、带链吊坠和戒指的生成决策必须包含完整产品确认快照。项链在本阶段只选择按最终 analysis 产生的 rank；系统会在写文件前交叉校验 analysis、快照、`schema_version=2`、`pendant_semantics`、选图审计、Top 3 摘要和 canonical 路径。生成类决策固定写 `analysis/reference_selection_constraints.json` 及其 `reference_selection_constraints_sha256`。任何冲突都以中文说明修复动作并拒绝，必须新建 run 并重新执行 `prepare-review`。戒指快照逐字段保存 `ring_count`、`hand_side`、`finger_position`、`ring_wear_style`；戒指人工纠正仍使用对应参数并与决策原子提交。
 
 `--fidelity-constraints-path` 只是 `record-decision` 的约束导入源，外部文件摘要必须与已经完成评分的最终 analysis 匹配。项链 analysis 发生变化时，旧 Top 3 与 canonical 同时失效，不得在本阶段重绑或导入后继续；必须重新 prepare。成功后 canonical 内容固定写入 `<run>/analysis/product_fidelity_constraints.json`，决策固定写该路径。
 
@@ -79,12 +87,13 @@ jewelry-on-hand generate --run-root .\outputs\auto_reference_runs\demo `
 - 最终品类是 `bracelet`、`necklace`、`pendant_necklace` 或 `ring`。
 - 输入为 `worn_source`；输出模式、1 至 3 层项链结构和多件标志合法。
 - 决策为生成类，`fidelity_confirmed: true`，项链或戒指有完整产品确认快照且与最终 analysis 完全一致；戒指另需三张双摘要未变化、内容互异的合格 Top 3。
+- `analysis/reference_selection_constraints.json` 的稳定摘要与候选、恰好三张 rank 1/2/3 Top 3 及生成类决策中的 `reference_selection_constraints_sha256` 完全一致。
 - canonical 约束存在并已确认，`product_analysis_sha256` 匹配最终 analysis；新项链为 `schema_version=2` 且 `pendant_semantics` 与 analysis/快照精确一致；决策不指向非标准路径。
 - 所选 rank 仍在 `analysis/selected_references.json` 中；非 HERO 项链 selected 路径仍在当前 run 的 `review/`，副本摘要未变化，并按最终品类、模式、长度、裁切和手持策略复评合格。
 
 产品上手图是生成阶段唯一产品身份图。戒指内部图 2 固定使用 `input/product-on-hand.jpg`，并固定保存内容一致的 `product-identity.jpg` 审计副本。细节图只用于 review、结构分析和 QC，并可用于 canonical 约束和人工 QC 对照；即使存在 `input/product-detail.<ext>`，也不得传给 AIReiter，不得作为第三张模型输入。
 
-Prompt 必须重新构建并通过 `scripts/validate_prompt_contract.py`。普通项链精确输出 `主吊坠：无。` 与 `禁止新增、补造、复制、悬挂化吊坠，也不得把珠子、跑环或其他元件改成吊坠。`；带链吊坠精确输出 `主吊坠：有；数量：1；所属层：第 N 层。` 与固定保持/禁止句。不得从自由文本极性猜测 presence。内部图 1 只提供人物、姿势、构图、背景和光线；内部图 2 只提供产品身份。禁止迁移内部图 2 中的人物、手腕、手臂、颈部、胸部、衣服、头发、脸、皮肤块或背景。
+Prompt 必须重新构建并通过 `scripts/validate_prompt_contract.py`。Prompt builder 不接收选图提示词、规范化条件或候选命中证据；选图提示词不得写入 AIReiter Prompt。已选参考图自身的场景、姿势和背景元数据仍可进入参考构图区块。普通项链精确输出 `主吊坠：无。` 与 `禁止新增、补造、复制、悬挂化吊坠，也不得把珠子、跑环或其他元件改成吊坠。`；带链吊坠精确输出 `主吊坠：有；数量：1；所属层：第 N 层。` 与固定保持/禁止句。不得从自由文本极性猜测 presence。内部图 1 只提供人物、姿势、构图、背景和光线；内部图 2 只提供产品身份。禁止迁移内部图 2 中的人物、手腕、手臂、颈部、胸部、衣服、头发、脸、皮肤块或背景。
 
 默认模型为 `gpt_image_2`。戒指首次使用人工决策 Rank；失败后切换到 Top 3 中尚未尝试的下一张，并按最新 `critical_failures` 注入指位、主石、结构、数量、接触、来源迁移或手指变形纠偏。实际 Rank、失败码和产品上手图审计副本分别写入 `reference-rank.txt`、`retry-failures.json` 和 `product-identity.jpg`。Top 3 用尽后停止。累计超过 1 次 `status != "pass"` 的 QC 后，下一次才用 `nano_banana_v2`。每次生成写入后续 `generation/NN/`，不得覆盖旧结果；非空目录缺少 `qc.json` 时必须停止处理。
 
@@ -110,9 +119,9 @@ jewelry-on-hand qc `
 
 ## 三图角色批量交付
 
-当一个 SKU 需要主图、手部佩戴图和生活场景图时，必须建立三个独立 run：`hero`、`hand_worn`、`lifestyle`。调用 `prepare-review` 时，先以飞书素材表的 `图片类型` 字段（缓存中的 `purpose_category`）做严格槽位过滤，且不得以关键词、风格分类、推荐使用方式或视觉识别结果自行推断：`hero` 只接受含“主图”的记录，`hand_worn` 只接受含“手部佩戴图”的记录，`lifestyle` 只接受含“生活场景图”的记录。各自通过类型 gate 后，才应用深色背景、品类、展示模式和保真 gate；深色背景还包括低调暗色背景、暗黑背景，以及黑色托盘、石材、岩石、石板、底座和黑绒/黑色绒布等明确支撑面，但不能把“背景干净”放宽为深色。人工视觉确认的例外按角色匹配受控素材编号：主图为 `RP000137`、`RP000144`，生活场景图为 `RP000298`；例外仅可放行对应角色的深色背景，绝不放宽图片类型。将角色写入 `analysis/output_role.json`。
+当一个 SKU 需要主图、手部佩戴图和生活场景图时，必须建立三个独立 run：`hero`、`hand_worn`、`lifestyle`。调用 `prepare-review` 时，先以飞书素材表的 `图片类型` 字段（缓存中的 `purpose_category`）做严格槽位过滤，且不得以关键词、风格分类、推荐使用方式或视觉识别结果自行推断：`hero` 只接受含“主图”的记录，`hand_worn` 只接受含“手部佩戴图”的记录，`lifestyle` 只接受含“生活场景图”的记录。将角色写入 `analysis/output_role.json`。
 
-后续 `record-decision` 必须传入同名 `--output-role`；缺失、修改或与 run 不一致都会被拒绝。三个角色均使用深色背景、产品完整清晰和无文字约束。手链或戒指的 `hand_worn` 为自然佩戴；项链的 `hand_worn` 必须单独使用 `hand_held` 模式，手指轻持链条自然垂落，不能将项链伪造为手腕佩戴。
+角色 gate 后按同一选图契约处理：有提示词时全部条件硬匹配；无提示词时只按适用品类、输出角色和关键词贴合度选择；少于 3 张阻断并报告，不自动放宽。后续 `record-decision` 必须传入同名 `--output-role`；缺失、修改或与 run 不一致都会被拒绝。三个角色均要求产品完整清晰和无文字，但不预设背景明暗。手链或戒指的 `hand_worn` 为自然佩戴；项链的 `hand_worn` 必须单独使用 `hand_held` 模式，手指轻持链条自然垂落，不能将项链伪造为手腕佩戴。
 
 戒指代码为 `ring_count_mismatch`、`hand_side_mismatch`、`finger_position_mismatch`、`ring_structure_mismatch`、`centerpiece_mismatch`、`ring_contact_error`、`finger_deformation`、`source_hand_leakage`。数量、指位、结构、戒面/主石和来源手迁移必须 `reject`；手侧、接触和手指畸变至少不得 `pass`。
 

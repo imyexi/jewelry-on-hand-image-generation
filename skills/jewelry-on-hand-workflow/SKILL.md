@@ -42,23 +42,25 @@ description: "用于编排手串、普通项链、带链吊坠和单枚常规指
 
 ## 四阶段强制流程
 
-1. `prepare-review`：以 correction-only 方式解析产品分析，先合并项链人工纠正并校验最终 analysis，再生成 `schema_version=2` canonical、选择 Top 3 和 review 包；戒指细节图只作为 review、结构分析、canonical 约束和人工 QC 对照证据；不得自动创建决策。
-2. `record-decision`：在写任何文件前交叉校验 v2 `pendant_semantics`、analysis、快照、摘要和 canonical 路径，再记录 rank、完整快照和 `fidelity_confirmed`；冲突时中文报错，必须新建 run 回到第 1 步。
-3. `generate`：在创建 generation 目录、写 prompt/submit 或调用 helper/provider 前重新执行品类、来源、模式、结构、快照、v2 canonical、rank 和参考副本 gate 后才提交模型；戒指固定以 `input/product-on-hand.jpg` 作为内部图 2，并保存内容一致的 `product-identity.jpg` 审计副本，细节图不提交给 AIReiter；失败后按未尝试 Top 3 切换 Rank，并按 QC 失败码注入纠偏。
+1. `prepare-review`：以 correction-only 方式解析产品分析，先合并项链人工纠正并校验最终 analysis，再生成 `schema_version=2` canonical；按可选 `--reference-selection-prompt` 选择 Top 3，写入选图审计和 review 包。戒指细节图只作为 review、结构分析、canonical 约束和人工 QC 对照证据；不得自动创建决策。
+2. `record-decision`：在写任何文件前交叉校验 v2 `pendant_semantics`、analysis、快照、选图审计摘要、Top 3 摘要和 canonical 路径，再记录 rank、完整快照和 `fidelity_confirmed`；冲突时中文报错，必须新建 run 回到第 1 步。
+3. `generate`：在创建 generation 目录、写 prompt/submit 或调用 helper/provider 前重新执行品类、来源、模式、结构、快照、v2 canonical、选图审计、rank 和参考副本 gate 后才提交模型；选图提示词不得写入 AIReiter Prompt。戒指固定以 `input/product-on-hand.jpg` 作为内部图 2，并保存内容一致的 `product-identity.jpg` 审计副本，细节图不提交给 AIReiter；失败后按未尝试 Top 3 切换 Rank，并按 QC 失败码注入纠偏。
 4. `qc`：写严格 JSON，完整覆盖 runtime checklist 与 `must_keep` 后才能进入最终汇总。
 
 ## 三图输出角色
 
 - 需要每个 SKU 交付三张图时，为 `hero`、`hand_worn`、`lifestyle` 分别创建独立 run；不得在同一 run 中混用角色或展示模式。
-- `prepare-review --output-role` 必须以飞书素材表的 `图片类型` 字段（本地 `purpose_category`）作为角色唯一分类来源，并把角色写入 `analysis/output_role.json`：`hero` 只能选含“主图”的候选，`hand_worn` 只能选含“手部佩戴图”的候选，`lifestyle` 只能选含“生活场景图”的候选。不得依据关键词、风格、推荐使用方式或视觉内容推断、替代或跨用图片类型；三个角色均须同时通过深色背景 gate。深色文本 gate 接受“深色/黑色/暗色背景或布景”、低调暗色背景、暗黑背景，以及黑色托盘、石材、岩石、石板、底座和黑绒/黑色绒布等明确深色支撑面；“背景干净”不能单独放行。人工视觉确认的例外按角色受控：主图为 `RP000137`、`RP000144`，生活场景图为 `RP000298`；例外只判断深色背景，绝不绕过图片类型 gate。`record-decision --output-role` 必须传入相同值，生成阶段会再次校验。
-- 三个角色都要求深色背景、产品完整清晰且无文字。`hero` 为产品主体近景；`lifestyle` 保留日常氛围但不得遮挡主体；`hand_worn` 对手链/戒指为自然佩戴，对项链必须使用 `hand_held` 并要求手指轻持链条自然垂落。
+- `prepare-review --output-role` 必须以飞书素材表的 `图片类型` 字段（本地 `purpose_category`）作为角色唯一分类来源，并把角色写入 `analysis/output_role.json`：`hero` 只能选含“主图”的候选，`hand_worn` 只能选含“手部佩戴图”的候选，`lifestyle` 只能选含“生活场景图”的候选。不得依据关键词、风格、推荐使用方式或视觉内容推断、替代或跨用图片类型。`record-decision --output-role` 必须传入相同值，生成阶段会再次校验。
+- 有提示词时，把 `--reference-selection-prompt` 按中英文逗号、分号或换行拆为去重条件；全部条件都是硬约束，每张候选必须在白名单语义字段中命中全部条件。少于 3 张合格候选时阻断，报告基础 gate 前后数量、逐条件命中数量和全部条件同时命中数量，不得自动放宽。
+- 无提示词时，只按适用品类、输出角色和参考图关键词与产品需求的贴合度选择；不得添加深色、浅色或其他系统级风格默认值。角色输出仍要求产品完整清晰且无文字；`hero` 为产品主体近景，`lifestyle` 保留日常氛围但不得遮挡主体，`hand_worn` 对手链/戒指为自然佩戴，对项链必须使用 `hand_held` 并要求手指轻持链条自然垂落。
+- 选图提示词、规范化条件和候选命中证据只进入 `analysis/reference_selection_constraints.json`。其稳定摘要 `reference_selection_constraints_sha256` 必须同时绑定候选、Top 3 和生成类 `review_decision.json`；选图提示词不得写入 AIReiter Prompt。已选参考图自身的场景、姿势和背景元数据仍可进入 `【参考构图场景】`。
 
 ## 强制 Gate
 
 1. `input/product-on-hand.jpg` 与 `analysis/product_analysis.json` 已存在。产品上手图是生成阶段唯一产品身份图。戒指可另有经过确认的 `input/product-detail.<ext>`；细节图只用于 review、结构分析和 QC，并可用于 canonical 约束和人工 QC 对照，不进入模型，也不得作为第三张模型输入。
 2. 最终品类是 `bracelet`、`necklace`、`pendant_necklace` 或 `ring`；`pendant_only`、`unknown` 停止。
 3. 输入是 `worn_source`；模式、层数、主吊坠和多件标志符合支持矩阵；现代项链 `length_category` 必须是四个合法值之一，`null` 只能停留在 correction-only。
-4. `analysis/selected_references.json` 已保存 Top 3 的 run 内副本，用户已选 rank；非 HERO 项链的路径、审核摘要和最终品类/模式/长度/裁切/手持策略仍有效。
+4. `analysis/reference_selection_constraints.json` 存在；`analysis/reference_candidates.json`、`analysis/selected_references.json` 和生成类决策中的 `reference_selection_constraints_sha256` 均等于其稳定摘要。Top 3 必须恰有互异的 rank 1、2、3，用户已选 rank；非 HERO 项链的路径、审核摘要和最终品类/模式/长度/裁切/手持策略仍有效。
 5. 默认飞书同步不存在 pending；若本 run 经批准显式使用 `--ignore-pending-enrichment`，`analysis/reference_source_snapshot.json` 必须存在，过滤范围可追溯，且不得与本地 `--classification` 混用。
 6. 生成决策有 `fidelity_confirmed: true`；项链和戒指还有与最终 analysis 完全一致的完整产品确认快照。戒指同时要求三张合格、源图/review 双 SHA-256 未变化且内容互异的 Top 3 参考图。
 7. `--fidelity-constraints-path` 只作为 `record-decision` 导入源；外部约束的 `product_analysis_sha256` 必须匹配已经完成评分的最终 analysis。项链分析发生变化时不得在决策阶段重绑旧 canonical，必须重新 `prepare-review`。
@@ -86,6 +88,8 @@ description: "用于编排手串、普通项链、带链吊坠和单枚常规指
 ## 禁止行为
 
 - 不要把自动 Top 3 当作用户确认，也不要让 `rerank` 或 `manual_reference` 进入生成。
+- 不要把选图提示词、规范化条件或审计证据传给 Prompt builder；Prompt 只读取已选参考图自身的元数据。
+- 不要在无提示词时引入背景明暗或其他系统级风格偏好，也不要在候选不足时自动放宽任一提示词条件。
 - 不要在 `record-decision` 晚期修改项链品类、来源、展示模式、层数、长度或吊坠结构；新建 run，在 `prepare-review` 评分前纠正并重选 Top 3。
 - 不要直接编辑历史决策指向外部约束；重新执行 `record-decision` 产生 canonical 决策。
 - 不要用删除分析文件、漏写 `fidelity_checks` / `checklist_checks`、空 `critical_failures` 或宽松 truthy 值降级 gate。
