@@ -7,6 +7,7 @@ from jewelry_on_hand.category_policies.base import (
     contains_affirmed_any,
     contains_any,
     contains_unnegated_any,
+    is_role_appropriate_priority_strategy,
     parse_confidence_level,
     parse_risk_level,
     parse_visibility_level,
@@ -101,7 +102,9 @@ def _evaluate_bracelet_reference(
         score_adjustment=score,
         reasons=tuple(reasons),
         risks=tuple(risks),
-        ignored_reference_jewelry=_ignored_reference_jewelry(row_text),
+        ignored_reference_jewelry=_ignored_reference_jewelry(
+            row.existing_jewelry
+        ),
         selection_tier=selection_tier or 0,
         diversity_candidate=combined_target,
     )
@@ -162,7 +165,7 @@ def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
 
 def _selection_tier(row: ReferenceRow) -> int | None:
     confidence = parse_confidence_level(row.confidence)
-    priority = _is_priority_strategy(row.default_strategy)
+    priority = is_role_appropriate_priority_strategy(row)
     relaxed = contains_any(
         row.default_strategy, ("无特殊要求不优先使用", "无特殊要求不优先")
     )
@@ -196,7 +199,16 @@ def _ignored_reference_jewelry(text: str) -> tuple[str, ...]:
     if contains_unnegated_any(text, ("项链", "吊坠", "颈链")):
         ignored.append("参考图中的项链")
     if contains_unnegated_any(
-        text, ("原有手链", "原手链", "已有手链", "旧手链", "原有手串", "已有手串")
+        text,
+        (
+            "原有手链",
+            "原有细手链",
+            "原手链",
+            "已有手链",
+            "旧手链",
+            "原有手串",
+            "已有手串",
+        ),
     ):
         ignored.append("参考图中的原有手链")
     return tuple(ignored)

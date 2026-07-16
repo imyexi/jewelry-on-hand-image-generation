@@ -2230,7 +2230,7 @@ def _ring_reference_metadata(rank, source):
         "bracelet_applicability": "",
         "default_strategy": "常规可优先使用",
         "style_category": "自然光手部特写",
-        "scene_keywords": "手背 手指近景",
+        "scene_keywords": "深色背景，手背手指近景",
         "jewelry_type": "戒指",
         "recommended_usage": "戒指真人佩戴展示",
         "notes": "正面视角，主体居中，手指完整，无文字或 UI，无裁切",
@@ -2277,7 +2277,7 @@ def _necklace_reference_metadata(rank, source, *, product_type, display_mode):
         "bracelet_applicability": "否",
         "default_strategy": "常规可优先使用",
         "style_category": "自然光珠宝近景",
-        "scene_keywords": "自然光",
+        "scene_keywords": "深色背景，自然光",
         "jewelry_type": "项链",
         "recommended_usage": (
             "双手捏持，完整链条自然垂落，具有真实接触"
@@ -2338,7 +2338,7 @@ def _ready_audited_run(tmp_path, *, role="hand_worn", reference_suffix=".jpg"):
         bracelet_applicability="是",
         default_strategy="常规可优先使用",
         style_category="暗调闪光",
-        scene_keywords="车内",
+        scene_keywords="深色背景，车内",
         jewelry_type="手链/手串",
         recommended_usage="近景手腕",
         notes="正面视角，主体居中，无文字或 UI",

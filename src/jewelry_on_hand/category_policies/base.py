@@ -107,6 +107,19 @@ def contains_any(text: str, terms: Iterable[str]) -> bool:
     return any(term.lower() in lowered for term in terms)
 
 
+def is_role_appropriate_priority_strategy(row: "ReferenceRow") -> bool:
+    strategy = row.default_strategy
+    standard_priority = contains_any(
+        strategy,
+        ("优先使用", "可优先", "优先"),
+    ) and not contains_any(strategy, ("不优先", "不建议", "谨慎使用"))
+    lifestyle_non_wrist = (
+        row.purpose_category.strip() == "生活场景图"
+        and contains_any(strategy, ("非手腕构图，默认不优先", "非手腕构图"))
+    )
+    return standard_priority or lifestyle_non_wrist
+
+
 def contains_unnegated_any(text: str, terms: Iterable[str]) -> bool:
     lowered = text.lower()
     term_list = tuple(terms)

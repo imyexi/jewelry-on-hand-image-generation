@@ -16,11 +16,15 @@
 - `lifestyle` 只接收“生活场景图”；
 - 关键词、风格、推荐使用方式和视觉判断不得替代该字段。
 
+角色匹配后继续执行深色背景硬 gate。明确的深色、黑色、暗色背景/布景、低调暗色背景、黑色支撑面或深色沥青路面可以通过；`背景干净` 不能单独放行。`非手腕构图，默认不优先` 在 `lifestyle` 角色下按角色匹配候选处理，不得把半身、行走或环境生活场景按手串品类误判为不合格。人工确认的 `RP000298` 只豁免深色背景判定，不得绕过 `图片类型` gate 和其他硬 gate。
+
 默认任一 `pending_enrichment=true` 都阻断。用户明确批准临时排除待补全记录时才可传 `--ignore-pending-enrichment`；系统仍完整分页同步并把过滤审计写入 `analysis/reference_source_snapshot.json`，不写回飞书。显式传入 `--classification <xlsx>` 时，本地 Excel 作为历史兼容导入源并优先于飞书；它与 `--ignore-pending-enrichment` 互斥。
 
 ## 1. `prepare-review`
 
 先准备产品上手原图和产品分析 JSON；戒指可额外提供细节图，但细节图只用于 review、结构分析和 QC。命令必须显式传入支持角色：
+
+如果飞书为同一件产品提供多张真人产品上手图，先确认它们确属同一件产品，再仅做缩放、留白和确定性拼接，形成同一件产品的多视角身份图。不得使用 AI 修改产品像素，不得使用白底或平铺图补齐视角。审计必须记录源附件 token、源 SHA-256、拼接顺序和输出 SHA-256；拼接图仍作为唯一 `--product-image`，不能拆成多件产品或多张模型输入。
 
 ```powershell
 jewelry-on-hand prepare-review `

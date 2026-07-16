@@ -218,6 +218,72 @@ def test_revised_documents_preserve_necklace_ring_fidelity_and_feishu_audit() ->
         assert phrase in combined
 
 
+def test_reference_selection_documents_lock_dark_background_and_lifestyle_semantics() -> None:
+    combined = "\n".join(
+        _document_text(path)
+        for path in (
+            WORKFLOW_SKILL / "SKILL.md",
+            PORTABLE_WORKFLOW,
+            REFERENCE_COMPOSITION_CONTRACT,
+            MANUAL_WORKFLOW,
+            FEISHU_REFERENCE_SOURCE,
+        )
+    )
+
+    for phrase in (
+        "深色背景硬 gate",
+        "`背景干净` 不能单独放行",
+        "`RP000298` 只豁免深色背景判定",
+        "不得绕过 `图片类型` gate",
+        "`非手腕构图，默认不优先` 在 `lifestyle` 角色下按角色匹配候选处理",
+    ):
+        assert phrase in combined
+
+
+def test_reference_snapshot_documents_isolate_existing_jewelry_and_scene_fields() -> None:
+    combined = "\n".join(
+        _document_text(path)
+        for path in (
+            REFERENCE_COMPOSITION_CONTRACT,
+            FEISHU_REFERENCE_SOURCE,
+            TROUBLESHOOTING,
+            WORKFLOW_DESIGN,
+        )
+    )
+
+    for phrase in (
+        "`existing_jewelry`（飞书 `原有首饰类型`）是原首饰判断的唯一来源",
+        "不得从 `jewelry_type`、适用品类或历史备注推断原首饰",
+        "`background` 和 `lighting` 只抽取各自语义片段",
+        "不得拼入整段备注",
+        "候选签名与最终快照使用同一抽取结果",
+    ):
+        assert phrase in combined
+
+
+def test_product_identity_documents_define_auditable_multiview_assembly() -> None:
+    combined = "\n".join(
+        _document_text(path)
+        for path in (
+            PORTABLE_WORKFLOW,
+            PROMPT_CONTRACT,
+            TROUBLESHOOTING,
+            MANUAL_WORKFLOW,
+            WORKFLOW_DESIGN,
+        )
+    )
+
+    for phrase in (
+        "多张真人产品上手图",
+        "同一件产品的多视角身份图",
+        "确定性拼接",
+        "不得使用 AI 修改产品像素",
+        "不得使用白底或平铺图补齐视角",
+        "源附件 token、源 SHA-256、拼接顺序和输出 SHA-256",
+    ):
+        assert phrase in combined
+
+
 @pytest.mark.parametrize("document", [MANUAL_WORKFLOW, PORTABLE_WORKFLOW])
 def test_documented_qc_pass_command_omits_empty_critical_failures_flag(
     document: Path,
@@ -2344,6 +2410,32 @@ def _modern_legacy_analysis(product_type: str) -> dict[str, object]:
             }
         )
     return data
+
+
+def test_portable_inspector_按模型默认值比较现代手串确认快照() -> None:
+    analysis = _modern_legacy_analysis("bracelet")
+    for field_name in (
+        "length_category",
+        "has_pendant",
+        "pendant_count",
+        "pendant_layer",
+        "pendant_position",
+        "pendant_orientation",
+        "connection_structure",
+    ):
+        analysis.pop(field_name, None)
+    product = ProductAnalysis.from_dict(analysis)
+    decision = {
+        "action": "generate_selected",
+        "selected_ranks": [1],
+        "fidelity_confirmed": True,
+        "confirmation_snapshot": ProductConfirmationSnapshot.from_analysis(
+            product
+        ).to_dict(),
+    }
+    inspector = runpy.run_path(str(ARTIFACT_INSPECTOR))
+
+    assert inspector["_validate_modern_decision"](decision, analysis) == []
 
 
 def test_legacy_read_only_modern_bracelet_生成决策无确认快照时库与_inspector_cli_通过(

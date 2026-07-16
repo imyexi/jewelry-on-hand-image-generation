@@ -17,7 +17,7 @@
 
 从包含 `pyproject.toml` 与 `src/jewelry_on_hand/` 的项目根目录运行。设置 UTF-8，并准备：
 
-- 一张产品上手原图；
+- 一张产品上手原图，或同一件产品的多张真人产品上手图；
 - 产品分析 JSON；
 - 戒指可选的产品细节图（只供 review、结构分析和 QC）；
 - `hand_worn` 或 `lifestyle` 角色；
@@ -25,11 +25,15 @@
 
 产品分析必须明确 `bracelet`、`necklace`、`pendant_necklace`、`ring`、`pendant_only` 或 `unknown`；项链需要 `schema_version=2` canonical 与 `pendant_semantics`；戒指需要 `ring_count`、`hand_side`、`finger_position`、`ring_wear_style`。
 
+多张真人产品上手图只有在人工确认属于同一件产品时，才可通过缩放、留白和确定性拼接形成同一件产品的多视角身份图。不得使用 AI 修改产品像素，不得使用白底或平铺图补齐视角。把源附件 token、源 SHA-256、拼接顺序和输出 SHA-256 写入 `output/` 审计；最终只把拼接图作为一张产品身份输入。
+
 ## 3. 参考图来源与审计
 
 默认同步飞书。`图片类型` 字段是角色唯一来源：`hand_worn` 只选“手部佩戴图”，`lifestyle` 只选“生活场景图”。关键词、风格、推荐使用方式和视觉判断不能替代图片类型。
 
 任一 `pending_enrichment=true` 默认阻断。用户明确批准临时批次时才可用 `--ignore-pending-enrichment`；命令仍完整分页同步、排除 pending、保存 `analysis/reference_source_snapshot.json`，且不写回飞书。显式传 `--classification <xlsx>` 时，本地 Excel 作为导入源并优先；不得与 ignore pending 混用。
+
+角色匹配后执行深色背景硬 gate；`背景干净` 不能单独放行。`非手腕构图，默认不优先` 在 `lifestyle` 角色下按角色匹配候选处理，保留半身、行走和环境构图。`RP000298` 只豁免深色背景判定，不得绕过 `图片类型` gate 或其他硬 gate。
 
 ## 4. `prepare-review`
 

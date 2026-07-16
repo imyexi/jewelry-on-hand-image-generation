@@ -8,6 +8,7 @@ from jewelry_on_hand.category_policies.base import (
     SHARED_BASIC_QC_ITEMS,
     contains_any,
     contains_unnegated_any,
+    is_role_appropriate_priority_strategy,
     parse_confidence_level,
     parse_risk_level,
     parse_visibility_level,
@@ -249,9 +250,7 @@ def _target_finger_visible(
 
 def _selection_tier(row: ReferenceRow, risks: list[str]) -> int | None:
     confidence = parse_confidence_level(row.confidence)
-    priority = contains_any(row.default_strategy, ("优先使用", "可优先", "优先")) and not contains_any(
-        row.default_strategy, ("不优先", "不建议", "谨慎使用")
-    )
+    priority = is_role_appropriate_priority_strategy(row)
     relaxed = contains_any(
         row.default_strategy, ("无特殊要求不优先使用", "无特殊要求不优先")
     )

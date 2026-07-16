@@ -31,7 +31,7 @@ def row(index, exists=True, strategy="常规可优先使用", file_name=None, **
         "bracelet_applicability": "是：可用于手链/手串",
         "default_strategy": strategy,
         "style_category": "暗调闪光",
-        "scene_keywords": "车内 闪光",
+        "scene_keywords": "深色背景 车内 闪光",
         "jewelry_type": "手链/手串",
         "recommended_usage": "近景手腕",
         "notes": "手腕/前臂露出面积足",
@@ -116,6 +116,69 @@ def test_角色硬门只读取飞书用途分类字段():
 
     with pytest.raises(ValueError, match="手部佩戴图"):
         select_top_references(product(), [wrong_type], OutputRole.HAND_WORN)
+
+
+def test_生活场景深色背景硬门排除明亮候选():
+    bright = replace(
+        row(2),
+        purpose_category="生活场景图",
+        style_category="清透自然光",
+        scene_keywords="明亮室内，浅色床边",
+        framing="上半身",
+        visible_body_regions="上半身、左手腕、前臂",
+        pose_keywords="上半身侧坐；左前臂自然抬起",
+    )
+
+    with pytest.raises(ValueError, match="生活场景图.*深色背景"):
+        scoring_module.select_reference_candidates(
+            product(),
+            [bright],
+            OutputRole.LIFESTYLE,
+        )
+
+
+def test_生活场景把非手腕构图策略视为角色匹配优先():
+    lifestyle = replace(
+        row(3),
+        purpose_category="生活场景图",
+        default_strategy="非手腕构图，默认不优先",
+        scene_keywords="低调暗色背景，黑色上衣半身，手腕完整露出",
+        framing="上半身",
+        visible_body_regions="上半身、右手腕、右前臂",
+        pose_keywords="上半身正面站立；右手臂自然下垂",
+        hand_side="右手",
+        hand_orientation="手背斜向镜头",
+    )
+
+    result = scoring_module.select_reference_candidates(
+        product(),
+        [lifestyle],
+        OutputRole.LIFESTYLE,
+    )
+
+    assert [item.row.index for item in result.candidates] == [3]
+    assert any("生活场景" in reason for reason in result.candidates[0].reason)
+    assert not any("不优先" in risk for risk in result.candidates[0].risk)
+
+
+def test_深色沥青路面可作为明确深色背景支撑面():
+    lifestyle = replace(
+        row(4),
+        purpose_category="生活场景图",
+        scene_keywords="户外行走，手腕完整露出",
+        notes="正面视角；主体居中；深色沥青路面为背景；无文字或平台界面",
+        framing="上半身",
+        visible_body_regions="上半身、左手腕、左前臂",
+        pose_keywords="上半身行走；左前臂自然下垂",
+    )
+
+    result = scoring_module.select_reference_candidates(
+        product(),
+        [lifestyle],
+        OutputRole.LIFESTYLE,
+    )
+
+    assert [item.row.index for item in result.candidates] == [4]
 
 
 def test_快照不完整行在评分与低重复选择前排除并记录原因():
@@ -353,9 +416,9 @@ def test_select_top_references_filters_missing_and_scores_priority():
 def test_候选保留全部硬门通过项而选择仅限十分窗口():
     rows = [
         row(1),
-        row(2, style_category="清晰自然", scene_keywords="自然光 留白", notes="手腕露出面积足"),
+        row(2, style_category="清晰自然", scene_keywords="深色背景 自然光 留白", notes="手腕露出面积足"),
         row(3, recommended_usage="佩戴展示 近景手腕"),
-        row(4, style_category="清晰自然", scene_keywords="自然光 留白", notes="手腕露出面积足"),
+        row(4, style_category="清晰自然", scene_keywords="深色背景 自然光 留白", notes="手腕露出面积足"),
     ]
     selected, candidates = select_top_references(product(), rows, OutputRole.HAND_WORN)
     assert len(selected) == 1
@@ -373,7 +436,8 @@ def test_candidate_pool_keeps_clean_rows_and_adds_combined_jewelry_for_batch_div
         2,
         file_name="combined.jpg",
         jewelry_type="手链、项链、戒指组合",
-        scene_keywords="对镜 室内 自然光",
+        existing_jewelry="左手腕原有手链、右手食指戒指、颈部项链",
+        scene_keywords="深色背景 对镜 室内 自然光",
         recommended_usage="对镜手腕构图",
     )
 
@@ -526,7 +590,11 @@ def test_select_top_references_relaxes_to_combined_target_jewelry_after_strategy
         [
             row(1, confidence="低"),
             row(2, strategy="谨慎使用"),
-            row(3, jewelry_type="手链、项链、戒指组合"),
+            row(
+                3,
+                jewelry_type="手链、项链、戒指组合",
+                existing_jewelry="左手腕原有手链、右手食指戒指、颈部项链",
+            ),
             row(4, jewelry_type="项链"),
         ],
         OutputRole.HAND_WORN,
@@ -545,6 +613,7 @@ def test_score_reference_records_risks_and_ignored_reference_jewelry():
             5,
             strategy="无特殊要求不优先使用",
             jewelry_type="手链/手串、戒指、项链",
+            existing_jewelry="左手腕原有手链、右手食指戒指、颈部项链",
             notes="叠戴复杂，存在裁切风险，参考图中有原有手链",
         ),
     )
@@ -554,6 +623,50 @@ def test_score_reference_records_risks_and_ignored_reference_jewelry():
     assert any("戒指" in item for item in scored.ignored_reference_jewelry)
     assert any("项链" in item for item in scored.ignored_reference_jewelry)
     assert any("原有手链" in item for item in scored.ignored_reference_jewelry)
+
+
+def test_手串策略不把适用品类误判为画面已有首饰():
+    scored = score_reference(
+        product(),
+        row(
+            6,
+            jewelry_type="手串、手链、戒指、项链、通用",
+            existing_jewelry="无原首饰，左手腕为空白佩戴位置",
+            notes="画面中没有戒指、项链或原有手链",
+        ),
+    )
+
+    assert scored.ignored_reference_jewelry == ()
+
+
+def test_手串策略不从历史备注的适用品类推断已有首饰():
+    scored = score_reference(
+        product(),
+        row(
+            7,
+            existing_jewelry="无原首饰，右手腕为空白佩戴位置",
+            notes="素材编号：RP000119；适用品类：手串、手链、戒指、项链、通用",
+        ),
+    )
+
+    assert scored.ignored_reference_jewelry == ()
+
+
+def test_手串策略识别原有细手链和颈部项链为应移除首饰():
+    scored = score_reference(
+        product(),
+        row(
+            8,
+            jewelry_type="项链、手串、手链、通用",
+            existing_jewelry=(
+                "唯一替换目标为右手腕靠近手掌的手串；"
+                "右手腕靠近前臂的原有细手链和颈部项链为其他应移除首饰"
+            ),
+        ),
+    )
+
+    assert any("原有手链" in item for item in scored.ignored_reference_jewelry)
+    assert any("项链" in item for item in scored.ignored_reference_jewelry)
 
 
 def test_clear_natural_match_requires_specific_visual_signal():
@@ -1148,7 +1261,7 @@ def test_构图签名区分背景光线与唯一替换目标且保持稳定(tmp_
     baseline = composition_signature_for_row(reference, OutputRole.HAND_WORN)
     same = composition_signature_for_row(reference, OutputRole.HAND_WORN)
     background = composition_signature_for_row(
-        replace(reference, scene_keywords="白墙，室内"),
+        replace(reference, scene_keywords="白墙背景，室内"),
         OutputRole.HAND_WORN,
     )
     lighting = composition_signature_for_row(

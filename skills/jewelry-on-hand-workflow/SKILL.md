@@ -30,6 +30,8 @@ description: "用于需要在真人手部佩戴图或生活场景参考底图中
 
 飞书素材表的 `图片类型` 字段是角色唯一来源：`hand_worn` 仅接收“手部佩戴图”，`lifestyle` 仅接收“生活场景图”。不得用关键词、视觉推断、推荐使用方式或风格字段替代。默认飞书同步只读；只有显式传入 `--classification` 时才优先使用本地 Excel。
 
+两个角色都执行深色背景硬 gate；`背景干净` 不能单独放行。`lifestyle` 中的非手腕半身、行走或环境构图是有效角色语义，不得因品类是手串而强制降级为腕部近景。人工例外 `RP000298` 只豁免深色背景判定，不得绕过 `图片类型` gate、品类、展示模式、唯一替换位置或产品可见性检查。
+
 ## 四阶段强制流程
 
 严格按 `prepare-review -> record-decision -> generate -> qc` 执行，不得跳步、补写或倒序。
@@ -44,7 +46,7 @@ description: "用于需要在真人手部佩戴图或生活场景参考底图中
 - 产品分析五个现代分类字段完整；最终品类、来源、展示模式、层数和结构合法。
 - 新项链 canonical 为 `schema_version=2`，包含 `pendant_semantics`；分析、完整产品确认快照与 canonical 完全一致。
 - 戒指参考审核覆盖左右手、可见手指、手部朝向、戒面可见度、手指分离度、手指遮挡风险；关键失败包括 `ring_count_mismatch`、`hand_side_mismatch`、`finger_position_mismatch`、`ring_structure_mismatch`、`centerpiece_mismatch`、`ring_contact_error`、`finger_deformation`、`source_hand_leakage`。
-- 产品上手图是生成阶段唯一产品身份图；细节图只用于 review、结构分析和 QC，不得作为第三张模型输入。
+- 产品上手图是生成阶段唯一产品身份来源；同一件产品有多张真人上手图时，可按审计规则确定性拼成一张多视角身份图。不得使用 AI 修改产品像素，不得用白底或平铺图补视角；细节图仍只用于 review、结构分析和 QC，不得作为第三张模型输入。
 - `--fidelity-constraints-path` 只作为 `record-decision` 的导入源；canonical 必须落在 `analysis/product_fidelity_constraints.json`，非标准路径或摘要不匹配时拒绝。
 - 生成决策必须绑定单一 rank、`fidelity_confirmed=true`、确认快照摘要和不变的源/review 文件 SHA。
 - Prompt 必须从确认快照取构图，只能修改允许区域；任何五输入或 manifest 摘要不一致都在 provider 调用前停止。

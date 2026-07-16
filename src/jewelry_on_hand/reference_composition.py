@@ -474,8 +474,49 @@ def build_candidate_snapshot(
         target_product_count=1,
     )
     clothing = _join_review_values(collar_type, clothing_occlusion)
-    background = _join_review_values(scene_keywords, notes)
-    lighting = _join_review_values(style_category, notes)
+    background_markers = (
+        "背景",
+        "布景",
+        "布面",
+        "路面",
+        "托盘",
+        "石材",
+        "岩石",
+        "石板",
+        "底座",
+        "绒布",
+    )
+    background = _required_review_value(
+        _join_unique_review_values(
+            *_extract_matching_review_segments(
+                scene_keywords,
+                background_markers,
+            ),
+            *_extract_matching_review_segments(
+                notes,
+                background_markers,
+            ),
+        ),
+        "background",
+    )
+    lighting = _join_review_values(
+        style_category,
+        *_extract_matching_review_segments(
+            notes,
+            (
+                "光线",
+                "光影",
+                "自然光",
+                "侧光",
+                "逆光",
+                "柔光",
+                "闪光",
+                "照明",
+                "曝光",
+                "阴影",
+            ),
+        ),
+    )
     signature = _composition_signature(
         output_role=role,
         framing=framing,
@@ -1569,6 +1610,12 @@ def _join_review_values(*values: str) -> str:
     return "；".join(value.strip() for value in values if value.strip())
 
 
+def _join_unique_review_values(*values: str) -> str:
+    return "；".join(
+        dict.fromkeys(value.strip() for value in values if value.strip())
+    )
+
+
 def _extract_review_segment(
     value: str,
     markers: Sequence[str],
@@ -1583,6 +1630,17 @@ def _extract_review_segment(
         if any(marker in segment for marker in markers):
             return segment
     _prepare_review_error(field_name, "同步描述中没有可确认的信息")
+
+
+def _extract_matching_review_segments(
+    value: str,
+    markers: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(
+        segment.strip()
+        for segment in re.split(r"[，,;；。]+", value)
+        if segment.strip() and any(marker in segment for marker in markers)
+    )
 
 
 def _parse_product_visibility(value: str) -> bool:

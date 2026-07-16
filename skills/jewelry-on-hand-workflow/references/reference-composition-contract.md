@@ -60,13 +60,14 @@
 
 ## 候选构建
 
-候选只从已经同步并通过硬 gate 的飞书字段构建：
+候选只从已经同步并通过硬 gate 的飞书字段构建。`图片类型` 先确定角色，随后执行品类、展示模式、唯一替换位置、产品可见性、文字/UI 和深色背景硬 gate；`背景干净` 不能单独放行。人工确认的 `RP000298` 只豁免深色背景判定，不得绕过 `图片类型` gate 或其他硬 gate。`非手腕构图，默认不优先` 在 `lifestyle` 角色下按角色匹配候选处理，不能因品类策略被扣成腕部近景优先。
 
 - 景别来自 `framing`；身体区域来自 `visible_body_regions`；
 - 姿势来自 `pose_keywords`、`hand_side`、`hand_orientation`；
 - 服装来自 `collar_type` 与服装遮挡风险；
-- 背景、光线、机位、主体位置和文字/UI 风险来自场景、风格与 notes；
-- 原首饰与清除项来自 `existing_jewelry`、`ignored_reference_jewelry`；
+- 机位、主体位置和文字/UI 风险从对应语义片段提取；
+- `background` 和 `lighting` 只抽取各自语义片段，不得拼入整段备注、素材编号、历史图片类型、适用品类或文字风险；候选签名与最终快照使用同一抽取结果；
+- `existing_jewelry`（飞书 `原有首饰类型`）是原首饰判断的唯一来源，`ignored_reference_jewelry` 只承接由该字段解析出的清除项；不得从 `jewelry_type`、适用品类或历史备注推断原首饰；
 - 展示面积来自 `product_visibility`。
 
 任何必需字段为空、描述互相冲突、风险无法判断、目标不唯一或展示面积不足时，停在 `prepare-review` 并返回中文错误；不得在 Prompt 阶段猜测。

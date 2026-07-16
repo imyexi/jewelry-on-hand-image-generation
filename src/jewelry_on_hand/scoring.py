@@ -11,6 +11,7 @@ from jewelry_on_hand.category_policies.base import (
     ControlledLevel,
     contains_any as _contains_any,
     contains_unnegated_any as _contains_unnegated_any,
+    is_role_appropriate_priority_strategy,
     parse_confidence_level,
 )
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
@@ -33,6 +34,28 @@ STILL_OBJECT_EARRING_PURPOSE_POINTS = -50
 CROP_RISK_POINTS = -15
 DIVERSITY_SCORE_WINDOW = 10
 DEFAULT_AUDIT_SEED = "reference-replacement-v1"
+DARK_BACKGROUND_TEXT_TERMS = (
+    "深色背景",
+    "黑色背景",
+    "暗色背景",
+    "低调暗色背景",
+    "暗黑背景",
+    "黑背景",
+    "深色布景",
+    "深色布面",
+    "黑色布景",
+    "黑色托盘",
+    "黑色石材",
+    "黑色岩石",
+    "黑色石板",
+    "黑色底座",
+    "深色沥青",
+    "深色路面",
+    "黑色路面",
+    "黑绒",
+    "黑色绒布",
+)
+USER_APPROVED_DARK_LIFESTYLE_REFERENCE_IDS = frozenset({"RP000298"})
 
 
 @dataclass(frozen=True)
@@ -124,7 +147,10 @@ def select_reference_candidates(
     ]
     if not role_rows:
         raise ValueError(f"没有飞书用途分类为{role.display_name}的参考图")
-    filtered_rows = _filter_reference_rows(product, role_rows)
+    dark_role_rows = [row for row in role_rows if _has_dark_background_signal(row)]
+    if not dark_role_rows:
+        raise ValueError(f"{role.display_name}没有符合深色背景要求的参考图")
+    filtered_rows = _filter_reference_rows(product, dark_role_rows)
     ready_rows: list[ReferenceRow] = []
     readiness_exclusions: list[ReferenceReadinessExclusion] = []
     for row in filtered_rows:
@@ -198,6 +224,18 @@ def composition_signature_for_row(
     row: ReferenceRow, output_role: OutputRole | str
 ) -> str:
     role = require_scene_replacement_role(output_role, stage="构图签名")
+    background_markers = (
+        "背景",
+        "布景",
+        "布面",
+        "路面",
+        "托盘",
+        "石材",
+        "岩石",
+        "石板",
+        "底座",
+        "绒布",
+    )
     visible_body_regions = _signature_review_values(row.visible_body_regions)
     pose = _reference_composition.ReferencePose(
         body=_signature_pose_segment(
@@ -225,13 +263,36 @@ def composition_signature_for_row(
         output_role=role,
         framing=_signature_value(row.framing),
         pose=pose,
-        background=_reference_composition._join_review_values(
-            _signature_value(row.scene_keywords),
-            _signature_value(row.notes),
+        background=_reference_composition._required_review_value(
+            _reference_composition._join_unique_review_values(
+                *_reference_composition._extract_matching_review_segments(
+                    row.scene_keywords,
+                    background_markers,
+                ),
+                *_reference_composition._extract_matching_review_segments(
+                    row.notes,
+                    background_markers,
+                ),
+            ),
+            "background",
         ),
         lighting=_reference_composition._join_review_values(
             _signature_value(row.style_category),
-            _signature_value(row.notes),
+            *_reference_composition._extract_matching_review_segments(
+                row.notes,
+                (
+                    "光线",
+                    "光影",
+                    "自然光",
+                    "侧光",
+                    "逆光",
+                    "柔光",
+                    "闪光",
+                    "照明",
+                    "曝光",
+                    "阴影",
+                ),
+            ),
         ),
         replacement_target=replacement_target,
     )
@@ -340,9 +401,12 @@ def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredRefere
         score += WEARING_DISPLAY_POINTS
         reason.append("适合佩戴展示")
 
-    if _is_priority_strategy(row.default_strategy):
+    if is_role_appropriate_priority_strategy(row):
         score += PRIORITY_STRATEGY_POINTS
-        reason.append("默认策略为优先使用")
+        if _is_lifestyle_non_wrist_strategy(row):
+            reason.append("生活场景角色匹配非手腕构图策略")
+        else:
+            reason.append("默认策略为优先使用")
 
     if parse_confidence_level(row.confidence) is ControlledLevel.HIGH:
         score += HIGH_CONFIDENCE_POINTS
@@ -379,7 +443,9 @@ def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredRefere
         score += CLOSE_UP_POINTS
         reason.append("近景构图匹配")
 
-    if _is_non_priority(row.default_strategy):
+    if _is_non_priority(
+        row.default_strategy
+    ) and not _is_lifestyle_non_wrist_strategy(row):
         score += NON_PRIORITY_POINTS
         risk.append("默认策略提示不优先使用")
 
@@ -468,6 +534,27 @@ def _has_wearing_display_signal(row: ReferenceRow) -> bool:
 
 def _is_priority_strategy(text: str) -> bool:
     return _contains_any(text, ("优先使用", "可优先", "优先")) and not _is_non_priority(text)
+
+
+def _is_lifestyle_non_wrist_strategy(row: ReferenceRow) -> bool:
+    return (
+        row.purpose_category.strip() == OutputRole.LIFESTYLE.display_name
+        and _contains_any(
+            row.default_strategy,
+            ("非手腕构图，默认不优先", "非手腕构图"),
+        )
+    )
+
+
+def _has_dark_background_signal(row: ReferenceRow) -> bool:
+    if _contains_any(row.combined_text(), DARK_BACKGROUND_TEXT_TERMS):
+        return True
+    if row.purpose_category.strip() != OutputRole.LIFESTYLE.display_name:
+        return False
+    return any(
+        f"素材编号：{reference_id}" in row.notes
+        for reference_id in USER_APPROVED_DARK_LIFESTYLE_REFERENCE_IDS
+    )
 
 
 def _is_non_priority(text: str) -> bool:

@@ -133,7 +133,7 @@ def _write_reference_snapshot_artifacts(
             bracelet_applicability="是",
             default_strategy="常规可优先使用",
             style_category="暗调闪光",
-            scene_keywords="车内",
+            scene_keywords="深色背景，车内",
             jewelry_type="手链/手串",
             recommended_usage="近景手腕",
             notes="正面视角，主体居中，无文字或 UI",

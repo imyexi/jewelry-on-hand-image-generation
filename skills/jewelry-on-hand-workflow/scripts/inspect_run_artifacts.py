@@ -51,6 +51,17 @@ SNAPSHOT_FIELDS = (
     "connection_structure",
     "is_independent_multi_item",
 )
+ANALYSIS_CONFIRMATION_DEFAULTS = {
+    "layer_count": 1,
+    "length_category": None,
+    "has_pendant": False,
+    "pendant_count": 0,
+    "pendant_layer": None,
+    "pendant_position": None,
+    "pendant_orientation": None,
+    "connection_structure": None,
+    "is_independent_multi_item": False,
+}
 RING_SNAPSHOT_FIELDS = (
     "ring_count",
     "hand_side",
@@ -1074,7 +1085,15 @@ def _validate_product_analysis_data(data: dict[str, Any]) -> list[str]:
     elif product_type == "bracelet" and display_mode != "worn":
         errors.append(_analysis_error("手串/手链与手持展示模式不兼容"))
 
-    errors.extend(_validate_product_structure(data, product_type, _analysis_error))
+    normalized_structure = dict(ANALYSIS_CONFIRMATION_DEFAULTS)
+    normalized_structure.update(data)
+    errors.extend(
+        _validate_product_structure(
+            normalized_structure,
+            product_type,
+            _analysis_error,
+        )
+    )
     return errors
 
 
@@ -1411,7 +1430,10 @@ def _validate_modern_decision(
             errors.append("review/review_decision.json：戒指确认快照 ring_wear_style 必须是 finger_base")
 
     for field_name in required_snapshot_fields:
-        expected = analysis.get(field_name)
+        expected = analysis.get(
+            field_name,
+            ANALYSIS_CONFIRMATION_DEFAULTS.get(field_name),
+        )
         actual = snapshot.get(field_name)
         if actual != expected:
             errors.append(
