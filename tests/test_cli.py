@@ -12,6 +12,7 @@ from jewelry_on_hand.models import (
 )
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
 from jewelry_on_hand.qc import build_qc_checklist, qc_check_id
+from jewelry_on_hand.reference_selection import reference_selection_sha256
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
@@ -93,6 +94,18 @@ def test_prepare_review_help_limits_product_detail_image_to_review_context(capsy
     normalized_help_text = " ".join(help_text.split())
     assert "仅用于 review、结构分析、canonical 约束和人工 QC" in normalized_help_text
     assert "不进入模型" in help_text
+
+
+def test_prepare_review_help_describes_reference_selection_prompt(capsys):
+    from jewelry_on_hand.cli import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(["prepare-review", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--reference-selection-prompt" in help_text
+    assert "全部命中" in " ".join(help_text.split())
 
 
 def make_catalog(path, ref):
@@ -308,6 +321,110 @@ def test_prepare_review_cli_creates_review_html(tmp_path, monkeypatch):
     assert fidelity["review_status"] in {"pending", "not_applicable"}
     assert read_json(run_root / "analysis" / "product_analysis.json")["product_type"] == "手链/手串"
     assert not (run_root / "review" / "review_decision.json").exists()
+
+
+def test_prepare_review_cli_persists_prompt_audit_and_binds_top_three(
+    tmp_path,
+    monkeypatch,
+):
+    from jewelry_on_hand.cli import main
+
+    product = tmp_path / "product.jpg"
+    product.write_bytes(b"product")
+    ref = tmp_path / "ref.jpg"
+    ref.write_bytes(b"ref")
+    catalog = tmp_path / "catalog.xlsx"
+    make_catalog(catalog, ref)
+    analysis = tmp_path / "analysis.json"
+    make_analysis(analysis)
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        lambda config: __import__(
+            "jewelry_on_hand.reference_catalog",
+            fromlist=["load_reference_rows"],
+        ).load_reference_rows(catalog),
+    )
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product),
+            "--analysis-json",
+            str(analysis),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "prompt-success",
+            "--output-role",
+            "hand_worn",
+            "--reference-selection-prompt",
+            "车内；闪光；近景",
+        ]
+    ) == 0
+
+    run_root = tmp_path / "runs" / "prompt-success"
+    audit = read_json(
+        run_root / "analysis" / "reference_selection_constraints.json"
+    )
+    expected_sha256 = reference_selection_sha256(audit)
+    assert audit["normalized_conditions"] == ["车内", "闪光", "近景"]
+    for file_name in ("reference_candidates.json", "selected_references.json"):
+        records = read_json(run_root / "analysis" / file_name)
+        assert len(records) == 3
+        assert {
+            item["reference_selection_constraints_sha256"] for item in records
+        } == {expected_sha256}
+
+
+def test_prepare_review_cli_writes_prompt_audit_before_shortage_error(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from jewelry_on_hand.cli import main
+
+    product = tmp_path / "product.jpg"
+    product.write_bytes(b"product")
+    ref = tmp_path / "ref.jpg"
+    ref.write_bytes(b"ref")
+    catalog = tmp_path / "catalog.xlsx"
+    make_catalog(catalog, ref)
+    analysis = tmp_path / "analysis.json"
+    make_analysis(analysis)
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        lambda config: __import__(
+            "jewelry_on_hand.reference_catalog",
+            fromlist=["load_reference_rows"],
+        ).load_reference_rows(catalog),
+    )
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product),
+            "--analysis-json",
+            str(analysis),
+            "--output-root",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "prompt-shortage",
+            "--output-role",
+            "hand_worn",
+            "--reference-selection-prompt",
+            "浅色背景；自然光",
+        ]
+    ) == 1
+
+    run_root = tmp_path / "runs" / "prompt-shortage"
+    audit = read_json(
+        run_root / "analysis" / "reference_selection_constraints.json"
+    )
+    assert audit["normalized_conditions"] == ["浅色背景", "自然光"]
+    assert audit["candidate_counts"]["after_prompt_gates"] == 0
+    assert "全部条件同时命中=0" in capsys.readouterr().err
 
 
 def test_prepare_review_cli_rejects_existing_non_empty_run_without_overwrite(tmp_path, monkeypatch):
@@ -1829,6 +1946,15 @@ def test_rerank_batch_cli_rewrites_review_packages_without_reusing_files(tmp_pat
             for index, reference in enumerate(shared_references, start=1)
         ]
         write_json(paths.analysis_dir / "reference_candidates.json", candidates)
+        write_json(
+            paths.analysis_dir / "reference_selection_constraints.json",
+            {
+                "schema_version": 1,
+                "mode": "keyword_relevance_only",
+                "original_prompt": "",
+                "normalized_conditions": [],
+            },
+        )
         run_roots.append(run_root)
 
     assert main([
@@ -2199,10 +2325,13 @@ def test_cli_end_to_end_necklace_worn_with_fidelity_coverage(tmp_path, monkeypat
         chain_or_strand_type="beaded",
         uncertain_details=[],
     )
-    reference = _task9_reference_row(tmp_path, "necklace", "worn")
+    references = [
+        _task9_reference_row(tmp_path, "necklace", "worn", index)
+        for index in range(1, 4)
+    ]
     monkeypatch.setattr(
         "jewelry_on_hand.cli.sync_and_load_reference_rows",
-        lambda _config: [reference],
+        lambda _config: references,
     )
     output_root = tmp_path / "runs"
     run_root = output_root / "necklace-worn"
@@ -2374,10 +2503,13 @@ def test_cli_end_to_end_pendant_necklace_hand_held_and_critical_gate(
         symmetry="approximately_symmetric",
         uncertain_details=[],
     )
-    reference = _task9_reference_row(tmp_path, "pendant_necklace", "hand_held")
+    references = [
+        _task9_reference_row(tmp_path, "pendant_necklace", "hand_held", index)
+        for index in range(1, 4)
+    ]
     monkeypatch.setattr(
         "jewelry_on_hand.cli.sync_and_load_reference_rows",
-        lambda _config: [reference],
+        lambda _config: references,
     )
     output_root = tmp_path / "runs"
     run_root = output_root / "pendant-hand-held"
@@ -2776,12 +2908,12 @@ def test_prepare_review_with_pending_ignore_writes_reference_source_snapshot(
     }
 
 
-def _task9_reference_row(tmp_path, product_type, display_mode):
-    reference = tmp_path / f"{product_type}-{display_mode}-reference.jpg"
-    reference.write_bytes(b"reference")
+def _task9_reference_row(tmp_path, product_type, display_mode, index=1):
+    reference = tmp_path / f"{product_type}-{display_mode}-reference-{index}.jpg"
+    reference.write_bytes(f"reference-{index}".encode())
     hand_held = display_mode == "hand_held"
     return ReferenceRow(
-        index=1,
+        index=index,
         file_name=reference.name,
         relative_path=reference.name,
         absolute_path=reference,

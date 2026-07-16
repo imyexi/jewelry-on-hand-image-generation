@@ -57,8 +57,16 @@ from jewelry_on_hand.review_decision import (
     write_review_bundle,
 )
 from jewelry_on_hand.review_package import write_review_package
+from jewelry_on_hand.reference_selection import (
+    REFERENCE_SELECTION_FILE_NAME,
+    reference_selection_sha256,
+)
 from jewelry_on_hand.run_paths import RunPaths, create_run_id, read_json, write_json
-from jewelry_on_hand.scoring import select_batch_diverse_references, select_top_references
+from jewelry_on_hand.scoring import (
+    ReferenceSelectionInsufficientError,
+    select_batch_diverse_references,
+    select_top_references_with_audit,
+)
 
 
 DEFAULT_OUTPUT_ROOT = "outputs/auto_reference_runs"
@@ -102,6 +110,10 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--run-id")
     prepare.add_argument("--dimensions-json")
     prepare.add_argument("--output-role", choices=[item.value for item in OutputRole])
+    prepare.add_argument(
+        "--reference-selection-prompt",
+        help="可选选图硬约束；使用逗号、分号或换行分隔，每个条件必须全部命中。",
+    )
     prepare.add_argument(
         "--confirmed-product-type",
         choices=[item.value for item in ProductType],
@@ -303,12 +315,31 @@ def _prepare_review(args: argparse.Namespace) -> int:
         paths.analysis_dir / OUTPUT_ROLE_FILE_NAME,
         {"output_role": output_role.value},
     )
-    selected, candidates = select_top_references(
-        product,
-        rows,
-        output_role=output_role,
+    try:
+        selection_result = select_top_references_with_audit(
+            product,
+            rows,
+            output_role=output_role,
+            reference_selection_prompt=args.reference_selection_prompt,
+        )
+    except ReferenceSelectionInsufficientError as exc:
+        write_json(
+            paths.analysis_dir / REFERENCE_SELECTION_FILE_NAME,
+            exc.audit,
+        )
+        raise
+    write_json(
+        paths.analysis_dir / REFERENCE_SELECTION_FILE_NAME,
+        selection_result.audit,
     )
-    write_review_package(paths, product_identity, selected, candidates)
+    constraints_sha256 = reference_selection_sha256(selection_result.audit)
+    write_review_package(
+        paths,
+        product_identity,
+        selection_result.selected,
+        selection_result.candidates,
+        reference_selection_constraints_sha256=constraints_sha256,
+    )
     return 0
 
 
@@ -322,7 +353,21 @@ def _rerank_batch(args: argparse.Namespace) -> int:
     selections = select_batch_diverse_references(candidate_sets, limit=3)
     for paths, selected, candidates in zip(paths_list, selections, candidate_sets, strict=True):
         product_image = paths.input_dir / "product-on-hand.jpg"
-        write_review_package(paths, product_image, selected, candidates)
+        audit_path = paths.analysis_dir / REFERENCE_SELECTION_FILE_NAME
+        if not audit_path.is_file():
+            raise FileNotFoundError(
+                f"历史 run 缺少选图约束文件，不能重新排序：{audit_path}"
+            )
+        audit = read_json(audit_path)
+        if not isinstance(audit, dict):
+            raise ValueError(f"{audit_path} 必须是 JSON 对象")
+        write_review_package(
+            paths,
+            product_image,
+            selected,
+            candidates,
+            reference_selection_constraints_sha256=reference_selection_sha256(audit),
+        )
     return 0
 
 

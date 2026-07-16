@@ -22,6 +22,8 @@ def write_review_package(
     product_image: str | Path,
     selected: Sequence[ScoredReference],
     candidates: Sequence[ScoredReference],
+    *,
+    reference_selection_constraints_sha256: str | None = None,
 ) -> Path:
     selected_items = list(selected)
     candidate_items = list(candidates)
@@ -30,13 +32,26 @@ def write_review_package(
 
     write_json(
         paths.analysis_dir / "reference_candidates.json",
-        [item.to_dict() for item in candidate_items],
+        [
+            _candidate_item_to_dict(
+                item,
+                reference_selection_constraints_sha256,
+            )
+            for item in candidate_items
+        ],
     )
 
     copied_references = _copy_selected_references(paths.review_dir, selected_items)
     write_json(
         paths.analysis_dir / "selected_references.json",
-        [_selected_item_to_dict(item, copied_references[item.rank]) for item in selected_items],
+        [
+            _selected_item_to_dict(
+                item,
+                copied_references[item.rank],
+                reference_selection_constraints_sha256,
+            )
+            for item in selected_items
+        ],
     )
 
     html_path = paths.review_dir / "review.html"
@@ -65,8 +80,24 @@ def _copy_selected_references(
     return copied
 
 
-def _selected_item_to_dict(item: ScoredReference, review_copy: Path) -> dict[str, object]:
+def _candidate_item_to_dict(
+    item: ScoredReference,
+    constraints_sha256: str | None,
+) -> dict[str, object]:
     data = item.to_dict()
+    if constraints_sha256 is not None:
+        data["reference_selection_constraints_sha256"] = constraints_sha256
+    return data
+
+
+def _selected_item_to_dict(
+    item: ScoredReference,
+    review_copy: Path,
+    constraints_sha256: str | None,
+) -> dict[str, object]:
+    data = item.to_dict()
+    if constraints_sha256 is not None:
+        data["reference_selection_constraints_sha256"] = constraints_sha256
     source_path = str(item.row.absolute_path.resolve())
     metadata = data.get("metadata")
     if not isinstance(metadata, dict):
