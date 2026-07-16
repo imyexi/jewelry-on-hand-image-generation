@@ -1,9 +1,8 @@
 import json
-from hashlib import sha256
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 
 from jewelry_on_hand.models import (
     ProductAnalysis,
@@ -12,21 +11,7 @@ from jewelry_on_hand.models import (
     ScoredReference,
 )
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
-from jewelry_on_hand.product_analysis import load_product_analysis
-from jewelry_on_hand.product_analysis import product_analysis_to_dict
 from jewelry_on_hand.qc import build_qc_checklist, qc_check_id
-from jewelry_on_hand.qc_review import (
-    build_reference_preservation_checklist,
-    write_qc_review_page,
-)
-from jewelry_on_hand.reference_composition import (
-    ReferenceCompositionSnapshot,
-    ReferencePose,
-    ReplacementTarget,
-    build_candidate_snapshot,
-    reference_composition_sha256,
-)
-from jewelry_on_hand.review_decision import write_review_bundle
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
@@ -37,9 +22,8 @@ def test_qc_cli_rejects_non_string_fidelity_check_notes_without_writing(
 ):
     from jewelry_on_hand.cli import main
 
-    generation_dir, checks_json, checklist_json, reference_json = (
-        _ready_cli_qc_generation(tmp_path)
-    )
+    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
+    checks_json = tmp_path / "fidelity-checks.json"
     write_json(
         checks_json,
         [
@@ -63,133 +47,11 @@ def test_qc_cli_rejects_non_string_fidelity_check_notes_without_writing(
             "需要复核",
             "--fidelity-checks-json",
             str(checks_json),
-            "--checklist-checks-json",
-            str(checklist_json),
-            "--reference-preservation-checks-json",
-            str(reference_json),
         ]
     )
 
     assert result == 1
     assert "fidelity_checks.notes 必须是字符串或 null" in capsys.readouterr().err
-    assert not (generation_dir / "qc.json").exists()
-
-
-def test_qc_cli_requires_all_three_check_json_arguments(tmp_path):
-    from jewelry_on_hand.cli import main
-
-    with pytest.raises(SystemExit):
-        main(
-            [
-                "qc",
-                "--generation-dir",
-                str(tmp_path / "generation" / "01"),
-                "--status",
-                "pass",
-            ]
-        )
-
-
-def test_qc_cli_writes_complete_modern_three_layer_result(tmp_path):
-    from jewelry_on_hand.cli import main
-
-    generation_dir, fidelity, checklist, reference = _ready_cli_qc_generation(
-        tmp_path
-    )
-
-    result = main(
-        [
-            "qc",
-            "--generation-dir",
-            str(generation_dir),
-            "--status",
-            "pass",
-            "--passed",
-            "三层人工复核完成",
-            "--notes",
-            "逐项对照四栏页面",
-            "--fidelity-checks-json",
-            str(fidelity),
-            "--checklist-checks-json",
-            str(checklist),
-            "--reference-preservation-checks-json",
-            str(reference),
-        ]
-    )
-
-    payload = read_json(generation_dir / "qc.json")
-    assert result == 0
-    assert payload["status"] == "pass"
-    assert payload["reference_preservation_checks"]
-    assert "fidelity_checks" in payload
-    assert payload["checklist_checks"]
-
-
-def test_qc_cli_rejects_reference_check_without_structured_evidence(
-    tmp_path,
-    capsys,
-):
-    from jewelry_on_hand.cli import main
-
-    generation_dir, fidelity, checklist, reference = _ready_cli_qc_generation(
-        tmp_path
-    )
-    checks = read_json(reference)
-    checks[0].pop("evidence")
-    write_json(reference, checks)
-
-    result = main(
-        [
-            "qc",
-            "--generation-dir",
-            str(generation_dir),
-            "--status",
-            "pass",
-            "--fidelity-checks-json",
-            str(fidelity),
-            "--checklist-checks-json",
-            str(checklist),
-            "--reference-preservation-checks-json",
-            str(reference),
-        ]
-    )
-
-    assert result == 1
-    assert "evidence 必填" in capsys.readouterr().err
-    assert not (generation_dir / "qc.json").exists()
-
-
-def test_qc_cli_rejects_legacy_or_hero_generation_without_writing(tmp_path, capsys):
-    from jewelry_on_hand.cli import main
-
-    generation_dir, fidelity, checklist, reference = _ready_cli_qc_generation(
-        tmp_path
-    )
-    (generation_dir / "input-manifest.json").unlink()
-    args = [
-        "qc",
-        "--generation-dir",
-        str(generation_dir),
-        "--status",
-        "pass",
-        "--fidelity-checks-json",
-        str(fidelity),
-        "--checklist-checks-json",
-        str(checklist),
-        "--reference-preservation-checks-json",
-        str(reference),
-    ]
-
-    assert main(args) == 1
-    assert "历史离线 QC 仅可只读" in capsys.readouterr().err
-    assert not (generation_dir / "qc.json").exists()
-
-    write_json(
-        generation_dir / "input-manifest.json",
-        {"schema_version": 1, "output_role": "hero"},
-    )
-    assert main(args) == 1
-    assert "主图" in capsys.readouterr().err
     assert not (generation_dir / "qc.json").exists()
 
 
@@ -255,31 +117,15 @@ def make_catalog(path, ref):
             "推荐使用方式",
             "备注",
             "判断置信度",
-            "适用产品类型",
-            "适用展示模式",
-            "人物取景范围",
-            "可见身体区域",
-            "产品预计展示面积",
-            "手部可见度",
-            "衣领类型",
-            "衣物遮挡风险",
-            "头发遮挡风险",
-            "姿势关键词",
-            "原有首饰类型",
-            "裁切风险",
-            "左右手",
-            "手部朝向",
         ]
     )
     for i in range(1, 4):
-        candidate = Path(ref).with_name(f"ref{i}{Path(ref).suffix}")
-        candidate.write_bytes(Path(ref).read_bytes())
         ws.append(
             [
                 i,
-                candidate.name,
-                candidate.name,
-                str(candidate),
+                f"ref{i}.jpg",
+                f"ref{i}.jpg",
+                str(ref),
                 100,
                 200,
                 0.1,
@@ -287,80 +133,15 @@ def make_catalog(path, ref):
                 "是：可用于手链/手串",
                 "常规可优先使用",
                 "暗调闪光",
-                "深色背景，车内闪光",
+                "车内 闪光",
                 "手链/手串",
                 "近景手腕",
-                "正面视角；主体居中；手腕/前臂露出面积足；无文字或平台界面",
+                "手腕/前臂露出面积足",
                 "高",
-                "手链",
-                "佩戴",
-                "手部近景",
-                "左手腕、前臂",
-                "展示面积充足",
-                "完整可见",
-                "无可见服装",
-                "无遮挡",
-                "无遮挡",
-                "身体未入镜；前臂自然抬起",
-                "左手腕单条手链",
-                "低",
-                "左手",
-                "手背朝向镜头",
             ]
         )
-        ws.cell(row=ws.max_row, column=8, value="手部佩戴图")
+        ws.cell(row=ws.max_row, column=8, value="手部佩戴图；深色背景")
     wb.save(path)
-
-
-def test_准备审核命令在完整候选不足三张时失败且不写审核半成品(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
-    from jewelry_on_hand.cli import main
-
-    product = tmp_path / "product.jpg"
-    product.write_bytes(b"product")
-    reference = tmp_path / "reference.jpg"
-    reference.write_bytes(b"reference")
-    catalog = tmp_path / "catalog.xlsx"
-    make_catalog(catalog, reference)
-    workbook = load_workbook(catalog)
-    sheet = workbook["分类明细"]
-    headers = {cell.value: cell.column for cell in sheet[1]}
-    sheet.cell(row=2, column=headers["衣领类型"]).value = None
-    workbook.save(catalog)
-    analysis = tmp_path / "analysis.json"
-    make_analysis(analysis)
-    monkeypatch.setattr(
-        "jewelry_on_hand.cli.sync_and_load_reference_rows",
-        lambda config: __import__(
-            "jewelry_on_hand.reference_catalog",
-            fromlist=["load_reference_rows"],
-        ).load_reference_rows(catalog),
-    )
-
-    output_root = tmp_path / "runs"
-    assert main([
-        "prepare-review",
-        "--product-image", str(product),
-        "--analysis-json", str(analysis),
-        "--output-root", str(output_root),
-        "--run-id", "snapshot-shortage",
-        "--output-role", "hand_worn",
-    ]) == 1
-
-    run_root = output_root / "snapshot-shortage"
-    error = capsys.readouterr().err
-    assert "手部佩戴图" in error
-    assert "合格候选 2 张" in error
-    assert "clothing" in error
-    audit = read_json(run_root / "analysis" / "reference_snapshot_readiness.json")
-    assert audit["eligible_count"] == 2
-    assert audit["exclusions"][0]["field_name"] == "clothing"
-    assert not (run_root / "review" / "review.html").exists()
-    assert not (run_root / "analysis" / "selected_references.json").exists()
-    assert not (run_root / "analysis" / "reference_composition_snapshots.json").exists()
 
 
 def make_analysis(path):
@@ -423,160 +204,6 @@ def declare_scene_output_role(run_root, role="hand_worn"):
     )
 
 
-def prepare_snapshot_decision_run(run_root, *, role="hand_worn"):
-    paths = RunPaths.create(Path(run_root).parent, Path(run_root).name)
-    (paths.input_dir / "product-on-hand.jpg").write_bytes(b"product")
-    reference = paths.input_dir / "decision-reference.jpg"
-    reference.write_bytes(b"decision-reference")
-    analysis_path = paths.analysis_dir / "product_analysis.json"
-    analysis_data = (
-        read_json(analysis_path)
-        if analysis_path.is_file()
-        else make_analysis(analysis_path)
-    )
-    constraints = build_product_fidelity_constraints(
-        ProductAnalysis.from_dict(analysis_data)
-    ).to_dict()
-    if constraints["review_status"] == "pending":
-        constraints["review_status"] = "confirmed"
-    write_json(paths.analysis_dir / "product_fidelity_constraints.json", constraints)
-    declare_scene_output_role(run_root, role)
-    scored = ScoredReference(
-        ReferenceRow(
-            index=1,
-            file_name=reference.name,
-            relative_path=reference.name,
-            absolute_path=reference,
-            width=100,
-            height=200,
-            size_mb=0.1,
-            purpose_category="手部佩戴图",
-            bracelet_applicability="是",
-            default_strategy="常规可优先使用",
-            style_category="暗调闪光",
-            scene_keywords="深色背景，车内",
-            jewelry_type="手链/手串",
-            recommended_usage="近景手腕",
-            notes="正面视角，主体居中，无文字或 UI",
-            confidence="高",
-            file_exists=True,
-            framing="手部近景",
-            visible_body_regions="左手腕 / 前臂完整露出",
-            product_visibility="展示面积充足，大于 35%",
-            collar_type="无衣领",
-            clothing_occlusion_risk="衣物无遮挡",
-            pose_keywords="身体未入镜，前臂自然抬起",
-            existing_jewelry="左手腕原有手链",
-            crop_risk="裁切风险低",
-            hand_side="左手",
-            hand_orientation="手背朝向镜头",
-        ),
-        99,
-        1,
-        ("匹配",),
-        (),
-        ("原有手链",),
-    )
-    snapshot = build_candidate_snapshot(
-        load_product_analysis(paths.analysis_dir / "product_analysis.json"),
-        scored,
-        role,
-    )
-    review_copy = paths.review_dir / f"rank-1-{reference.name}"
-    review_copy.write_bytes(reference.read_bytes())
-    digest = sha256(reference.read_bytes()).hexdigest()
-    selected = scored.to_dict()
-    selected["selected_reference"] = str(review_copy.resolve())
-    selected["source_sha256"] = digest
-    selected["review_sha256"] = digest
-    selected["metadata"]["source_sha256"] = digest
-    selected["metadata"]["review_sha256"] = digest
-    write_json(paths.analysis_dir / "selected_references.json", [selected])
-    write_json(
-        paths.analysis_dir / "reference_composition_snapshots.json",
-        [snapshot.to_dict()],
-    )
-    return snapshot
-
-
-def test_generate_cli_loads_snapshot_analysis_and_canonical_for_input_manifest(
-    tmp_path,
-    monkeypatch,
-):
-    from jewelry_on_hand.cli import main
-
-    run_root = tmp_path / "runs" / "demo"
-    snapshot = prepare_snapshot_decision_run(run_root)
-    paths = RunPaths(root=run_root)
-    write_review_bundle(
-        paths,
-        {
-            "action": "generate_rank_1",
-            "selected_ranks": [1],
-            "fidelity_confirmed": True,
-            "output_role": "hand_worn",
-        },
-    )
-    prompt_snapshots = []
-    generation_calls = []
-
-    def fake_build_prompt(
-        product,
-        reference,
-        fidelity_constraints,
-        output_role,
-        reference_snapshot,
-    ):
-        prompt_snapshots.append(reference_snapshot)
-        return "prompt-rank-1"
-
-    def fake_run_generation(
-        paths,
-        product_image,
-        prompts_by_rank,
-        helper_script,
-        wait=True,
-        *,
-        reference_snapshot,
-        product_analysis_path,
-        fidelity_constraints_path,
-    ):
-        generation_calls.append(
-            {
-                "paths": paths,
-                "product_image": product_image,
-                "prompts": prompts_by_rank,
-                "wait": wait,
-                "snapshot": reference_snapshot,
-                "analysis": product_analysis_path,
-                "canonical": fidelity_constraints_path,
-            }
-        )
-        return [paths.generation_dir / "01"]
-
-    monkeypatch.setattr("jewelry_on_hand.cli.build_prompt", fake_build_prompt)
-    monkeypatch.setattr("jewelry_on_hand.cli.run_generation", fake_run_generation)
-
-    assert main(
-        [
-            "generate",
-            "--run-root",
-            str(run_root),
-            "--helper-script",
-            str(tmp_path / "helper.py"),
-            "--no-wait",
-        ]
-    ) == 0
-    assert prompt_snapshots == [snapshot]
-    assert len(generation_calls) == 1
-    call = generation_calls[0]
-    assert call["snapshot"] == snapshot
-    assert call["analysis"] == paths.analysis_dir / "product_analysis.json"
-    assert call["canonical"] == paths.analysis_dir / "product_fidelity_constraints.json"
-    assert call["prompts"] == {1: "prompt-rank-1"}
-    assert call["wait"] is False
-
-
 def make_constraints(
     path,
     review_status="confirmed",
@@ -624,7 +251,6 @@ def make_constraints(
             data["source"]["product_analysis_sha256"] = built.source[
                 "product_analysis_sha256"
             ]
-            data["source"]["product_type"] = built.source["product_type"]
             data["must_not_change"] = list(built.must_not_change)
             if built.pendant_semantics is not None:
                 data["pendant_semantics"] = built.pendant_semantics.to_dict()
@@ -822,7 +448,11 @@ def test_record_decision_cli_writes_and_normalizes_generate_rank_1(tmp_path):
     from jewelry_on_hand.cli import main
 
     run_root = tmp_path / "runs" / "demo"
-    prepare_snapshot_decision_run(run_root)
+    make_constraints(
+        run_root / "analysis" / "product_fidelity_constraints.json",
+        must_keep=[],
+    )
+    declare_scene_output_role(run_root)
 
     assert (
         main(
@@ -840,15 +470,13 @@ def test_record_decision_cli_writes_and_normalizes_generate_rank_1(tmp_path):
         == 0
     )
 
-    decision = read_json(run_root / "review" / "review_decision.json")
-    assert decision["action"] == "generate_rank_1"
-    assert decision["selected_ranks"] == [1]
-    assert decision["fidelity_confirmed"] is True
-    assert decision["fidelity_constraints_path"] == (
-        "analysis/product_fidelity_constraints.json"
-    )
-    assert decision["output_role"] == "hand_worn"
-    assert len(decision["reference_snapshot_sha256"]) == 64
+    assert read_json(run_root / "review" / "review_decision.json") == {
+        "action": "generate_rank_1",
+        "selected_ranks": [1],
+        "fidelity_confirmed": True,
+        "fidelity_constraints_path": "analysis/product_fidelity_constraints.json",
+        "output_role": "hand_worn",
+    }
 
 
 def test_record_decision_cli_returns_nonzero_for_invalid_selected_rank(tmp_path):
@@ -1310,9 +938,7 @@ def test_record_decision_cli_rolls_back_analysis_and_decision_on_second_replace_
         product_type="戒指",
         detected_product_type="ring",
         confirmed_product_type="ring",
-        classification_confidence="high",
         classification_evidence=["左手无名指根部可见单枚戒指"],
-        classification_source="auto_confirmed",
         wear_position="左手无名指根部",
         visible_appearance="单枚银色戒指",
         length_category=None,
@@ -1321,7 +947,6 @@ def test_record_decision_cli_rolls_back_analysis_and_decision_on_second_replace_
         finger_position="ring",
         ring_wear_style="finger_base",
     )
-    prepare_snapshot_decision_run(run_root)
     write_json(decision_path, {"action": "rerank", "selected_ranks": []})
     declare_scene_output_role(run_root)
     old_analysis = analysis_path.read_bytes()
@@ -1352,7 +977,7 @@ def test_record_decision_cli_rolls_back_analysis_and_decision_on_second_replace_
         ]
     ) != 0
 
-    assert "文件提交失败" in capsys.readouterr().err
+    assert "双文件提交失败" in capsys.readouterr().err
     assert analysis_path.read_bytes() == old_analysis
     assert decision_path.read_bytes() == old_decision
 
@@ -1370,14 +995,13 @@ def test_record_decision_cli_imports_custom_constraints_to_canonical(tmp_path):
         classification_evidence=["完整链条围绕颈部"],
         classification_source="auto_confirmed",
         length_category="collarbone",
-        special_requirements=["保留链条连接结构"],
     )
-    prepare_snapshot_decision_run(run_root)
     canonical_path = run_root / "analysis" / "product_fidelity_constraints.json"
+    make_constraints(canonical_path, review_status="confirmed", must_keep=[])
     imported_path = run_root / "review" / "imported-constraints.json"
     imported = make_constraints(
         imported_path,
-        review_status="not_applicable",
+        review_status="pending",
         analysis_data=analysis_data,
     )
     imported["source"]["product_id"] = "imported-source"
@@ -1402,8 +1026,8 @@ def test_record_decision_cli_imports_custom_constraints_to_canonical(tmp_path):
     canonical = read_json(canonical_path)
     decision = read_json(run_root / "review" / "review_decision.json")
     assert canonical["source"]["product_id"] == "imported-source"
-    assert canonical["review_status"] == "not_applicable"
-    assert read_json(imported_path)["review_status"] == "not_applicable"
+    assert canonical["review_status"] == "confirmed"
+    assert read_json(imported_path)["review_status"] == "pending"
     assert decision["fidelity_constraints_path"] == (
         "analysis/product_fidelity_constraints.json"
     )
@@ -1505,26 +1129,23 @@ def test_record_decision_cli_updates_ring_analysis_and_snapshot_atomically(tmp_p
     analysis_path = run_root / "analysis" / "product_analysis.json"
     original_analysis = make_modern_analysis(
         analysis_path,
-        product_type="戒指",
-        detected_product_type="ring",
-        confirmed_product_type="ring",
-        classification_confidence="high",
-        classification_source="auto_confirmed",
+        product_type="疑似戒指",
         classification_evidence=["手指根部结构疑似戒指"],
-        wear_position="左手无名指根部",
+        wear_position="手指",
         visible_appearance="单枚银色环状首饰",
         composition="手部近景",
         occluded_parts=["戒圈背面"],
-        uncertain_details=["镶嵌背面结构"],
-        ring_count=1,
-        hand_side="left",
-        finger_position="ring",
-        ring_wear_style="finger_base",
+        uncertain_details=["左右手与佩戴手指待确认"],
     )
-    prepare_snapshot_decision_run(run_root)
+    make_constraints(
+        run_root / "analysis" / "product_fidelity_constraints.json",
+        must_keep=[],
+    )
     corrected_analysis = original_analysis | {
+        "confirmed_product_type": "ring",
         "classification_source": "manual_override",
-        "hand_side": "right",
+        "ring_count": 1,
+        "hand_side": "left",
         "finger_position": "ring",
         "ring_wear_style": "finger_base",
     }
@@ -1550,7 +1171,7 @@ def test_record_decision_cli_updates_ring_analysis_and_snapshot_atomically(tmp_p
             "--ring-count",
             "1",
             "--hand-side",
-            "right",
+            "left",
             "--finger-position",
             "ring",
             "--ring-wear-style",
@@ -1581,7 +1202,7 @@ def test_record_decision_cli_updates_ring_analysis_and_snapshot_atomically(tmp_p
         )
     } == {
         "ring_count": 1,
-        "hand_side": "right",
+        "hand_side": "left",
         "finger_position": "ring",
         "ring_wear_style": "finger_base",
     }
@@ -1599,7 +1220,7 @@ def test_record_decision_cli_updates_ring_analysis_and_snapshot_atomically(tmp_p
         "connection_structure": None,
         "is_independent_multi_item": False,
         "ring_count": 1,
-        "hand_side": "right",
+        "hand_side": "left",
         "finger_position": "ring",
         "ring_wear_style": "finger_base",
     }
@@ -1652,9 +1273,7 @@ def test_record_decision_cli_invalid_ring_correction_changes_nothing(tmp_path, c
 def test_qc_cli_writes_qc_json(tmp_path):
     from jewelry_on_hand.cli import main
 
-    generation_dir, fidelity_json, checklist_json, reference_json = (
-        _ready_cli_qc_generation(tmp_path)
-    )
+    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
 
     assert (
         main(
@@ -1670,34 +1289,36 @@ def test_qc_cli_writes_qc_json(tmp_path):
                 "主珠被裁切",
                 "--notes",
                 "复跑",
-                "--fidelity-checks-json",
-                str(fidelity_json),
-                "--checklist-checks-json",
-                str(checklist_json),
-                "--reference-preservation-checks-json",
-                str(reference_json),
             ]
         )
         == 0
     )
 
-    payload = read_json(generation_dir / "qc.json")
-    assert payload["status"] == "rerun"
-    assert payload["passed"] == ["无水印", "构图正确"]
-    assert payload["failed"] == ["主珠被裁切"]
-    assert payload["notes"] == "复跑"
-    assert payload["reference_preservation_checks"]
-    assert payload["checklist_checks"]
+    assert read_json(generation_dir / "qc.json") == {
+        "status": "rerun",
+        "passed": ["无水印", "构图正确"],
+        "failed": ["主珠被裁切"],
+        "notes": "复跑",
+        "fidelity_checks": [],
+    }
 
 
 def test_qc_cli_writes_fidelity_checks_from_json(tmp_path):
     from jewelry_on_hand.cli import main
 
-    generation_dir, checks_json, checklist_json, reference_json = (
-        _ready_cli_qc_generation(tmp_path)
+    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
+    checks_json = tmp_path / "fidelity-checks.json"
+    write_json(
+        checks_json,
+        [
+            {
+                "name": "白水晶随形",
+                "question": "白水晶随形是否仍是不规则透明异形珠",
+                "result": "fail",
+                "notes": "变成圆珠",
+            }
+        ],
     )
-    checks = read_json(checks_json)
-    assert checks
 
     assert (
         main(
@@ -1711,24 +1332,18 @@ def test_qc_cli_writes_fidelity_checks_from_json(tmp_path):
                 "关键识别点失败",
                 "--fidelity-checks-json",
                 str(checks_json),
-                "--checklist-checks-json",
-                str(checklist_json),
-                "--reference-preservation-checks-json",
-                str(reference_json),
             ]
         )
         == 0
     )
 
-    assert read_json(generation_dir / "qc.json")["fidelity_checks"] == checks
+    assert read_json(generation_dir / "qc.json")["fidelity_checks"][0]["result"] == "fail"
 
 
 def test_qc_cli_strict_critical_failures_accepts_repeated_and_csv(tmp_path):
     from jewelry_on_hand.cli import main
 
-    generation_dir, fidelity_json, checklist_json, reference_json = (
-        _ready_cli_qc_generation(tmp_path)
-    )
+    generation_dir = tmp_path / "runs" / "demo" / "generation" / "01"
 
     assert main(
         [
@@ -1737,12 +1352,6 @@ def test_qc_cli_strict_critical_failures_accepts_repeated_and_csv(tmp_path):
             str(generation_dir),
             "--status",
             "reject",
-            "--fidelity-checks-json",
-            str(fidelity_json),
-            "--checklist-checks-json",
-            str(checklist_json),
-            "--reference-preservation-checks-json",
-            str(reference_json),
             "--critical-failures",
             "auto_chain_added,layer_count_mismatch",
             "--critical-failures",
@@ -1775,9 +1384,7 @@ def test_qc_cli_strict_critical_failures_rejects_empty_segments(
 ):
     from jewelry_on_hand.cli import main
 
-    generation_dir, fidelity_json, checklist_json, reference_json = (
-        _ready_cli_qc_generation(tmp_path)
-    )
+    generation_dir = tmp_path / "runs" / str(len(critical_args)) / "generation" / "01"
     assert main(
         [
             "qc",
@@ -1785,12 +1392,6 @@ def test_qc_cli_strict_critical_failures_rejects_empty_segments(
             str(generation_dir),
             "--status",
             "reject",
-            "--fidelity-checks-json",
-            str(fidelity_json),
-            "--checklist-checks-json",
-            str(checklist_json),
-            "--reference-preservation-checks-json",
-            str(reference_json),
             *critical_args,
         ]
     ) != 0
@@ -1819,21 +1420,13 @@ def test_qc_cli_critical_failures_preserves_model_validation(
 ):
     from jewelry_on_hand.cli import main
 
-    generation_dir, fidelity_json, checklist_json, reference_json = (
-        _ready_cli_qc_generation(tmp_path)
-    )
+    generation_dir = tmp_path / "runs" / status / "generation" / "01"
     args = [
         "qc",
         "--generation-dir",
         str(generation_dir),
         "--status",
         status,
-        "--fidelity-checks-json",
-        str(fidelity_json),
-        "--checklist-checks-json",
-        str(checklist_json),
-        "--reference-preservation-checks-json",
-        str(reference_json),
     ]
     for value in critical_args:
         args.extend(["--critical-failures", value])
@@ -1886,7 +1479,7 @@ def test_generate_cli_builds_prompts_after_review_gate(tmp_path, monkeypatch):
                     "文件名": "ref.jpg",
                     "用途分类": "上手姿势/手模构图参考",
                     "风格分类": "暗调闪光",
-                    "场景关键词": "深色背景，车内闪光",
+                    "场景关键词": "车内 闪光",
                     "饰品类型": "手链/手串",
                     "推荐使用方式": "近景手腕",
                     "备注": "手腕/前臂露出面积足",
@@ -1895,26 +1488,12 @@ def test_generate_cli_builds_prompts_after_review_gate(tmp_path, monkeypatch):
             }
         ],
     )
-    prepare_snapshot_decision_run(run_root)
-    write_review_bundle(
-        RunPaths(root=run_root),
-        {
-            "action": "generate_rank_1",
-            "selected_ranks": [1],
-            "fidelity_confirmed": True,
-            "output_role": "hand_worn",
-        },
-    )
+    make_constraints(analysis_dir / "product_fidelity_constraints.json")
+    declare_scene_output_role(run_root)
+    write_json(review_dir / "review_decision.json", {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
     calls = []
 
-    def fake_run_generation(
-        paths,
-        product_image,
-        prompts_by_rank,
-        helper_script,
-        wait=True,
-        **audit_inputs,
-    ):
+    def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
         calls.append((paths, product_image, prompts_by_rank, helper_script, wait))
         return [paths.generation_dir / "01"]
 
@@ -1982,20 +1561,9 @@ def test_generate_cli_accepts_selected_reference_without_metadata(tmp_path, monk
             }
         ],
     )
-    prepare_snapshot_decision_run(run_root)
-    paths = RunPaths(root=run_root)
-    write_review_bundle(
-        paths,
-        {
-            "action": "generate_rank_1",
-            "selected_ranks": [1],
-            "fidelity_confirmed": True,
-            "output_role": "hand_worn",
-        },
-    )
-    selected = read_json(paths.analysis_dir / "selected_references.json")
-    selected[0].pop("metadata")
-    write_json(paths.analysis_dir / "selected_references.json", selected)
+    make_constraints(analysis_dir / "product_fidelity_constraints.json")
+    declare_scene_output_role(run_root)
+    write_json(review_dir / "review_decision.json", {"action": "generate_selected", "selected_ranks": [2], "fidelity_confirmed": True, "output_role": "hand_worn"})
     calls = []
 
     def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
@@ -2014,10 +1582,12 @@ def test_generate_cli_accepts_selected_reference_without_metadata(tmp_path, monk
                 str(tmp_path / "helper.py"),
             ]
         )
-        != 0
+        == 0
     )
 
-    assert calls == []
+    assert len(calls) == 1
+    assert list(calls[0][2]) == [2]
+    assert "ref.jpg" in calls[0][2][2]
 
 
 def test_generate_cli_only_builds_prompts_for_approved_selected_ranks(tmp_path, monkeypatch):
@@ -2060,52 +1630,34 @@ def test_generate_cli_only_builds_prompts_for_approved_selected_ranks(tmp_path, 
             "special_requirements": ["保留主珠"],
         },
     )
-    prepare_snapshot_decision_run(run_root)
-    paths = RunPaths(root=run_root)
-    write_review_bundle(
-        paths,
-        {
-            "action": "generate_rank_1",
-            "selected_ranks": [1],
-            "fidelity_confirmed": True,
-            "output_role": "hand_worn",
-        },
-    )
+    write_json(analysis_dir / "selected_references.json", references)
+    make_constraints(analysis_dir / "product_fidelity_constraints.json")
+    declare_scene_output_role(run_root)
+    write_json(review_dir / "review_decision.json", {"action": "generate_selected", "selected_ranks": [2], "fidelity_confirmed": True, "output_role": "hand_worn"})
     built_ranks = []
     calls = []
 
     def fake_build_prompt(
-        product_analysis,
-        scored_reference,
-        fidelity_constraints,
-        output_role,
-        reference_snapshot,
+        product_analysis, scored_reference, fidelity_constraints, *, output_role
     ):
-        assert fidelity_constraints.review_status in {"confirmed", "not_applicable"}
+        assert fidelity_constraints.review_status == "confirmed"
         assert output_role.value == "hand_worn"
         built_ranks.append(scored_reference.rank)
         return f"prompt-rank-{scored_reference.rank}"
 
-    def fake_run_generation(
-        paths,
-        product_image,
-        prompts_by_rank,
-        helper_script,
-        wait=True,
-        **audit_inputs,
-    ):
+    def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
         calls.append((paths, product_image, prompts_by_rank, helper_script, wait))
-        return [paths.generation_dir / "01"]
+        return [paths.generation_dir / "02"]
 
     monkeypatch.setattr("jewelry_on_hand.cli.build_prompt", fake_build_prompt)
     monkeypatch.setattr("jewelry_on_hand.cli.run_generation", fake_run_generation)
 
     assert main(["generate", "--run-root", str(run_root), "--helper-script", str(tmp_path / "helper.py")]) == 0
 
-    assert built_ranks == [1]
+    assert built_ranks == [2]
     assert len(calls) == 1
-    assert list(calls[0][2]) == [1]
-    assert calls[0][2] == {1: "prompt-rank-1"}
+    assert list(calls[0][2]) == [2]
+    assert calls[0][2] == {2: "prompt-rank-2"}
 
 
 def test_generate_cli_returns_nonzero_when_decision_rank_is_missing(tmp_path, monkeypatch):
@@ -2223,22 +1775,12 @@ def test_generate_cli_preserves_mirror_relative_path_from_review_package(tmp_pat
             bracelet_applicability="是",
             default_strategy="常规可优先使用",
             style_category="暗调闪光",
-            scene_keywords="深色背景，车内",
+            scene_keywords="车内",
             jewelry_type="手链/手串",
             recommended_usage="近景",
-            notes="正面视角，主体居中，手腕露出，无文字或 UI",
+            notes="手腕露出",
             confidence="高",
             file_exists=True,
-            framing="手部近景",
-            visible_body_regions="左手腕 / 前臂完整露出",
-            product_visibility="展示面积充足，大于 35%",
-            collar_type="无衣领",
-            clothing_occlusion_risk="衣物无遮挡",
-            pose_keywords="身体未入镜，前臂自然抬起",
-            existing_jewelry="左手腕原有手链",
-            crop_risk="裁切风险低",
-            hand_side="左手",
-            hand_orientation="手背朝向镜头",
         ),
         score=99,
         rank=1,
@@ -2246,39 +1788,13 @@ def test_generate_cli_preserves_mirror_relative_path_from_review_package(tmp_pat
         risk=[],
         ignored_reference_jewelry=[],
     )
-    analysis = load_product_analysis(paths.analysis_dir / "product_analysis.json")
-    snapshot = build_candidate_snapshot(analysis, scored, "hand_worn")
-    write_review_package(
-        paths,
-        product,
-        [scored],
-        [scored],
-        composition_snapshots=[snapshot],
-    )
-    constraints = build_product_fidelity_constraints(analysis).to_dict()
-    if constraints["review_status"] == "pending":
-        constraints["review_status"] = "confirmed"
-    write_json(paths.analysis_dir / "product_fidelity_constraints.json", constraints)
+    write_review_package(paths, product, [scored], [scored])
+    make_constraints(paths.analysis_dir / "product_fidelity_constraints.json")
     declare_scene_output_role(run_root)
-    write_review_bundle(
-        paths,
-        {
-            "action": "generate_rank_1",
-            "selected_ranks": [1],
-            "fidelity_confirmed": True,
-            "output_role": "hand_worn",
-        },
-    )
+    write_json(paths.review_dir / "review_decision.json", {"action": "generate_rank_1", "selected_ranks": [1], "fidelity_confirmed": True, "output_role": "hand_worn"})
     calls = []
 
-    def fake_run_generation(
-        paths,
-        product_image,
-        prompts_by_rank,
-        helper_script,
-        wait=True,
-        **audit_inputs,
-    ):
+    def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
         calls.append((paths, product_image, prompts_by_rank, helper_script, wait))
         return [paths.generation_dir / "01"]
 
@@ -2287,8 +1803,7 @@ def test_generate_cli_preserves_mirror_relative_path_from_review_package(tmp_pat
     assert main(["generate", "--run-root", str(run_root), "--helper-script", str(tmp_path / "helper.py")]) == 0
 
     assert len(calls) == 1
-    assert "前景手部 + 镜中反射手部" not in calls[0][2][1]
-    assert "内部图1" in calls[0][2][1]
+    assert "前景手部 + 镜中反射手部" in calls[0][2][1]
 
 
 def test_rerank_batch_cli_rewrites_review_packages_without_reusing_files(tmp_path):
@@ -2297,7 +1812,7 @@ def test_rerank_batch_cli_rewrites_review_packages_without_reusing_files(tmp_pat
     output_root = tmp_path / "runs"
     shared_references = [tmp_path / f"ref-{index}.jpg" for index in range(1, 7)]
     for reference in shared_references:
-        reference.write_bytes(reference.name.encode("utf-8"))
+        reference.write_bytes(b"ref")
 
     run_roots = []
     for run_name in ("sku-a", "sku-b"):
@@ -2309,8 +1824,6 @@ def test_rerank_batch_cli_rewrites_review_packages_without_reusing_files(tmp_pat
         (paths.review_dir / "rank-9-stale.jpg").write_bytes(b"stale")
         product = paths.input_dir / "product-on-hand.jpg"
         product.write_bytes(b"product")
-        make_analysis(paths.analysis_dir / "product_analysis.json")
-        declare_scene_output_role(run_root)
         candidates = [
             _candidate_payload(index, reference, score=101 - index)
             for index, reference in enumerate(shared_references, start=1)
@@ -2363,40 +1876,747 @@ def _candidate_payload(index, path, score):
             "file_name": path.name,
             "relative_path": path.name,
             "absolute_path": str(path),
-            "width": 100,
-            "height": 200,
-            "size_mb": 0.1,
             "用途分类": "手部佩戴图",
-            "purpose_category": "手部佩戴图",
-            "手链手串适用性": "是",
-            "bracelet_applicability": "是",
-            "默认使用策略": "常规可优先使用",
-            "default_strategy": "常规可优先使用",
             "风格分类": f"风格-{index}",
-            "style_category": f"风格-{index}",
-            "场景关键词": f"深色背景场景-{index}",
-            "scene_keywords": f"深色背景场景-{index}",
+            "场景关键词": f"场景-{index}",
             "饰品类型": "手链/手串",
-            "jewelry_type": "手链/手串",
             "推荐使用方式": f"姿势-{index}",
-            "recommended_usage": f"姿势-{index}",
-            "备注": "正面视角，主体居中，手腕完整，无文字或 UI",
-            "notes": "正面视角，主体居中，手腕完整，无文字或 UI",
+            "备注": "手腕完整",
             "判断置信度": "高",
-            "confidence": "高",
-            "file_exists": True,
-            "framing": "手部近景",
-            "visible_body_regions": "左手腕 / 前臂完整露出",
-            "product_visibility": "展示面积充足，大于 35%",
-            "collar_type": "无衣领",
-            "clothing_occlusion_risk": "衣物无遮挡",
-            "pose_keywords": "身体未入镜，前臂自然抬起",
-            "existing_jewelry": "左手腕原有手链",
-            "crop_risk": "裁切风险低",
-            "hand_side": "左手",
-            "hand_orientation": "手背朝向镜头",
         },
     }
+
+
+def test_cli_end_to_end_ring_four_stage_workflow(tmp_path, monkeypatch):
+    from jewelry_on_hand.cli import main
+
+    product_image = tmp_path / "ring-product.jpg"
+    product_image.write_bytes(b"ring-product")
+    product_detail = tmp_path / "ring-detail.png"
+    product_detail.write_bytes(b"reviewed-ring-detail")
+    analysis_json = tmp_path / "ring-analysis.json"
+    make_modern_analysis(
+        analysis_json,
+        product_type="戒指",
+        detected_product_type="ring",
+        confirmed_product_type="ring",
+        classification_confidence="high",
+        classification_evidence=["左手无名指根部可见单枚戒指"],
+        classification_source="auto_confirmed",
+        display_mode="worn",
+        source_image_type="worn_source",
+        wear_position="左手无名指根部",
+        visible_appearance="单枚银色开口戒，正面有一颗圆形主石",
+        color_family=["银色", "透明"],
+        composition="手部近景",
+        layer_count=1,
+        length_category=None,
+        chain_or_strand_type=None,
+        has_pendant=False,
+        pendant_count=0,
+        pendant_layer=None,
+        pendant_position=None,
+        pendant_orientation=None,
+        connection_structure=None,
+        symmetry=None,
+        occluded_parts=["戒圈背面"],
+        uncertain_details=["镶嵌背面结构"],
+        is_independent_multi_item=False,
+        ring_count=1,
+        hand_side="left",
+        finger_position="ring",
+        ring_wear_style="finger_base",
+    )
+    references = _task9_ring_reference_rows(tmp_path)
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        lambda _config: references,
+    )
+    output_root = tmp_path / "runs"
+    run_root = output_root / "ring-worn"
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product_image),
+            "--product-detail-image",
+            str(product_detail),
+            "--analysis-json",
+            str(analysis_json),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            run_root.name,
+            "--output-role",
+            "hand_worn",
+        ]
+    ) == 0
+    selected = read_json(run_root / "analysis" / "selected_references.json")
+    assert [item["rank"] for item in selected] == [1, 2, 3]
+    constraints_path = run_root / "analysis" / "product_fidelity_constraints.json"
+    constraints = read_json(constraints_path)
+    assert constraints["source"]["product_image"] == "input/product-detail.png"
+    assert (run_root / "input" / "product-detail.png").read_bytes() == product_detail.read_bytes()
+    assert "product-detail.png" in (run_root / "review" / "review.html").read_text(
+        encoding="utf-8"
+    )
+    assert constraints["review_status"] == "pending"
+    assert constraints["needs_user_review"] is True
+    assert constraints["detail_crop_recommended"] is True
+    assert constraints["must_keep"]
+    assert "珠子排列顺序" not in str(constraints["must_not_change"])
+    assert "主珠" not in str(constraints["must_not_change"])
+
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_rank_1",
+            "--fidelity-confirmed",
+            "--output-role",
+            "hand_worn",
+            "--fidelity-notes",
+            "已确认单枚、左手无名指和常规指根佩戴",
+        ]
+    ) == 0
+    decision = read_json(run_root / "review" / "review_decision.json")
+    assert decision["confirmation_snapshot"]["ring_count"] == 1
+    assert decision["confirmation_snapshot"]["hand_side"] == "left"
+    assert decision["confirmation_snapshot"]["finger_position"] == "ring"
+    assert decision["confirmation_snapshot"]["ring_wear_style"] == "finger_base"
+    constraints = read_json(constraints_path)
+    assert constraints["review_status"] == "confirmed"
+
+    helper_script, helper_log = _task9_local_helper(tmp_path)
+    assert main(
+        [
+            "generate",
+            "--run-root",
+            str(run_root),
+            "--helper-script",
+            str(helper_script),
+            "--no-wait",
+        ]
+    ) == 0
+    generation_dir = run_root / "generation" / "01"
+    assert (generation_dir / "product-identity.jpg").read_bytes() == product_image.read_bytes()
+    prompt = (generation_dir / "prompt.txt").read_text(encoding="utf-8")
+    for required in (
+        "内部图2是戒指身份唯一来源",
+        "必须佩戴在左手无名指根部并真实环绕该手指",
+        "不可见戒圈、镶嵌背面和遮挡结构不得补造",
+    ):
+        assert required in prompt
+    final_analysis = read_json(run_root / "analysis" / "product_analysis.json")
+    assert final_analysis["visible_appearance"] in prompt
+    assert "本产品必须保留的关键识别点" not in prompt
+    assert "珠子排列顺序" not in prompt
+    assert "主珠" not in prompt
+    _assert_task9_submit_call(
+        helper_log,
+        run_root,
+        selected[0]["selected_reference"],
+        generation_dir,
+        expected_product=run_root / "input" / "product-on-hand.jpg",
+    )
+
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+        ]
+    ) != 0
+    assert not (generation_dir / "qc.json").exists()
+
+    fidelity_checks = tmp_path / "ring-fidelity-checks.json"
+    checklist_checks = _task9_runtime_checklist(
+        run_root,
+        tmp_path / "ring-checklist-checks.json",
+    )
+    wrong_checks = [
+        {
+            "name": item["name"],
+            "question": item["qc_question"],
+            "result": "pass",
+            "notes": "已逐项检查",
+        }
+        for item in constraints["must_keep"]
+    ]
+    wrong_checks[0]["question"] = "戒指结构是否正确？"
+    write_json(fidelity_checks, wrong_checks)
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--fidelity-checks-json",
+            str(fidelity_checks),
+            "--checklist-checks-json",
+            str(checklist_checks),
+        ]
+    ) != 0
+    assert not (generation_dir / "qc.json").exists()
+
+    write_json(
+        fidelity_checks,
+        [
+            {
+                "name": item["name"],
+                "question": item["qc_question"],
+                "result": "pass",
+                "notes": "已逐项对照戒面、主石、戒圈、开口端点和装饰排列",
+            }
+            for item in constraints["must_keep"]
+        ],
+    )
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--passed",
+            "单枚戒指、左右手、目标指位和结构正确,没有迁移产品图中的手部，迁移检查通过",
+            "--fidelity-checks-json",
+            str(fidelity_checks),
+            "--checklist-checks-json",
+            str(checklist_checks),
+        ]
+    ) == 0
+    qc = read_json(generation_dir / "qc.json")
+    assert qc["status"] == "pass"
+    assert len(qc["fidelity_checks"]) == len(constraints["must_keep"])
+    assert all(check["result"] == "pass" for check in qc["fidelity_checks"])
+    assert "critical_failures" not in qc
+
+
+def test_ring_generate_cli_builds_prompts_for_all_top_three_retry_candidates(
+    tmp_path,
+    monkeypatch,
+):
+    from jewelry_on_hand.cli import main
+
+    product_image = tmp_path / "ring-product.jpg"
+    product_image.write_bytes(b"ring-product")
+    analysis_json = tmp_path / "ring-analysis.json"
+    make_modern_analysis(
+        analysis_json,
+        product_type="戒指",
+        detected_product_type="ring",
+        confirmed_product_type="ring",
+        classification_confidence="high",
+        classification_evidence=["左手无名指根部可见单枚戒指"],
+        classification_source="auto_confirmed",
+        display_mode="worn",
+        source_image_type="worn_source",
+        wear_position="左手无名指根部",
+        visible_appearance="单枚银色戒指",
+        ring_count=1,
+        hand_side="left",
+        finger_position="ring",
+        ring_wear_style="finger_base",
+    )
+    references = _task9_ring_reference_rows(tmp_path)
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        lambda _config: references,
+    )
+    run_root = tmp_path / "runs" / "ring-retry"
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product_image),
+            "--analysis-json",
+            str(analysis_json),
+            "--output-root",
+            str(run_root.parent),
+            "--run-id",
+            run_root.name,
+            "--output-role",
+            "hand_worn",
+        ]
+    ) == 0
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_rank_1",
+            "--fidelity-confirmed",
+            "--output-role",
+            "hand_worn",
+        ]
+    ) == 0
+    captured = {}
+
+    def fake_run_generation(paths, product_image, prompts_by_rank, helper_script, wait=True):
+        captured.update(prompts_by_rank)
+        return [paths.generation_dir / "01"]
+
+    monkeypatch.setattr("jewelry_on_hand.cli.run_generation", fake_run_generation)
+
+    assert main(
+        [
+            "generate",
+            "--run-root",
+            str(run_root),
+            "--helper-script",
+            str(tmp_path / "helper.py"),
+            "--no-wait",
+        ]
+    ) == 0
+    assert list(captured) == [1, 2, 3]
+
+
+def test_cli_end_to_end_necklace_worn_with_fidelity_coverage(tmp_path, monkeypatch):
+    from jewelry_on_hand.cli import main
+
+    product_image = tmp_path / "necklace-product.jpg"
+    product_image.write_bytes(b"necklace-product")
+    analysis_json = tmp_path / "necklace-analysis.json"
+    make_modern_analysis(
+        analysis_json,
+        product_type="普通项链",
+        detected_product_type="necklace",
+        confirmed_product_type="necklace",
+        classification_confidence="high",
+        classification_evidence=["完整链条与锁骨佩戴关系清晰"],
+        classification_source="auto_confirmed",
+        visible_appearance="一层珍珠项链，正面中心保留随形链节",
+        special_requirements=["随形链节的轮廓和连接位置不得改变"],
+        length_category="collarbone",
+        chain_or_strand_type="beaded",
+        uncertain_details=[],
+    )
+    reference = _task9_reference_row(tmp_path, "necklace", "worn")
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        lambda _config: [reference],
+    )
+    output_root = tmp_path / "runs"
+    run_root = output_root / "necklace-worn"
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product_image),
+            "--analysis-json",
+            str(analysis_json),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            run_root.name,
+            "--output-role",
+            "lifestyle",
+        ]
+    ) == 0
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_rank_1",
+            "--fidelity-confirmed",
+            "--output-role",
+            "lifestyle",
+            "--fidelity-notes",
+            "已逐项确认随形链节",
+        ]
+    ) == 0
+
+    constraints_path = run_root / "analysis" / "product_fidelity_constraints.json"
+    constraints = read_json(constraints_path)
+    assert constraints["review_status"] == "confirmed"
+    assert len(constraints["must_keep"]) == 1
+    selected = read_json(run_root / "analysis" / "selected_references.json")
+    assert selected[0]["rank"] == 1
+    assert (run_root / "review" / "review.html").is_file()
+    decision = read_json(run_root / "review" / "review_decision.json")
+    assert decision["fidelity_confirmed"] is True
+    assert decision["confirmation_snapshot"]["confirmed_product_type"] == "necklace"
+    assert decision["confirmation_snapshot"]["display_mode"] == "worn"
+
+    helper_script, helper_log = _task9_local_helper(tmp_path)
+    assert main(
+        [
+            "generate",
+            "--run-root",
+            str(run_root),
+            "--helper-script",
+            str(helper_script),
+            "--no-wait",
+        ]
+    ) == 0
+
+    generation_dir = run_root / "generation" / "01"
+    assert (generation_dir / "prompt.txt").is_file()
+    assert (generation_dir / "submit.json").is_file()
+    _assert_task9_submit_call(
+        helper_log,
+        run_root,
+        selected[0]["selected_reference"],
+        generation_dir,
+    )
+
+    fidelity_checks = tmp_path / "necklace-fidelity-checks.json"
+    checklist_checks = _task9_runtime_checklist(
+        run_root,
+        tmp_path / "necklace-checklist-checks.json",
+    )
+    must_keep = constraints["must_keep"][0]
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+        ]
+    ) != 0
+    assert not (generation_dir / "qc.json").exists()
+    write_json(
+        fidelity_checks,
+        [
+            {
+                "name": must_keep["name"],
+                "question": must_keep["qc_question"],
+                "result": "fail",
+                "notes": "随形轮廓错误",
+            }
+        ],
+    )
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--fidelity-checks-json",
+            str(fidelity_checks),
+            "--checklist-checks-json",
+            str(checklist_checks),
+        ]
+    ) != 0
+    assert not (generation_dir / "qc.json").exists()
+    write_json(
+        fidelity_checks,
+        [
+            {
+                "name": must_keep["name"],
+                "question": must_keep["qc_question"],
+                "result": "pass",
+                "notes": "轮廓与连接位置一致",
+            }
+        ],
+    )
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--passed",
+            "构图正确,产品结构一致",
+            "--fidelity-checks-json",
+            str(fidelity_checks),
+            "--checklist-checks-json",
+            str(checklist_checks),
+        ]
+    ) == 0
+    qc = read_json(generation_dir / "qc.json")
+    assert qc["status"] == "pass"
+    assert qc["fidelity_checks"][0]["result"] == "pass"
+
+
+def test_cli_end_to_end_pendant_necklace_hand_held_and_critical_gate(
+    tmp_path,
+    monkeypatch,
+):
+    from jewelry_on_hand.cli import main
+
+    product_image = tmp_path / "pendant-product.jpg"
+    product_image.write_bytes(b"pendant-product")
+    analysis_json = tmp_path / "pendant-analysis.json"
+    make_modern_analysis(
+        analysis_json,
+        product_type="带链吊坠",
+        detected_product_type="pendant_necklace",
+        confirmed_product_type="pendant_necklace",
+        classification_confidence="high",
+        classification_evidence=["完整链条连接一个中央吊坠"],
+        classification_source="auto_confirmed",
+        display_mode="hand_held",
+        visible_appearance="单层金属链连接一个中央雕刻吊坠",
+        special_requirements=["吊坠连接点和雕刻朝向不得改变"],
+        length_category="upper_chest",
+        chain_or_strand_type="metal_chain",
+        has_pendant=True,
+        pendant_count=1,
+        pendant_layer=1,
+        pendant_position="front_center",
+        pendant_orientation="slightly_turned",
+        connection_structure="metal_bail",
+        symmetry="approximately_symmetric",
+        uncertain_details=[],
+    )
+    reference = _task9_reference_row(tmp_path, "pendant_necklace", "hand_held")
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        lambda _config: [reference],
+    )
+    output_root = tmp_path / "runs"
+    run_root = output_root / "pendant-hand-held"
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product_image),
+            "--analysis-json",
+            str(analysis_json),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            run_root.name,
+            "--pendant-orientation",
+            "front_facing",
+            "--output-role",
+            "hand_worn",
+        ]
+    ) == 0
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_rank_1",
+            "--fidelity-confirmed",
+            "--output-role",
+            "hand_worn",
+            "--fidelity-notes",
+            "已确认吊坠连接与雕刻朝向",
+        ]
+    ) == 0
+
+    analysis = read_json(run_root / "analysis" / "product_analysis.json")
+    decision = read_json(run_root / "review" / "review_decision.json")
+    assert analysis["classification_source"] == "manual_override"
+    assert analysis["pendant_orientation"] == "front_facing"
+    assert decision["confirmation_snapshot"]["confirmed_product_type"] == "pendant_necklace"
+    assert decision["confirmation_snapshot"]["source_image_type"] == "worn_source"
+    assert decision["confirmation_snapshot"]["display_mode"] == "hand_held"
+    assert decision["confirmation_snapshot"]["pendant_orientation"] == "front_facing"
+
+    helper_script, helper_log = _task9_local_helper(tmp_path)
+    assert main(
+        [
+            "generate",
+            "--run-root",
+            str(run_root),
+            "--helper-script",
+            str(helper_script),
+            "--no-wait",
+        ]
+    ) == 0
+    generation_dir = run_root / "generation" / "01"
+    _assert_task9_submit_call(
+        helper_log,
+        run_root,
+        read_json(run_root / "analysis" / "selected_references.json")[0][
+            "selected_reference"
+        ],
+        generation_dir,
+    )
+    assert "hand_held" in (generation_dir / "prompt.txt").read_text(encoding="utf-8")
+    assert (generation_dir / "submit.json").is_file()
+
+    constraints = read_json(
+        run_root / "analysis" / "product_fidelity_constraints.json"
+    )
+    fidelity_checks = tmp_path / "pendant-fidelity-checks.json"
+    checklist_checks = _task9_runtime_checklist(
+        run_root,
+        tmp_path / "pendant-checklist-checks.json",
+    )
+    write_json(
+        fidelity_checks,
+        [
+            {
+                "name": item["name"],
+                "question": item["qc_question"],
+                "result": "pass",
+                "notes": "关键结构与输入图一致",
+            }
+            for item in constraints["must_keep"]
+        ],
+    )
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--fidelity-checks-json",
+            str(fidelity_checks),
+            "--checklist-checks-json",
+            str(checklist_checks),
+            "--critical-failures",
+            "auto_chain_added",
+        ]
+    ) != 0
+    assert not (generation_dir / "qc.json").exists()
+
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--passed",
+            "吊坠结构一致,链条完整,手持接触真实",
+            "--fidelity-checks-json",
+            str(fidelity_checks),
+            "--checklist-checks-json",
+            str(checklist_checks),
+        ]
+    ) == 0
+    qc = read_json(generation_dir / "qc.json")
+    assert qc["status"] == "pass"
+    assert len(qc["fidelity_checks"]) == len(constraints["must_keep"])
+
+
+def test_cli_end_to_end_legacy_bracelet_json_and_classification_catalog(
+    tmp_path,
+    monkeypatch,
+):
+    from jewelry_on_hand.cli import main
+
+    def fail_if_feishu_is_called(_config):
+        raise AssertionError("显式本地 classification 不得调用飞书参考源")
+
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.sync_and_load_reference_rows",
+        fail_if_feishu_is_called,
+    )
+
+    product_image = tmp_path / "bracelet-product.jpg"
+    product_image.write_bytes(b"bracelet-product")
+    analysis_json = tmp_path / "legacy-bracelet-analysis.json"
+    legacy_analysis = make_analysis(analysis_json)
+    reference = tmp_path / "bracelet-reference.jpg"
+    reference.write_bytes(b"bracelet-reference")
+    classification = tmp_path / "legacy-classification.xlsx"
+    make_catalog(classification, reference)
+    output_root = tmp_path / "runs"
+    run_root = output_root / "legacy-bracelet"
+
+    assert main(
+        [
+            "prepare-review",
+            "--product-image",
+            str(product_image),
+            "--analysis-json",
+            str(analysis_json),
+            "--classification",
+            str(classification),
+            "--reference-wiki-url",
+            "invalid://must-not-be-used",
+            "--reference-table-name",
+            "不存在的飞书表",
+            "--reference-cache-root",
+            str(tmp_path / "invalid-feishu-cache"),
+            "--output-root",
+            str(output_root),
+            "--run-id",
+            run_root.name,
+            "--output-role",
+            "hand_worn",
+        ]
+    ) == 0
+    assert read_json(run_root / "analysis" / "product_analysis.json") == legacy_analysis
+    assert (run_root / "analysis" / "selected_references.json").is_file()
+    assert (run_root / "review" / "review.html").is_file()
+
+    assert main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            "generate_rank_1",
+            "--fidelity-confirmed",
+            "--output-role",
+            "hand_worn",
+            "--fidelity-notes",
+            "历史手串沿用旧分析字段",
+        ]
+    ) == 0
+    decision = read_json(run_root / "review" / "review_decision.json")
+    assert decision["fidelity_confirmed"] is True
+    assert decision["confirmation_snapshot"]["confirmed_product_type"] == "bracelet"
+    assert "detected_product_type" not in read_json(
+        run_root / "analysis" / "product_analysis.json"
+    )
+
+    helper_script, helper_log = _task9_local_helper(tmp_path)
+    assert main(
+        [
+            "generate",
+            "--run-root",
+            str(run_root),
+            "--helper-script",
+            str(helper_script),
+            "--no-wait",
+        ]
+    ) == 0
+    generation_dir = run_root / "generation" / "01"
+    _assert_task9_submit_call(
+        helper_log,
+        run_root,
+        read_json(run_root / "analysis" / "selected_references.json")[0][
+            "selected_reference"
+        ],
+        generation_dir,
+    )
+    assert (generation_dir / "hand-reference.jpg").is_file()
+    assert (generation_dir / "submit.json").is_file()
+    checklist_checks = _task9_runtime_checklist(
+        run_root,
+        tmp_path / "legacy-bracelet-checklist.json",
+    )
+
+    assert main(
+        [
+            "qc",
+            "--generation-dir",
+            str(generation_dir),
+            "--status",
+            "pass",
+            "--passed",
+            "手串结构一致,手腕构图正确",
+            "--checklist-checks-json",
+            str(checklist_checks),
+        ]
+    ) == 0
+    assert read_json(generation_dir / "qc.json")["status"] == "pass"
 
 
 def test_prepare_review_rejects_ignore_pending_enrichment_with_local_classification_before_run_creation(
@@ -2576,7 +2796,7 @@ def _task9_reference_row(tmp_path, product_type, display_mode):
         bracelet_applicability="否",
         default_strategy="优先使用",
         style_category="自然精致",
-        scene_keywords="深色背景，自然光",
+        scene_keywords="自然光",
         jewelry_type="项链",
         recommended_usage=(
             "锁骨佩戴展示" if not hand_held else "双手捏持，完整链条自然垂落"
@@ -2726,140 +2946,3 @@ def _assert_task9_submit_call(
     assert reference_copy.read_bytes() == expected_reference_path.read_bytes()
     expected_product_path = expected_product or run_root / "input" / "product-on-hand.jpg"
     assert command[image_indexes[1] + 1] == str(expected_product_path)
-
-
-def _ready_cli_qc_generation(tmp_path):
-    generation_dir = tmp_path / "run" / "generation" / "01"
-    generation_dir.mkdir(parents=True)
-    analysis = ProductAnalysis.from_dict(
-        {
-            "product_type": "bracelet",
-            "detected_product_type": "bracelet",
-            "confirmed_product_type": "bracelet",
-            "classification_confidence": "high",
-            "classification_evidence": ["手腕处可见闭合珠串"],
-            "classification_source": "manual_override",
-            "display_mode": "worn",
-            "source_image_type": "worn_source",
-            "wear_position": "手腕",
-            "visible_appearance": "圆珠手链主珠右侧有一颗透明随形",
-            "color_family": ["海蓝", "透明"],
-            "style_mood": "清透",
-            "composition": "真人手腕近景",
-            "product_dimensions": {"bead_diameter_mm": 8.0},
-            "needs_full_front_display": True,
-            "special_requirements": ["保持可见珠序"],
-            "layer_count": 1,
-            "has_pendant": False,
-            "pendant_count": 0,
-            "pendant_layer": None,
-            "is_independent_multi_item": False,
-        }
-    )
-    constraints_data = build_product_fidelity_constraints(analysis).to_dict()
-    if constraints_data["review_status"] == "pending":
-        constraints_data["review_status"] = "confirmed"
-    constraints = ProductFidelityConstraints.from_dict(constraints_data)
-    snapshot = ReferenceCompositionSnapshot(
-        rank=1,
-        reference_file="rank-1-scene.jpg",
-        reference_sha256="1" * 64,
-        output_role="hand_worn",
-        framing="手腕近景",
-        camera_angle="平视",
-        subject_placement="手腕居中",
-        visible_body_regions=("左手腕",),
-        pose=ReferencePose("身体未入镜", "前臂横向", "手背朝上", "左手"),
-        clothing="黑色袖口",
-        background="深色木纹",
-        lighting="左侧柔光",
-        replacement_target=ReplacementTarget("左手腕", "原手串", 1),
-        other_jewelry_to_remove=(),
-        text_or_ui_risk="none",
-        product_visibility_sufficient=True,
-        composition_signature="signature",
-    )
-    write_json(
-        generation_dir / "product-analysis.json",
-        product_analysis_to_dict(analysis),
-    )
-    write_json(
-        generation_dir / "product-fidelity-constraints.json",
-        constraints_data,
-    )
-    write_json(
-        generation_dir / "reference-composition-snapshot.json",
-        snapshot.to_dict(),
-    )
-    write_json(
-        generation_dir / "input-manifest.json",
-        {"schema_version": 1, "output_role": "hand_worn"},
-    )
-    (generation_dir / "scene-reference.jpg").write_bytes(b"scene")
-    (generation_dir / "product-reference.jpg").write_bytes(b"product")
-    (generation_dir / "result.png").write_bytes(b"result")
-    write_qc_review_page(generation_dir)
-
-    fidelity_path = tmp_path / "fidelity-checks.json"
-    write_json(
-        fidelity_path,
-        [
-            {
-                "name": item.name,
-                "question": item.qc_question,
-                "result": "pass",
-                "notes": f"对照产品图确认 {item.name} 结构和位置一致",
-            }
-            for item in constraints.must_keep
-        ],
-    )
-    checklist_path = tmp_path / "checklist-checks.json"
-    write_json(
-        checklist_path,
-        [
-            {
-                "id": item.id,
-                "question": item.question,
-                "result": "pass",
-                "notes": f"逐项检查确认：{item.question}",
-            }
-            for item in build_qc_checklist(
-                product_analysis=analysis,
-                fidelity_constraints=constraints,
-            )
-        ],
-    )
-    reference_path = tmp_path / "reference-preservation-checks.json"
-    write_json(
-        reference_path,
-        [
-            {
-                "name": name,
-                "question": question,
-                "result": "pass",
-                "issue_code": None,
-                "notes": f"对照参考底图网格确认 {name} 保持一致",
-                "evidence": _cli_reference_evidence(name),
-            }
-            for name, question in build_reference_preservation_checklist(snapshot)
-        ],
-    )
-    return generation_dir, fidelity_path, checklist_path, reference_path
-
-
-def _cli_reference_evidence(name):
-    comparison_sources = {
-        "replacement_target_preserved": "confirmed_snapshot",
-        "single_target_product": "product_identity",
-    }
-    evidence = {
-        "comparison_source": comparison_sources.get(name, "scene_reference"),
-        "region": f"{name} 对应画面区域",
-        "observation": f"逐项对照确认 {name} 的可见事实",
-    }
-    if name == "source_jewelry_removed":
-        evidence.update(
-            source_jewelry_subject_visible=False,
-            residual_scope="none",
-        )
-    return evidence

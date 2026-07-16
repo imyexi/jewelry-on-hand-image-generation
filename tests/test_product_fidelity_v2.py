@@ -1,29 +1,27 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import replace
 
 import pytest
 
-import jewelry_on_hand.product_analysis as product_analysis_module
 from jewelry_on_hand.models import (
     MustKeepConstraint,
     PendantSemantics,
     ProductAnalysis,
     ProductFidelityConstraints,
 )
-from jewelry_on_hand.product_analysis import product_analysis_to_dict
 from jewelry_on_hand.product_fidelity import (
     build_product_fidelity_constraints,
     product_analysis_sha256,
     validate_product_fidelity_constraints,
 )
+from jewelry_on_hand.qc import build_qc_checklist
 
 
 PENDANT_TERMS = ("吊坠", "主吊坠", "链坠", "流苏", "坠子")
-CONSTRAINT_SEMANTIC_FIELD_PATHS = (
+SEMANTIC_FIELD_PATHS = (
     "detected_keywords[0]",
     "must_not_change[0]",
     "must_keep[0].name",
@@ -35,12 +33,6 @@ CONSTRAINT_SEMANTIC_FIELD_PATHS = (
     "must_keep[0].forbid[0]",
     "must_keep[0].qc_question",
 )
-SEMANTIC_FIELD_PATHS = (
-    *CONSTRAINT_SEMANTIC_FIELD_PATHS,
-    "pendant_semantics.position",
-    "pendant_semantics.orientation",
-    "pendant_semantics.connection",
-)
 PRESENT_PENDANT_CONFLICT_PHRASES = (
     "无吊坠",
     "未见吊坠",
@@ -49,29 +41,6 @@ PRESENT_PENDANT_CONFLICT_PHRASES = (
     "必须新增第二颗吊坠",
     "要求生成第二颗吊坠",
 )
-
-
-def _absent_semantics() -> PendantSemantics:
-    return PendantSemantics(
-        presence="absent",
-        count=0,
-        layer=None,
-        creation_policy="forbid",
-    )
-
-
-def _present_semantics(layer: int = 2) -> PendantSemantics:
-    position = "第二层中央" if layer == 2 else f"第 {layer} 层中央"
-    connection = "吊环连接第二层链条" if layer == 2 else f"吊环连接第 {layer} 层链条"
-    return PendantSemantics(
-        presence="present",
-        count=1,
-        layer=layer,
-        creation_policy="forbid",
-        position=position,
-        orientation="正面向前",
-        connection=connection,
-    )
 
 
 def _necklace_analysis(
@@ -124,106 +93,6 @@ def _necklace_analysis(
     )
 
 
-def _bracelet_analysis(*, with_keyword: bool = True) -> ProductAnalysis:
-    return ProductAnalysis.from_dict(
-        {
-            "product_type": "bracelet",
-            "detected_product_type": "bracelet",
-            "confirmed_product_type": "bracelet",
-            "classification_confidence": "high",
-            "classification_evidence": ["手腕处可见闭合珠串"],
-            "classification_source": "manual_override",
-            "display_mode": "worn",
-            "source_image_type": "worn_source",
-            "wear_position": "手腕",
-            "visible_appearance": (
-                "圆珠手链主珠右侧有一颗透明随形"
-                if with_keyword
-                else "连续圆珠手链"
-            ),
-            "color_family": ["海蓝", "透明"],
-            "style_mood": "清透",
-            "composition": "真人手腕近景",
-            "product_dimensions": {"bead_diameter_mm": 8.0},
-            "needs_full_front_display": True,
-            "special_requirements": ["保持可见珠序"],
-            "layer_count": 1,
-            "has_pendant": False,
-            "pendant_count": 0,
-            "pendant_layer": None,
-            "is_independent_multi_item": False,
-        }
-    )
-
-
-def _ring_analysis() -> ProductAnalysis:
-    return ProductAnalysis.from_dict(
-        {
-            "product_type": "ring",
-            "detected_product_type": "ring",
-            "confirmed_product_type": "ring",
-            "classification_confidence": "high",
-            "classification_evidence": ["左手无名指根部可见单枚戒指"],
-            "classification_source": "manual_override",
-            "display_mode": "worn",
-            "source_image_type": "worn_source",
-            "wear_position": "左手无名指根部",
-            "visible_appearance": "单枚银色开口戒指，椭圆戒面中央有透明主石",
-            "color_family": ["银色", "透明"],
-            "style_mood": "克制",
-            "composition": "真人手部近景",
-            "product_dimensions": {"width_mm": 9.0},
-            "needs_full_front_display": True,
-            "special_requirements": ["保持开口端点方向"],
-            "layer_count": 1,
-            "has_pendant": False,
-            "pendant_count": 0,
-            "pendant_layer": None,
-            "occluded_parts": ["戒圈背面"],
-            "uncertain_details": ["镶嵌背面结构"],
-            "is_independent_multi_item": False,
-            "ring_count": 1,
-            "hand_side": "left",
-            "finger_position": "ring",
-            "ring_wear_style": "finger_base",
-        }
-    )
-
-
-def _analysis_for_category(product_type: str) -> ProductAnalysis:
-    if product_type == "bracelet":
-        return _bracelet_analysis()
-    if product_type == "necklace":
-        return _necklace_analysis()
-    if product_type == "pendant_necklace":
-        return _necklace_analysis(pendant=True)
-    if product_type == "ring":
-        return _ring_analysis()
-    raise AssertionError(f"未覆盖测试品类：{product_type}")
-
-
-def _tampered_copy(
-    constraints: ProductFidelityConstraints,
-    field_name: str,
-    value: object,
-) -> ProductFidelityConstraints:
-    copied = replace(constraints, source=dict(constraints.source))
-    object.__setattr__(copied, field_name, value)
-    return copied
-
-
-def _tampered_pendant_constraints(
-    product: ProductAnalysis,
-    field_name: str,
-    value: object,
-) -> ProductFidelityConstraints:
-    constraints = build_product_fidelity_constraints(product)
-    assert constraints.pendant_semantics is not None
-    semantics = replace(constraints.pendant_semantics)
-    object.__setattr__(semantics, field_name, value)
-    return _tampered_copy(constraints, "pendant_semantics", semantics)
-
-
 def _safe_item() -> MustKeepConstraint:
     return MustKeepConstraint(
         name="微珠链整体结构",
@@ -262,23 +131,10 @@ def _inject_semantic_text(
 def _inject_present_semantic_text(
     constraints: ProductFidelityConstraints, field_path: str, text: str
 ) -> ProductFidelityConstraints:
-    if field_path.startswith("pendant_semantics."):
-        assert constraints.pendant_semantics is not None
-        field_name = field_path.removeprefix("pendant_semantics.")
-        semantics = replace(
-            constraints.pendant_semantics,
-            **{field_name: text},
-        )
-        return replace(constraints, pendant_semantics=semantics)
     if field_path == "detected_keywords[0]":
         return replace(constraints, detected_keywords=(text,))
     if field_path == "must_not_change[0]":
-        if text != "禁止新增第二颗吊坠":
-            return replace(constraints, must_not_change=(text,))
-        return replace(
-            constraints,
-            must_not_change=(*constraints.must_not_change, text),
-        )
+        return replace(constraints, must_not_change=(text,))
     item = constraints.must_keep[0]
     field_name = field_path.removeprefix("must_keep[0].")
     if field_name == "forbid[0]":
@@ -304,17 +160,6 @@ def _constraints_data(**overrides: object) -> dict[str, object]:
         "review_status": "not_applicable",
     }
     data.update(overrides)
-    if data["schema_version"] == 2:
-        semantics = data.get("pendant_semantics")
-        product_type = (
-            "pendant_necklace"
-            if isinstance(semantics, dict) and semantics.get("presence") == "present"
-            else "necklace"
-        )
-        data["source"] = {
-            **data["source"],  # type: ignore[arg-type]
-            "product_type": product_type,
-        }
     return data
 
 
@@ -338,24 +183,18 @@ def test_v1_constraints_round_trip_does_not_add_pendant_semantics() -> None:
                 "presence": "absent",
                 "count": 0,
                 "layer": None,
-                "position": None,
-                "orientation": None,
-                "connection": None,
                 "creation_policy": "forbid",
             },
-            _absent_semantics(),
+            PendantSemantics("absent", 0, None, "forbid"),
         ),
         (
             {
                 "presence": "present",
                 "count": 1,
                 "layer": 2,
-                "position": "第二层中央",
-                "orientation": "正面向前",
-                "connection": "吊环连接第二层链条",
                 "creation_policy": "forbid",
             },
-            _present_semantics(),
+            PendantSemantics("present", 1, 2, "forbid"),
         ),
     ],
 )
@@ -363,12 +202,6 @@ def test_v2_constraints_round_trip_structured_pendant_semantics(
     payload: dict[str, object], expected: PendantSemantics
 ) -> None:
     raw = _constraints_data(schema_version=2, pendant_semantics=payload)
-    raw["source"] = {
-        **raw["source"],  # type: ignore[arg-type]
-        "product_type": (
-            "pendant_necklace" if expected.presence == "present" else "necklace"
-        ),
-    }
     constraints = ProductFidelityConstraints.from_dict(raw)
 
     assert constraints.pendant_semantics == expected
@@ -501,7 +334,9 @@ def test_direct_constraints_reject_non_integer_schema_versions(
 
 def test_direct_v1_constraints_reject_non_null_pendant_semantics() -> None:
     with pytest.raises(ValueError, match="v1.*pendant_semantics"):
-        _direct_constraints(pendant_semantics=_absent_semantics())
+        _direct_constraints(
+            pendant_semantics=PendantSemantics("absent", 0, None, "forbid")
+        )
 
 
 def test_direct_v2_constraints_require_pendant_semantics() -> None:
@@ -516,28 +351,19 @@ def test_direct_v2_constraints_convert_raw_pendant_semantics_mapping() -> None:
             "presence": "present",
             "count": 1,
             "layer": 3,
-            "position": "第 3 层中央",
-            "orientation": "正面向前",
-            "connection": "吊环连接第 3 层链条",
             "creation_policy": "forbid",
         },
     )
 
-    assert constraints.pendant_semantics == _present_semantics(3)
+    assert constraints.pendant_semantics == PendantSemantics(
+        "present", 1, 3, "forbid"
+    )
 
 
 @pytest.mark.parametrize("layer", [True, 1.0, 4])
 def test_direct_pendant_semantics_reject_invalid_layer(layer: object) -> None:
     with pytest.raises(ValueError, match="layer"):
-        PendantSemantics(
-            presence="present",
-            count=1,
-            layer=layer,  # type: ignore[arg-type]
-            creation_policy="forbid",
-            position="中央",
-            orientation="正面向前",
-            connection="吊环连接链条",
-        )
+        PendantSemantics("present", 1, layer, "forbid")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -630,7 +456,9 @@ def test_plain_necklace_builder_emits_v2_absent_contract() -> None:
     constraints = build_product_fidelity_constraints(_necklace_analysis())
 
     assert constraints.schema_version == 2
-    assert constraints.pendant_semantics == _absent_semantics()
+    assert constraints.pendant_semantics == PendantSemantics(
+        "absent", 0, None, "forbid"
+    )
 
 
 def test_plain_necklace_builder_sanitizes_non_pendant_rule_text() -> None:
@@ -648,7 +476,7 @@ def test_pendant_necklace_builder_emits_v2_present_contract_and_traceable_item()
     constraints = build_product_fidelity_constraints(_necklace_analysis(pendant=True))
 
     assert constraints.schema_version == 2
-    assert constraints.pendant_semantics == _present_semantics()
+    assert constraints.pendant_semantics == PendantSemantics("present", 1, 2, "forbid")
     pendant_items = [
         item for item in constraints.must_keep if item.normalized_keyword == "吊坠"
     ]
@@ -688,7 +516,7 @@ def test_v2_validator_rejects_multiple_pendants_when_builder_is_bypassed() -> No
 
 
 @pytest.mark.parametrize("term", PENDANT_TERMS)
-@pytest.mark.parametrize("field_path", CONSTRAINT_SEMANTIC_FIELD_PATHS)
+@pytest.mark.parametrize("field_path", SEMANTIC_FIELD_PATHS)
 def test_absent_v2_rejects_pendant_term_in_every_free_text_field(
     term: str, field_path: str
 ) -> None:
@@ -704,16 +532,17 @@ def test_absent_v2_rejects_pendant_term_in_every_free_text_field(
 @pytest.mark.parametrize(
     "semantics",
     [
-        _present_semantics(1),
-        _present_semantics(2),
+        PendantSemantics("present", 1, 1, "forbid"),
+        PendantSemantics("present", 1, 2, "forbid"),
     ],
 )
 def test_plain_necklace_rejects_present_contract(
     semantics: PendantSemantics,
 ) -> None:
     product = _necklace_analysis()
-    constraints = build_product_fidelity_constraints(product)
-    object.__setattr__(constraints, "pendant_semantics", semantics)
+    constraints = replace(
+        build_product_fidelity_constraints(product), pendant_semantics=semantics
+    )
     with pytest.raises(
         ValueError,
         match="analysis=.*necklace.*canonical=.*present.*prepare-review",
@@ -725,7 +554,7 @@ def test_pendant_necklace_rejects_wrong_layer_contract() -> None:
     product = _necklace_analysis(pendant=True)
     constraints = replace(
         build_product_fidelity_constraints(product),
-        pendant_semantics=_present_semantics(1),
+        pendant_semantics=PendantSemantics("present", 1, 1, "forbid"),
     )
     with pytest.raises(
         ValueError,
@@ -769,237 +598,32 @@ def test_present_v2_accepts_forbid_second_pendant_protection() -> None:
     assert validate_product_fidelity_constraints(product, constraints) is constraints
 
 
-@pytest.mark.parametrize(
-    ("has_pendant", "field_name", "invalid_value"),
-    [
-        (True, "presence", True),
-        (True, "presence", " present "),
-        (True, "count", True),
-        (True, "count", 1.0),
-        (True, "count", 0),
-        (True, "layer", True),
-        (True, "layer", 2.0),
-        (True, "layer", None),
-        (True, "creation_policy", True),
-        (True, "creation_policy", "allow"),
-        (True, "creation_policy", " forbid "),
-        (True, "position", 1),
-        (True, "position", ""),
-        (True, "orientation", False),
-        (True, "orientation", "   "),
-        (True, "connection", 1.0),
-        (True, "connection", "\t"),
-        (False, "count", 1),
-        (False, "layer", 1),
-        (False, "position", "中央"),
-        (False, "orientation", "正面向前"),
-        (False, "connection", "吊环连接"),
-    ],
-)
-def test_validator_strictly_rejects_tampered_pendant_runtime_fields(
-    has_pendant: bool,
-    field_name: str,
-    invalid_value: object,
-) -> None:
-    product = _necklace_analysis(pendant=has_pendant)
-    constraints = _tampered_pendant_constraints(
-        product,
-        field_name,
-        invalid_value,
-    )
-
-    with pytest.raises(ValueError, match=f"pendant_semantics.{field_name}"):
-        validate_product_fidelity_constraints(product, constraints)
-
-
-def test_product_analysis_sha256_uses_canonical_product_analysis_projection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    product = _bracelet_analysis()
-    canonical = {"规范化字段": ["中文", 1, None, False]}
-    monkeypatch.setattr(
-        product_analysis_module,
-        "product_analysis_to_dict",
-        lambda value: canonical if value is product else {},
-    )
-    expected = hashlib.sha256(
-        json.dumps(
-            canonical,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-
-    assert product_analysis_sha256(product) == expected
-
-
-def test_product_analysis_sha256_is_stable_for_equivalent_inputs() -> None:
-    first = _bracelet_analysis()
-    second = ProductAnalysis.from_dict(product_analysis_to_dict(first))
-
-    assert first is not second
-    assert product_analysis_sha256(first) == product_analysis_sha256(second)
-
-
-@pytest.mark.parametrize(
-    ("field_name", "replacement"),
-    [
-        ("visible_appearance", "圆珠手链中央有透明随形"),
-        ("style_mood", "明亮通透"),
-        ("composition", "真人手腕侧面近景"),
-    ],
-)
-def test_product_analysis_sha256_changes_for_business_field_change(
-    field_name: str,
-    replacement: object,
-) -> None:
-    product = _bracelet_analysis()
-    changed = replace(product, **{field_name: replacement})
-
-    assert product_analysis_sha256(product) != product_analysis_sha256(changed)
-
-
-@pytest.mark.parametrize(
-    "product_type",
-    ["bracelet", "necklace", "pendant_necklace", "ring"],
-)
-def test_four_category_builders_bind_canonical_source_and_validate(
-    product_type: str,
-) -> None:
-    product = _analysis_for_category(product_type)
+def test_qc_checklist_uses_absent_v2_contract_for_double_loop_plain_necklace() -> None:
+    product = _necklace_analysis(layer_count=2)
     constraints = build_product_fidelity_constraints(product)
 
-    assert constraints.source["product_type"] == product_type
-    assert constraints.source["product_analysis_sha256"] == (
-        product_analysis_sha256(product)
-    )
-    assert validate_product_fidelity_constraints(product, constraints) is constraints
-
-
-def test_builder_preserves_custom_product_analysis_path() -> None:
-    product = _bracelet_analysis()
-    constraints = build_product_fidelity_constraints(
-        product,
-        product_analysis="analysis/final_product_analysis.json",
+    checklist = build_qc_checklist(
+        product.normalized_product_type,
+        product.display_mode,
+        constraints.must_keep,
+        product_analysis=product,
+        fidelity_constraints=constraints,
     )
 
-    assert constraints.source["product_analysis"] == (
-        "analysis/final_product_analysis.json"
-    )
-    assert validate_product_fidelity_constraints(product, constraints) is constraints
+    assert "主吊坠应为无，且没有新增、补造、复制或悬挂化吊坠" in checklist
+    assert all("第 3 层吊坠" not in question for question in checklist)
 
 
-@pytest.mark.parametrize(
-    "source_change",
-    [
-        {"product_analysis_sha256": None},
-        {"product_analysis_sha256": 1},
-        {"product_analysis_sha256": 1.0},
-        {"product_analysis_sha256": "0" * 64},
-        {"product_type": True},
-        {"product_type": "ring"},
-    ],
-)
-def test_validator_rejects_missing_tampered_or_wrongly_typed_source(
-    source_change: dict[str, object],
-) -> None:
-    product = _bracelet_analysis()
+def test_qc_checklist_uses_present_v2_count_and_layer() -> None:
+    product = _necklace_analysis(pendant=True, layer_count=2)
     constraints = build_product_fidelity_constraints(product)
-    source = dict(constraints.source)
-    source.update(source_change)
-    tampered = _tampered_copy(constraints, "source", source)
 
-    with pytest.raises(ValueError, match="source"):
-        validate_product_fidelity_constraints(product, tampered)
-
-
-def test_validator_rejects_missing_product_analysis_digest_key() -> None:
-    product = _bracelet_analysis()
-    constraints = build_product_fidelity_constraints(product)
-    source = dict(constraints.source)
-    source.pop("product_analysis_sha256")
-    tampered = _tampered_copy(constraints, "source", source)
-
-    with pytest.raises(ValueError, match="source.product_analysis_sha256"):
-        validate_product_fidelity_constraints(product, tampered)
-
-
-@pytest.mark.parametrize(
-    "product_type",
-    ["bracelet", "necklace", "pendant_necklace", "ring"],
-)
-@pytest.mark.parametrize("field_name", ["must_keep", "must_not_change"])
-def test_four_category_validator_rejects_canonical_collection_tampering(
-    product_type: str,
-    field_name: str,
-) -> None:
-    product = _analysis_for_category(product_type)
-    constraints = build_product_fidelity_constraints(product)
-    current = getattr(constraints, field_name)
-    replacement = current[1:] if current else (_safe_item(),)
-    tampered = _tampered_copy(constraints, field_name, replacement)
-
-    with pytest.raises(ValueError, match=field_name):
-        validate_product_fidelity_constraints(product, tampered)
-
-
-@pytest.mark.parametrize(
-    ("field_name", "invalid_value"),
-    [
-        ("schema_version", True),
-        ("must_keep", []),
-        ("must_not_change", []),
-        ("needs_user_review", 1),
-        ("detail_crop_recommended", 0.0),
-    ],
-)
-def test_validator_rejects_canonical_runtime_type_tampering(
-    field_name: str,
-    invalid_value: object,
-) -> None:
-    product = _bracelet_analysis()
-    constraints = build_product_fidelity_constraints(product)
-    tampered = _tampered_copy(constraints, field_name, invalid_value)
-
-    with pytest.raises(ValueError, match=field_name):
-        validate_product_fidelity_constraints(product, tampered)
-
-
-def test_corrected_status_keeps_canonical_validation_strict() -> None:
-    product = _bracelet_analysis()
-    constraints = replace(
-        build_product_fidelity_constraints(product),
-        review_status="corrected",
+    checklist = build_qc_checklist(
+        product.normalized_product_type,
+        product.display_mode,
+        constraints.must_keep,
+        product_analysis=product,
+        fidelity_constraints=constraints,
     )
 
-    assert validate_product_fidelity_constraints(product, constraints) is constraints
-    tampered = _tampered_copy(constraints, "must_not_change", ("任意文本",))
-    with pytest.raises(ValueError, match="must_not_change"):
-        validate_product_fidelity_constraints(product, tampered)
-
-
-def test_not_applicable_status_is_only_valid_for_empty_canonical_review() -> None:
-    product = _bracelet_analysis(with_keyword=False)
-    constraints = build_product_fidelity_constraints(product)
-
-    assert constraints.review_status == "not_applicable"
-    assert validate_product_fidelity_constraints(product, constraints) is constraints
-
-    pending = _tampered_copy(constraints, "review_status", "pending")
-    with pytest.raises(ValueError, match="review_status"):
-        validate_product_fidelity_constraints(product, pending)
-
-
-def test_pending_canonical_cannot_be_changed_to_not_applicable() -> None:
-    product = _bracelet_analysis()
-    constraints = build_product_fidelity_constraints(product)
-
-    assert constraints.review_status == "pending"
-    not_applicable = _tampered_copy(
-        constraints,
-        "review_status",
-        "not_applicable",
-    )
-    with pytest.raises(ValueError, match="review_status"):
-        validate_product_fidelity_constraints(product, not_applicable)
+    assert "现有主吊坠数量是否为 1，且仍位于第 2 层并保持原连接关系" in checklist

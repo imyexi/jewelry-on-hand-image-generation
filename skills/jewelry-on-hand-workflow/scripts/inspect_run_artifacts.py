@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,10 +9,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from validate_prompt_contract import validate_prompt  # noqa: E402
-from validate_qc_record import validate_qc  # noqa: E402
-from validate_reference_snapshot import (  # noqa: E402
-    SnapshotInputError,
-    validate_reference_snapshot,
+from validate_qc_record import (  # noqa: E402
+    _validate_present_pendant_semantic_conflicts,
+    _validate_v2_necklace_analysis_pendant_fields,
+    validate_qc,
 )
 
 REQUIRED_GENERATION_FILES = ("model.txt", "prompt.txt", "submit.json", "result.json", "result.png", "qc.json")
@@ -36,6 +34,7 @@ SUPPORTED_SOURCE_IMAGE_TYPES = {
 }
 SUPPORTED_DISPLAY_MODES = {"worn", "hand_held"}
 NECKLACE_PRODUCT_TYPES = {"necklace", "pendant_necklace"}
+RING_FIELDS = ("ring_count", "hand_side", "finger_position", "ring_wear_style")
 NECKLACE_LENGTH_CATEGORIES = {"choker", "collarbone", "upper_chest", "long"}
 SNAPSHOT_FIELDS = (
     "confirmed_product_type",
@@ -51,913 +50,14 @@ SNAPSHOT_FIELDS = (
     "connection_structure",
     "is_independent_multi_item",
 )
-ANALYSIS_CONFIRMATION_DEFAULTS = {
-    "layer_count": 1,
-    "length_category": None,
-    "has_pendant": False,
-    "pendant_count": 0,
-    "pendant_layer": None,
-    "pendant_position": None,
-    "pendant_orientation": None,
-    "connection_structure": None,
-    "is_independent_multi_item": False,
-}
-RING_SNAPSHOT_FIELDS = (
-    "ring_count",
-    "hand_side",
-    "finger_position",
-    "ring_wear_style",
-)
 GENERATE_ACTIONS = {"generate_rank_1", "generate_selected", "generate_multiple"}
 BLOCKED_ACTIONS = {"rerank", "manual_reference"}
-SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+PENDANT_SENSITIVE_TERMS = ("吊坠", "主吊坠", "链坠", "流苏", "坠子")
 
 
 def _load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _safe_copied_file(generation_dir: Path, value: Any, label: str, errors: list[str]) -> Path | None:
-    if not isinstance(value, str) or not value.strip():
-        errors.append(f"{label}.copied_file 必须是非空字符串")
-        return None
-    if Path(value).name != value or Path(value).is_absolute():
-        errors.append(f"{label}.copied_file 禁止路径逃逸：{value}")
-        return None
-    path = generation_dir / value
-    if not path.is_file():
-        errors.append(f"{label} 固化副本不存在：{value}")
-        return None
-    return path
-
-
-def _manifest_entry(
-    generation_dir: Path,
-    value: Any,
-    label: str,
-    errors: list[str],
-    *,
-    require_source: bool,
-) -> tuple[Path | None, Path | None]:
-    required = {"copied_file", "sha256"}
-    if require_source:
-        required |= {"order", "role", "source_path"}
-    if not isinstance(value, dict) or set(value) != required:
-        errors.append(f"{label} 字段集合不合法")
-        return None, None
-    copied = _safe_copied_file(generation_dir, value.get("copied_file"), label, errors)
-    digest = value.get("sha256")
-    if not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None:
-        errors.append(f"{label}.sha256 必须是 64 位小写十六进制摘要")
-    elif copied is not None and _sha256(copied) != digest:
-        errors.append(f"{label} 固化副本摘要与 manifest 不一致")
-    source: Path | None = None
-    if require_source:
-        raw_source = value.get("source_path")
-        if not isinstance(raw_source, str) or not raw_source.strip():
-            errors.append(f"{label}.source_path 必须是非空路径")
-        else:
-            source = Path(raw_source)
-            if not source.is_file():
-                errors.append(f"{label} 源文件不存在：{source}")
-                source = None
-            elif isinstance(digest, str) and _sha256(source) != digest:
-                errors.append(f"{label} 源文件摘要与 manifest 不一致")
-    return copied, source
-
-
-def _same_path(left: Path | None, right: Path | None) -> bool:
-    if left is None or right is None:
-        return False
-    try:
-        return left.resolve() == right.resolve()
-    except OSError:
-        return False
-
-
-def _canonical_json_sha256(value: Any) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _load_required_json(
-    path: Path,
-    label: str,
-    errors: list[str],
-) -> Any | None:
-    if not path.is_file():
-        errors.append(f"缺少 {label}")
-        return None
-    try:
-        return _load_json(path)
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        errors.append(f"{label} 不是有效 UTF-8 JSON")
-        return None
-
-
-def _load_modern_run_context(run_root: Path) -> tuple[dict[str, Any], list[str]]:
-    errors: list[str] = []
-    context: dict[str, Any] = {
-        "run_root": run_root,
-        "product_source": run_root / "input" / "product-on-hand.jpg",
-        "analysis_path": run_root / "analysis" / "product_analysis.json",
-        "canonical_path": run_root / "analysis" / "product_fidelity_constraints.json",
-        "candidates_path": run_root / "analysis" / "reference_composition_snapshots.json",
-        "selected_path": run_root / "analysis" / "selected_references.json",
-        "role_path": run_root / "analysis" / "output_role.json",
-        "decision_path": run_root / "review" / "review_decision.json",
-        "snapshot_path": run_root / "review" / "reference_composition_snapshot.json",
-    }
-    if not context["product_source"].is_file():
-        errors.append("缺少 input/product-on-hand.jpg 产品原图")
-
-    analysis = _load_required_json(
-        context["analysis_path"], "analysis/product_analysis.json", errors
-    )
-    canonical = _load_required_json(
-        context["canonical_path"],
-        "analysis/product_fidelity_constraints.json",
-        errors,
-    )
-    candidates = _load_required_json(
-        context["candidates_path"],
-        "analysis/reference_composition_snapshots.json",
-        errors,
-    )
-    selected = _load_required_json(
-        context["selected_path"], "analysis/selected_references.json", errors
-    )
-    role_data = _load_required_json(
-        context["role_path"], "analysis/output_role.json", errors
-    )
-    decision = _load_required_json(
-        context["decision_path"], "review/review_decision.json", errors
-    )
-    snapshot = _load_required_json(
-        context["snapshot_path"],
-        "review/reference_composition_snapshot.json",
-        errors,
-    )
-    context.update(
-        analysis=analysis,
-        canonical=canonical,
-        candidates=candidates,
-        selected=selected,
-        decision=decision,
-        snapshot=snapshot,
-    )
-
-    root_role: str | None = None
-    if not isinstance(role_data, dict):
-        if role_data is not None:
-            errors.append("analysis/output_role.json 必须是 JSON 对象")
-    else:
-        candidate = role_data.get("output_role")
-        if not isinstance(candidate, str) or candidate not in {"hand_worn", "lifestyle"}:
-            errors.append("analysis/output_role.json 的 output_role 无效")
-        else:
-            root_role = candidate
-    context["output_role"] = root_role
-
-    selected_ranks_available: set[int] = set()
-    if selected is not None:
-        selected_errors, selected_ranks_available = _validate_selected_references(
-            context["selected_path"], run_root
-        )
-        errors.extend(selected_errors)
-
-    selected_rank: int | None = None
-    if not isinstance(decision, dict):
-        if decision is not None:
-            errors.append("review/review_decision.json 必须是 JSON 对象")
-    else:
-        decision_errors, decision_ranks = _validate_review_decision(
-            context["decision_path"],
-            selected_ranks_available,
-            analysis if isinstance(analysis, dict) else None,
-        )
-        errors.extend(decision_errors)
-        if len(decision_ranks) != 1:
-            errors.append("review_decision 的 selected rank 必须是唯一 JSON 整数")
-        else:
-            selected_rank = decision_ranks[0]
-        decision_role = decision.get("output_role")
-        if not isinstance(decision_role, str) or decision_role not in {
-            "hand_worn",
-            "lifestyle",
-        }:
-            errors.append("review_decision.output_role 无效")
-        elif root_role is not None and decision_role != root_role:
-            errors.append("review_decision.output_role 与 analysis/output_role.json 不一致")
-        if isinstance(snapshot, dict):
-            expected_digest = _canonical_json_sha256(snapshot)
-            if decision.get("reference_snapshot_sha256") != expected_digest:
-                errors.append("review_decision 的参考构图快照摘要不一致")
-    context["selected_rank"] = selected_rank
-
-    if not isinstance(snapshot, dict):
-        if snapshot is not None:
-            errors.append("review/reference_composition_snapshot.json 必须是 JSON 对象")
-    else:
-        snapshot_rank = snapshot.get("rank")
-        if type(snapshot_rank) is not int or snapshot_rank < 1:
-            errors.append("根参考构图快照 rank 必须是正 JSON 整数")
-        elif selected_rank is not None and snapshot_rank != selected_rank:
-            errors.append("参考构图快照 rank 与 review_decision selected rank 不一致")
-        snapshot_role = snapshot.get("output_role")
-        if not isinstance(snapshot_role, str) or snapshot_role not in {
-            "hand_worn",
-            "lifestyle",
-        }:
-            errors.append("根参考构图快照 output_role 无效")
-        elif root_role is not None and snapshot_role != root_role:
-            errors.append("根参考构图快照 output_role 与 analysis/output_role.json 不一致")
-    errors.extend(
-        _validate_candidate_snapshots(
-            candidates,
-            selected,
-            snapshot,
-            root_role,
-            run_root,
-            context["selected_path"],
-        )
-    )
-
-    selected_item: dict[str, Any] | None = None
-    if not isinstance(selected, list):
-        if selected is not None:
-            errors.append("analysis/selected_references.json 必须是 JSON 列表")
-    else:
-        matches = [
-            item
-            for item in selected
-            if (
-                isinstance(item, dict)
-                and type(item.get("rank")) is int
-                and item.get("rank") == selected_rank
-            )
-        ]
-        if selected_rank is not None and len(matches) != 1:
-            errors.append("analysis/selected_references.json 必须唯一包含 selected rank")
-        elif matches:
-            selected_item = matches[0]
-    context["selected_item"] = selected_item
-
-    source_reference: Path | None = None
-    review_reference: Path | None = None
-    if selected_item is not None:
-        raw_review = selected_item.get("selected_reference")
-        if not isinstance(raw_review, str) or not raw_review.strip():
-            errors.append("selected_reference 必须是非空路径")
-        else:
-            review_reference = _resolve_artifact_path(
-                raw_review, run_root, context["selected_path"].parent
-            )
-            if not review_reference.is_file():
-                errors.append("selected_reference 对应的 review 副本不存在")
-                review_reference = None
-        metadata = selected_item.get("metadata")
-        if not isinstance(metadata, dict):
-            errors.append("selected reference metadata 必须是 JSON 对象")
-        else:
-            raw_source = metadata.get("source_reference")
-            if not isinstance(raw_source, str) or not raw_source.strip():
-                errors.append("selected metadata.source_reference 必须是非空路径")
-            else:
-                source_reference = _resolve_artifact_path(
-                    raw_source, run_root, context["selected_path"].parent
-                )
-                if not source_reference.is_file():
-                    errors.append("selected metadata.source_reference 不存在")
-                    source_reference = None
-            if source_reference is not None:
-                source_digest = _sha256(source_reference)
-                if selected_item.get("source_sha256") != source_digest:
-                    errors.append("selected reference source_sha256 与原始参考图不一致")
-                if metadata.get("source_sha256") != source_digest:
-                    errors.append("selected metadata.source_sha256 与原始参考图不一致")
-            if review_reference is not None:
-                review_digest = _sha256(review_reference)
-                if selected_item.get("review_sha256") != review_digest:
-                    errors.append("selected reference review_sha256 与 review 副本不一致")
-                if metadata.get("review_sha256") != review_digest:
-                    errors.append("selected metadata.review_sha256 与 review 副本不一致")
-        if source_reference is not None and review_reference is not None:
-            if _sha256(source_reference) != _sha256(review_reference):
-                errors.append("selected_reference review 副本与原始参考图摘要不一致")
-    context["source_reference"] = source_reference
-    context["review_reference"] = review_reference
-
-    if isinstance(snapshot, dict) and source_reference is not None and root_role is not None:
-        try:
-            errors.extend(
-                f"根快照：{error}"
-                for error in validate_reference_snapshot(
-                    context["snapshot_path"], source_reference, root_role
-                )
-            )
-        except SnapshotInputError as exc:
-            errors.append(str(exc))
-    return context, errors
-
-
-def _validate_candidate_snapshots(
-    candidates: Any,
-    selected: Any,
-    confirmed: Any,
-    root_role: str | None,
-    run_root: Path,
-    selected_path: Path,
-) -> list[str]:
-    if not isinstance(candidates, list) or not candidates:
-        return ["analysis/reference_composition_snapshots.json 必须是非空 JSON 列表"]
-    if not isinstance(selected, list):
-        return ["候选快照无法绑定 selected_references.json"]
-    required_fields = {
-        "rank",
-        "reference_file",
-        "reference_sha256",
-        "output_role",
-        "framing",
-        "camera_angle",
-        "subject_placement",
-        "visible_body_regions",
-        "pose",
-        "clothing",
-        "background",
-        "lighting",
-        "replacement_target",
-        "other_jewelry_to_remove",
-        "text_or_ui_risk",
-        "product_visibility_sufficient",
-        "composition_signature",
-    }
-    selected_by_rank = {
-        item.get("rank"): item
-        for item in selected
-        if isinstance(item, dict) and type(item.get("rank")) is int
-    }
-    errors: list[str] = []
-    candidate_ranks: set[int] = set()
-    for index, candidate in enumerate(candidates, start=1):
-        label = f"候选快照[{index}]"
-        if not isinstance(candidate, dict):
-            errors.append(f"{label} 必须是 JSON 对象")
-            continue
-        if set(candidate) != required_fields:
-            errors.append(f"{label} 字段集合不完整")
-            continue
-        rank = candidate.get("rank")
-        if type(rank) is not int or not 1 <= rank <= 3 or rank in candidate_ranks:
-            errors.append(f"{label}.rank 必须是唯一的 1 至 3 JSON 整数")
-            continue
-        candidate_ranks.add(rank)
-        if root_role is None or candidate.get("output_role") != root_role:
-            errors.append(f"{label}.output_role 与 run 不一致")
-        errors.extend(_validate_candidate_snapshot_schema(candidate, label))
-        digest = candidate.get("reference_sha256")
-        if not isinstance(digest, str) or SHA256_PATTERN.fullmatch(digest) is None:
-            errors.append(f"{label}.reference_sha256 必须是 64 位小写十六进制")
-        selected_item = selected_by_rank.get(rank)
-        metadata = selected_item.get("metadata") if isinstance(selected_item, dict) else None
-        source_value = metadata.get("source_reference") if isinstance(metadata, dict) else None
-        if not isinstance(source_value, str) or not source_value.strip():
-            errors.append(f"{label} 缺少 selected 源参考图绑定")
-        else:
-            source_path = _resolve_artifact_path(
-                source_value,
-                run_root,
-                selected_path.parent,
-            )
-            if not source_path.is_file():
-                errors.append(f"{label} 绑定的源参考图不存在")
-            else:
-                reference_file = candidate.get("reference_file")
-                if (
-                    not isinstance(reference_file, str)
-                    or Path(reference_file).name != reference_file
-                    or reference_file != source_path.name
-                ):
-                    errors.append(f"{label}.reference_file 与 selected 源图不一致")
-                if digest != _sha256(source_path):
-                    errors.append(f"{label}.reference_sha256 与 selected 源图不一致")
-        signature_payload = {
-            field_name: candidate[field_name]
-            for field_name in (
-                "output_role",
-                "framing",
-                "pose",
-                "background",
-                "lighting",
-                "replacement_target",
-            )
-        }
-        expected_signature = _canonical_json_sha256(signature_payload)
-        if candidate.get("composition_signature") != expected_signature:
-            errors.append(f"{label}.composition_signature 与构图字段不一致")
-    if candidate_ranks != set(selected_by_rank):
-        errors.append("候选快照 rank 闭集必须与 selected_references 完全一致")
-    if isinstance(confirmed, dict) and sum(item == confirmed for item in candidates) != 1:
-        errors.append("确认快照必须与唯一候选参考构图快照完全一致")
-    return errors
-
-
-def _validate_candidate_snapshot_schema(
-    candidate: dict[str, Any],
-    label: str,
-) -> list[str]:
-    errors: list[str] = []
-    for field_name in (
-        "reference_file",
-        "reference_sha256",
-        "framing",
-        "camera_angle",
-        "subject_placement",
-        "clothing",
-        "background",
-        "lighting",
-        "composition_signature",
-    ):
-        if not _is_non_empty_string(candidate.get(field_name)):
-            errors.append(f"{label}.{field_name} 必须是非空字符串")
-
-    for field_name, allow_empty in (
-        ("visible_body_regions", False),
-        ("other_jewelry_to_remove", True),
-    ):
-        value = candidate.get(field_name)
-        if not isinstance(value, list) or any(
-            not _is_non_empty_string(item) for item in value
-        ):
-            errors.append(f"{label}.{field_name} 必须是非空字符串列表")
-        elif not allow_empty and not value:
-            errors.append(f"{label}.{field_name} 不能为空列表")
-
-    pose = candidate.get("pose")
-    pose_fields = {"body", "arm", "hand", "hand_side"}
-    if not isinstance(pose, dict):
-        errors.append(f"{label}.pose 必须是 JSON 对象")
-    elif set(pose) != pose_fields:
-        errors.append(f"{label}.pose 字段集合不完整或包含未知字段")
-    else:
-        for field_name in sorted(pose_fields):
-            if not _is_non_empty_string(pose.get(field_name)):
-                errors.append(f"{label}.pose.{field_name} 必须是非空字符串")
-
-    target = candidate.get("replacement_target")
-    target_fields = {"body_region", "source_jewelry", "target_product_count"}
-    if not isinstance(target, dict):
-        errors.append(f"{label}.replacement_target 必须是 JSON 对象")
-    elif set(target) != target_fields:
-        errors.append(
-            f"{label}.replacement_target 字段集合不完整或包含未知字段"
-        )
-    else:
-        for field_name in ("body_region", "source_jewelry"):
-            if not _is_non_empty_string(target.get(field_name)):
-                errors.append(
-                    f"{label}.replacement_target.{field_name} 必须是非空字符串"
-                )
-        if (
-            type(target.get("target_product_count")) is not int
-            or target["target_product_count"] != 1
-        ):
-            errors.append(
-                f"{label}.replacement_target.target_product_count "
-                "必须是 JSON 整数 1"
-            )
-        source_jewelry = target.get("source_jewelry")
-        body_region = target.get("body_region")
-        if (
-            _is_non_empty_string(source_jewelry)
-            and _is_non_empty_string(body_region)
-            and not _has_confirmed_unique_target(source_jewelry, body_region)
-        ):
-            errors.append(f"{label}.replacement_target 未唯一指定待替换的原首饰")
-
-    visibility = candidate.get("product_visibility_sufficient")
-    if type(visibility) is not bool:
-        errors.append(f"{label}.product_visibility_sufficient 必须是 JSON 布尔值")
-    elif not visibility:
-        errors.append(f"{label} 产品预计展示面积不足")
-
-    ui_risk = candidate.get("text_or_ui_risk")
-    if not isinstance(ui_risk, str) or ui_risk not in {
-        "none",
-        "small_removable",
-        "blocking",
-    }:
-        errors.append(
-            f"{label}.text_or_ui_risk 必须是 none/small_removable/blocking"
-        )
-    elif ui_risk == "blocking":
-        errors.append(f"{label} 存在阻断性的文字或 UI")
-    output_role = candidate.get("output_role")
-    if not isinstance(output_role, str) or output_role not in {
-        "hand_worn",
-        "lifestyle",
-    }:
-        errors.append(f"{label}.output_role 只能是 hand_worn 或 lifestyle")
-    return errors
-
-
-def _has_confirmed_unique_target(
-    source_jewelry: str,
-    body_region: str | None = None,
-) -> bool:
-    if not _describes_multiple_same_jewelry(source_jewelry):
-        return True
-    selector = _unique_target_selector(source_jewelry)
-    if selector is None:
-        return False
-    return body_region is None or selector in body_region
-
-
-def _describes_multiple_same_jewelry(text: str) -> bool:
-    if re.search(
-        r"(?:多\s*(?:件|条|枚|层|个|只|组)|双(?:层|条|枚|件|只)?|叠戴)",
-        text,
-    ):
-        return True
-    count_pattern = re.compile(
-        r"(?P<number>\d+|[一二两三四五六七八九十百]+)\s*"
-        r"(?P<unit>件|条|枚|层|个|只|组)"
-    )
-    for match in count_pattern.finditer(text):
-        if re.search(r"第\s*$", text[: match.start()]):
-            continue
-        number = match.group("number")
-        if number.isdigit() and int(number) < 2:
-            continue
-        if number == "一":
-            continue
-        return True
-    return False
-
-
-def _unique_target_selector(text: str) -> str | None:
-    selector_patterns = (
-        r"第\s*(?:[1-9]\d*|[一二两三四五六七八九十百]+)\s*"
-        r"(?:条|件|枚|层|个|只)",
-        r"(?:内侧|外侧|内圈|外圈|上方|下方|最上|最下|"
-        r"靠近?(?:手掌|手臂|前臂)|远离(?:手掌|手臂|前臂))"
-        r"(?:的)?(?:那(?:条|件|枚|个|只)|一(?:条|件|枚|个|只)|"
-        r"手链|手串|项链|戒指)",
-        r"(?:拇指|食指|中指|无名指|小指)(?:上?的?)?戒指",
-    )
-    for pattern in selector_patterns:
-        match = re.search(pattern, text)
-        if match is not None:
-            return match.group(0)
-    return None
-
-
-def _validate_task9_generation(
-    generation_dir: Path,
-    context: dict[str, Any] | None = None,
-) -> list[str]:
-    errors: list[str] = []
-    if list(generation_dir.glob("hand-reference.*")):
-        errors.append("现代 generation 禁止出现 hand-reference.*")
-    manifest_path = generation_dir / "input-manifest.json"
-    if not manifest_path.is_file():
-        return [*errors, "现代 generation 缺少 input-manifest.json，属于 damaged run"]
-    try:
-        manifest = _load_json(manifest_path)
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return [*errors, "input-manifest.json 不是有效 UTF-8 JSON"]
-    fields = {
-        "schema_version",
-        "output_role",
-        "reference_snapshot",
-        "product_analysis",
-        "fidelity_constraints",
-        "inputs",
-    }
-    if not isinstance(manifest, dict) or set(manifest) != fields:
-        return [*errors, "input-manifest.json 字段集合不合法"]
-    if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1:
-        errors.append("input-manifest.schema_version 必须是 JSON 整数 1")
-    role = manifest.get("output_role")
-    if not isinstance(role, str) or role not in {"hand_worn", "lifestyle"}:
-        errors.append("input-manifest.output_role 只能是 hand_worn/lifestyle")
-
-    copied_fixed: dict[str, Path | None] = {}
-    for key, expected_name in (
-        ("reference_snapshot", "reference-composition-snapshot.json"),
-        ("product_analysis", "product-analysis.json"),
-        ("fidelity_constraints", "product-fidelity-constraints.json"),
-    ):
-        copied, _source = _manifest_entry(
-            generation_dir,
-            manifest.get(key),
-            f"input-manifest.{key}",
-            errors,
-            require_source=False,
-        )
-        copied_fixed[key] = copied
-        if copied is not None and copied.name != expected_name:
-            errors.append(f"input-manifest.{key}.copied_file 必须为 {expected_name}")
-    run_root = generation_dir.parent.parent
-    fixed_sources = {
-        "reference_snapshot": run_root / "review" / "reference_composition_snapshot.json",
-        "product_analysis": run_root / "analysis" / "product_analysis.json",
-        "fidelity_constraints": run_root / "analysis" / "product_fidelity_constraints.json",
-    }
-    for key, source_path in fixed_sources.items():
-        if not source_path.is_file():
-            errors.append(f"input-manifest.{key} 对应源文件不存在：{source_path.name}")
-            continue
-        entry = manifest.get(key)
-        digest = entry.get("sha256") if isinstance(entry, dict) else None
-        if isinstance(digest, str) and _sha256(source_path) != digest:
-            errors.append(f"input-manifest.{key} 源文件摘要与 manifest 不一致")
-
-    if context is not None:
-        if isinstance(role, str) and context.get("output_role") is not None:
-            if role != context["output_role"]:
-                errors.append("input-manifest.output_role 与 run 根 output_role 不一致")
-
-    inputs = manifest.get("inputs")
-    scene_source: Path | None = None
-    product_source: Path | None = None
-    if not isinstance(inputs, list) or len(inputs) != 2:
-        errors.append("input-manifest.inputs 必须恰好包含两个有序图片输入")
-    else:
-        expected = ((1, "scene_reference", "scene-reference."), (2, "product_identity", "product-reference."))
-        for index, (item, (order, input_role, prefix)) in enumerate(zip(inputs, expected)):
-            copied, source = _manifest_entry(
-                generation_dir,
-                item,
-                f"input-manifest.inputs[{index}]",
-                errors,
-                require_source=True,
-            )
-            if isinstance(item, dict):
-                if type(item.get("order")) is not int or item.get("order") != order:
-                    errors.append("图片输入顺序必须为 scene_reference 后 product_identity")
-                if item.get("role") != input_role:
-                    errors.append("图片输入角色顺序必须为 scene_reference 后 product_identity")
-            if copied is not None and not copied.name.startswith(prefix):
-                errors.append(f"{input_role} copied_file 命名不合法")
-            if index == 0:
-                scene_source = source
-            else:
-                product_source = source
-
-    if context is not None:
-        expected_scene = context.get("review_reference")
-        if expected_scene is not None and not _same_path(scene_source, expected_scene):
-            errors.append("scene_reference.source_path 必须精确绑定 selected_reference review 副本")
-        expected_product = context.get("product_source")
-        if expected_product is not None and not _same_path(product_source, expected_product):
-            errors.append("product_identity.source_path 必须精确绑定 input/product-on-hand.jpg 产品原图")
-
-    for name in ("model.txt", "reference-rank.txt", "prompt.txt", "submit.json"):
-        if not (generation_dir / name).is_file():
-            errors.append(f"现代 generation 缺少 {name}")
-    snapshot_path = copied_fixed.get("reference_snapshot")
-    analysis_path = copied_fixed.get("product_analysis")
-    canonical_path = copied_fixed.get("fidelity_constraints")
-    prompt_path = generation_dir / "prompt.txt"
-    snapshot_reference = (
-        context.get("source_reference") if context is not None else scene_source
-    )
-    if snapshot_path is not None and snapshot_reference is not None and isinstance(role, str):
-        try:
-            errors.extend(
-                f"快照：{error}"
-                for error in validate_reference_snapshot(snapshot_path, snapshot_reference, role)
-            )
-        except SnapshotInputError as exc:
-            errors.append(str(exc))
-        rank_path = generation_dir / "reference-rank.txt"
-        try:
-            snapshot_data = _load_json(snapshot_path)
-            expected_rank = snapshot_data.get("rank") if isinstance(snapshot_data, dict) else None
-            actual_rank = int(rank_path.read_text(encoding="utf-8").strip())
-            if type(expected_rank) is not int or actual_rank != expected_rank:
-                errors.append("reference-rank.txt 与确认快照 rank 不一致")
-            if (
-                context is not None
-                and context.get("selected_rank") is not None
-                and actual_rank != context["selected_rank"]
-            ):
-                errors.append("reference-rank.txt 与 review_decision selected rank 不一致")
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-            errors.append("reference-rank.txt 无法与确认快照 rank 交叉校验")
-    if all(path is not None for path in (snapshot_path, analysis_path, canonical_path)) and prompt_path.is_file():
-        errors.extend(
-            f"Prompt：{error}"
-            for error in validate_prompt(prompt_path, snapshot_path, analysis_path, canonical_path)
-        )
-
-    result_path = generation_dir / "result.json"
-    completed = False
-    if result_path.is_file():
-        try:
-            result_data = _load_json(result_path)
-            completed = (
-                isinstance(result_data, dict)
-                and isinstance(result_data.get("data"), dict)
-                and result_data["data"].get("status") == "completed"
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            errors.append("result.json 不是有效 UTF-8 JSON")
-    if completed:
-        for name in ("result.png", "qc-review.html", "qc.json"):
-            if not (generation_dir / name).is_file():
-                errors.append(f"已完成 generation 缺少 {name}")
-        qc_path = generation_dir / "qc.json"
-        if qc_path.is_file():
-            errors.extend(f"QC：{error}" for error in validate_qc(qc_path))
-    return errors
-
-
-def _validate_legacy_generation(generation_dir: Path) -> list[str]:
-    errors: list[str] = []
-    for name in REQUIRED_GENERATION_FILES:
-        if not (generation_dir / name).is_file():
-            errors.append(f"缺少 generation/{generation_dir.name}/{name}")
-    hand_references = [
-        path
-        for path in generation_dir.iterdir()
-        if path.is_file() and path.name.startswith("hand-reference.")
-    ]
-    if len(hand_references) != 1:
-        errors.append(
-            f"generation/{generation_dir.name} 必须恰好包含一个 hand-reference.*"
-        )
-
-    model_path = generation_dir / "model.txt"
-    if model_path.is_file():
-        try:
-            model_name = model_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeError):
-            errors.append(f"generation/{generation_dir.name}/model.txt 无法按 UTF-8 读取")
-        else:
-            if model_name not in {"gpt_image_2", "nano_banana_v2"}:
-                errors.append(
-                    f"generation/{generation_dir.name}/model.txt 使用了不支持的模型：{model_name}"
-                )
-
-    prompt_path = generation_dir / "prompt.txt"
-    if prompt_path.is_file():
-        try:
-            prompt_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            errors.append(
-                f"generation/{generation_dir.name}/prompt.txt 无法按 UTF-8 读取"
-            )
-
-    result_path = generation_dir / "result.json"
-    if result_path.is_file():
-        try:
-            result = _load_json(result_path)
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            errors.append(f"generation/{generation_dir.name}/result.json 不是有效 JSON")
-        else:
-            completed = (
-                isinstance(result, dict)
-                and isinstance(result.get("data"), dict)
-                and result["data"].get("status") == "completed"
-            )
-            if not completed:
-                errors.append(
-                    f"generation/{generation_dir.name}/result.json 的 status 不是 completed"
-                )
-    qc_path = generation_dir / "qc.json"
-    if qc_path.is_file():
-        errors.extend(
-            f"generation/{generation_dir.name}/qc.json: {error}"
-            for error in validate_qc(qc_path)
-        )
-    return errors
-
-
-def _validate_legacy_root(run_root: Path) -> list[str]:
-    errors: list[str] = []
-    if not (run_root / "input" / "product-on-hand.jpg").is_file():
-        errors.append("缺少 input/product-on-hand.jpg")
-    analysis_path = run_root / "analysis" / "product_analysis.json"
-    analysis: dict[str, Any] | None = None
-    if not analysis_path.is_file():
-        errors.append("缺少 analysis/product_analysis.json")
-    else:
-        errors.extend(_validate_product_analysis(analysis_path))
-        loaded = _load_json(analysis_path)
-        if isinstance(loaded, dict):
-            analysis = loaded
-    selected_path = run_root / "analysis" / "selected_references.json"
-    ranks: set[int] = set()
-    if not selected_path.is_file():
-        errors.append("缺少 analysis/selected_references.json")
-    else:
-        selected_errors, ranks = _validate_selected_references(selected_path, run_root)
-        errors.extend(selected_errors)
-    decision_path = run_root / "review" / "review_decision.json"
-    if not decision_path.is_file():
-        errors.append("缺少 review/review_decision.json")
-    else:
-        decision_errors, _selected = _validate_review_decision(
-            decision_path, ranks, analysis
-        )
-        errors.extend(decision_errors)
-    return errors
-
-
-def inspect_run_state(run_root: Path) -> dict[str, Any]:
-    generation_root = run_root / "generation"
-    generation_dirs = (
-        sorted(path for path in generation_root.iterdir() if path.is_dir())
-        if generation_root.is_dir()
-        else []
-    )
-    modern_markers = {
-        "input-manifest.json",
-        "reference-composition-snapshot.json",
-        "product-analysis.json",
-        "product-fidelity-constraints.json",
-        "reference-rank.txt",
-        "qc-review.html",
-    }
-    modern: list[Path] = []
-    legacy: list[Path] = []
-    damaged: list[Path] = []
-    for directory in generation_dirs:
-        names = {path.name for path in directory.iterdir() if path.is_file()}
-        has_modern_marker = (
-            bool(names.intersection(modern_markers))
-            or any(name.startswith("scene-reference.") for name in names)
-            or any(name.startswith("product-reference.") for name in names)
-        )
-        has_legacy_marker = any(name.startswith("hand-reference.") for name in names)
-        if has_modern_marker:
-            modern.append(directory)
-        elif has_legacy_marker:
-            legacy.append(directory)
-        else:
-            damaged.append(directory)
-    root_modern_paths = (
-        run_root / "analysis" / "reference_composition_snapshots.json",
-        run_root / "review" / "reference_composition_snapshot.json",
-    )
-    root_has_modern_marker = any(path.exists() for path in root_modern_paths)
-    decision_path = run_root / "review" / "review_decision.json"
-    if decision_path.is_file():
-        try:
-            decision = _load_json(decision_path)
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            decision = None
-        if isinstance(decision, dict) and "reference_snapshot_sha256" in decision:
-            root_has_modern_marker = True
-    if modern or root_has_modern_marker:
-        context, errors = _load_modern_run_context(run_root)
-        if legacy:
-            errors.append("同一 run 不得混合现代 generation 与历史 hand-reference generation")
-        for directory in damaged:
-            errors.append(f"generation/{directory.name}: damaged generation 目录无法分类")
-        for directory in modern:
-            errors.extend(
-                f"generation/{directory.name}: {error}"
-                for error in _validate_task9_generation(directory, context)
-            )
-        return {"classified": True, "legacy_read_only": False, "errors": errors}
-    if legacy:
-        errors = _validate_legacy_root(run_root)
-        for directory in legacy:
-            errors.extend(_validate_legacy_generation(directory))
-        for directory in damaged:
-            errors.append(f"generation/{directory.name}: damaged generation 目录无法分类")
-        return {
-            "classified": True,
-            "legacy_read_only": not errors,
-            "errors": errors,
-        }
-    if damaged:
-        return {
-            "classified": True,
-            "legacy_read_only": False,
-            "errors": [
-                f"generation/{directory.name}: damaged generation 目录无法分类"
-                for directory in damaged
-            ],
-        }
-    return {"classified": False, "legacy_read_only": False, "errors": []}
 
 
 def _is_json_int(value: Any) -> bool:
@@ -979,6 +79,120 @@ def _is_non_empty_string(value: Any) -> bool:
 
 def _analysis_error(message: str) -> str:
     return f"analysis/product_analysis.json：{message}"
+
+
+def _validate_fidelity_constraints_data(
+    analysis: dict[str, Any],
+    constraints: dict[str, Any],
+) -> tuple[list[str], bool]:
+    schema_version = constraints.get("schema_version")
+    if schema_version == 1 and type(schema_version) is int:
+        return [], True
+    if schema_version != 2 or type(schema_version) is not int:
+        return ["analysis/product_fidelity_constraints.json：schema_version 必须为 1 或 2"], False
+
+    semantics = constraints.get("pendant_semantics")
+    if not isinstance(semantics, dict):
+        return ["analysis/product_fidelity_constraints.json：v2 的 pendant_semantics 必须是 JSON 对象"], False
+    presence = semantics.get("presence")
+    count = semantics.get("count")
+    layer = semantics.get("layer")
+    policy = semantics.get("creation_policy")
+    errors: list[str] = []
+    if "layer" not in semantics:
+        errors.append("v2 pendant_semantics.layer 必填；absent 时必须显式为 null")
+    if presence not in {"present", "absent"}:
+        errors.append("v2 pendant_semantics.presence 必须是 present 或 absent")
+    if type(count) is not int or count not in {0, 1}:
+        errors.append("v2 pendant_semantics.count 必须是整数 0 或 1")
+    if layer is not None and (type(layer) is not int or not 1 <= layer <= 3):
+        errors.append("v2 pendant_semantics.layer 必须是 null 或 1 至 3")
+    if policy != "forbid":
+        errors.append("v2 pendant_semantics.creation_policy 必须为 forbid")
+    if presence == "absent" and (count != 0 or layer is not None):
+        errors.append("v2 presence=absent 时 count 必须为 0 且 layer 必须为 null")
+    if presence == "present" and (count != 1 or layer is None):
+        errors.append("v2 presence=present 时 count 必须为 1 且 layer 必须为 1 至 3")
+
+    product_type = analysis.get("confirmed_product_type")
+    errors.extend(_validate_v2_necklace_analysis_pendant_fields(analysis))
+    expected = (
+        ("present", 1, analysis.get("pendant_layer"))
+        if product_type == "pendant_necklace"
+        else ("absent", 0, None)
+    )
+    if product_type in NECKLACE_PRODUCT_TYPES and (presence, count, layer) != expected:
+        errors.append(
+            "v2 吊坠结构与最终 analysis 不一致："
+            f"analysis={product_type}/count={analysis.get('pendant_count')}/"
+            f"layer={analysis.get('pendant_layer')}，canonical={semantics}"
+        )
+    if errors:
+        return errors, False
+
+    must_keep = constraints.get("must_keep")
+    if not isinstance(must_keep, list):
+        return ["v2 canonical 的 must_keep 必须是列表"], False
+    detected_keywords = constraints.get("detected_keywords")
+    must_not_change = constraints.get("must_not_change")
+    if not isinstance(detected_keywords, list) or not all(
+        isinstance(item, str) for item in detected_keywords
+    ):
+        errors.append("v2 canonical 的 detected_keywords 必须是字符串列表")
+    if not isinstance(must_not_change, list) or not all(
+        isinstance(item, str) for item in must_not_change
+    ):
+        errors.append("v2 canonical 的 must_not_change 必须是字符串列表")
+    for index, item in enumerate(must_keep):
+        if not isinstance(item, dict):
+            errors.append(f"must_keep[{index}] 必须是 JSON 对象")
+            continue
+        for field in (
+            "name", "source_text", "normalized_keyword", "location",
+            "visual_shape", "relationship", "qc_question",
+        ):
+            if not isinstance(item.get(field), str) or not item[field].strip():
+                errors.append(f"must_keep[{index}].{field} 必须是非空字符串")
+        forbid = item.get("forbid")
+        if not isinstance(forbid, list) or not all(
+            isinstance(value, str) and value.strip() for value in forbid
+        ):
+            errors.append(f"must_keep[{index}].forbid 必须是非空字符串列表")
+    if errors:
+        return errors, False
+    if presence == "absent":
+        semantic_fields: list[tuple[str, Any]] = []
+        for index, value in enumerate(detected_keywords):
+            semantic_fields.append((f"detected_keywords[{index}]", value))
+        for index, value in enumerate(must_not_change):
+            semantic_fields.append((f"must_not_change[{index}]", value))
+        for index, item in enumerate(must_keep):
+            for field in (
+                "name", "source_text", "normalized_keyword", "location",
+                "visual_shape", "relationship", "qc_question",
+            ):
+                semantic_fields.append((f"must_keep[{index}].{field}", item.get(field)))
+            for forbid_index, value in enumerate(item["forbid"]):
+                semantic_fields.append((f"must_keep[{index}].forbid[{forbid_index}]", value))
+        for field_path, value in semantic_fields:
+            if not isinstance(value, str):
+                continue
+            for term in PENDANT_SENSITIVE_TERMS:
+                if term in value:
+                    errors.append(f"v2 无吊坠 canonical 的 {field_path} 不得包含敏感词：{term}")
+    else:
+        if product_type in NECKLACE_PRODUCT_TYPES:
+            errors.extend(_validate_present_pendant_semantic_conflicts(constraints))
+        pendant_items = [
+            item for item in must_keep
+            if isinstance(item, dict)
+            and item.get("normalized_keyword") in PENDANT_SENSITIVE_TERMS
+        ]
+        if len(pendant_items) != 1:
+            errors.append("v2 有吊坠 canonical 必须有且只有一项可追溯主吊坠 must_keep")
+        elif f"第 {layer} 层" not in str(pendant_items[0].get("relationship", "")):
+            errors.append(f"v2 主吊坠 must_keep.relationship 必须包含第 {layer} 层")
+    return errors, False
 
 
 def _resolve_artifact_path(raw_path: str, run_root: Path, base_dir: Path | None = None) -> Path:
@@ -1042,12 +256,9 @@ def _validate_product_analysis_data(data: dict[str, Any]) -> list[str]:
 
     product_type = data.get("confirmed_product_type")
     detected_product_type = data.get("detected_product_type")
-    if (
-        not isinstance(detected_product_type, str)
-        or detected_product_type not in KNOWN_PRODUCT_TYPES
-    ):
+    if detected_product_type not in KNOWN_PRODUCT_TYPES:
         errors.append(_analysis_error("detected_product_type 必须是规范品类"))
-    if not isinstance(product_type, str) or product_type not in KNOWN_PRODUCT_TYPES:
+    if product_type not in KNOWN_PRODUCT_TYPES:
         errors.append(_analysis_error("confirmed_product_type 必须是规范品类"))
         return errors
     if product_type == "unknown":
@@ -1058,10 +269,7 @@ def _validate_product_analysis_data(data: dict[str, Any]) -> list[str]:
         return errors
 
     source_image_type = data.get("source_image_type")
-    if (
-        not isinstance(source_image_type, str)
-        or source_image_type not in SUPPORTED_SOURCE_IMAGE_TYPES
-    ):
+    if source_image_type not in SUPPORTED_SOURCE_IMAGE_TYPES:
         errors.append(
             _analysis_error(
                 "source_image_type 必须显式使用 worn_source、hand_held_source、"
@@ -1080,20 +288,13 @@ def _validate_product_analysis_data(data: dict[str, Any]) -> list[str]:
         )
 
     display_mode = data.get("display_mode")
-    if not isinstance(display_mode, str) or display_mode not in SUPPORTED_DISPLAY_MODES:
+    if display_mode not in SUPPORTED_DISPLAY_MODES:
         errors.append(_analysis_error("display_mode 必须是 worn 或 hand_held"))
-    elif product_type == "bracelet" and display_mode != "worn":
-        errors.append(_analysis_error("手串/手链与手持展示模式不兼容"))
+    elif product_type in {"bracelet", "ring"} and display_mode != "worn":
+        label = "手串/手链" if product_type == "bracelet" else "戒指"
+        errors.append(_analysis_error(f"{label}与手持展示模式不兼容"))
 
-    normalized_structure = dict(ANALYSIS_CONFIRMATION_DEFAULTS)
-    normalized_structure.update(data)
-    errors.extend(
-        _validate_product_structure(
-            normalized_structure,
-            product_type,
-            _analysis_error,
-        )
-    )
+    errors.extend(_validate_product_structure(data, product_type, _analysis_error))
     return errors
 
 
@@ -1141,20 +342,17 @@ def _validate_product_structure(
     layer_count = data.get("layer_count")
     if not _is_json_int(layer_count) or layer_count < 1:
         errors.append(error_builder("layer_count 必须是大于等于 1 的 JSON 整数"))
-    elif (
-        isinstance(product_type, str)
-        and product_type in NECKLACE_PRODUCT_TYPES
-        and not 1 <= layer_count <= 3
-    ):
+    elif product_type in NECKLACE_PRODUCT_TYPES and not 1 <= layer_count <= 3:
         errors.append(error_builder("项链产品只支持 1 至 3 层"))
-    elif product_type == "bracelet" and layer_count != 1:
-        errors.append(error_builder("手串/手链只支持 1 层"))
+    elif product_type in {"bracelet", "ring"} and layer_count != 1:
+        label = "手串/手链" if product_type == "bracelet" else "戒指"
+        errors.append(error_builder(f"{label}只支持 1 层"))
 
     independent = data.get("is_independent_multi_item")
     if type(independent) is not bool:
         errors.append(error_builder("is_independent_multi_item 必须是 JSON 布尔值"))
     elif independent:
-        if isinstance(product_type, str) and product_type in NECKLACE_PRODUCT_TYPES:
+        if product_type in NECKLACE_PRODUCT_TYPES:
             errors.append(error_builder("当前版本不支持多件独立项链组合叠戴"))
         else:
             errors.append(error_builder("当前版本不支持多件独立首饰组合叠戴"))
@@ -1188,6 +386,10 @@ def _validate_product_structure(
         has_pendant is not False or pendant_count != 0 or pendant_layer is not None
     ):
         errors.append(error_builder("普通项链不得声明主吊坠结构"))
+    if product_type == "ring" and (
+        has_pendant is not False or pendant_count != 0 or pendant_layer is not None
+    ):
+        errors.append(error_builder("戒指不得声明吊坠结构"))
     if (
         _is_json_int(layer_count)
         and _is_json_int(pendant_layer)
@@ -1196,18 +398,20 @@ def _validate_product_structure(
         errors.append(error_builder("pendant_layer 不能大于 layer_count"))
 
     length_category = data.get("length_category")
-    if isinstance(product_type, str) and product_type in NECKLACE_PRODUCT_TYPES and (
-        length_category is not None
-        and (
-            not isinstance(length_category, str)
-            or length_category not in NECKLACE_LENGTH_CATEGORIES
-        )
-    ):
-        errors.append(
-            error_builder(
-                "项链 length_category 必须是 choker、collarbone、upper_chest、long 或 null"
+    if product_type in NECKLACE_PRODUCT_TYPES:
+        if length_category is None:
+            errors.append(
+                error_builder(
+                    "现代项链 length_category 不能为空；必须在参考评分前人工纠正为 "
+                    "choker、collarbone、upper_chest 或 long"
+                )
             )
-        )
+        elif length_category not in NECKLACE_LENGTH_CATEGORIES:
+            errors.append(
+                error_builder(
+                    "项链 length_category 必须是 choker、collarbone、upper_chest 或 long"
+                )
+            )
     for field_name in (
         "length_category",
         "pendant_position",
@@ -1217,6 +421,23 @@ def _validate_product_structure(
         value = data.get(field_name)
         if value is not None and not _is_non_empty_string(value):
             errors.append(error_builder(f"{field_name} 必须是非空字符串或 null"))
+    if product_type == "ring":
+        missing_ring_fields = [field for field in RING_FIELDS if field not in data]
+        if missing_ring_fields:
+            errors.append(
+                error_builder("戒指契约不完整，缺少字段：" + "、".join(missing_ring_fields))
+            )
+        else:
+            if data.get("ring_count") != 1 or not _is_json_int(data.get("ring_count")):
+                errors.append(error_builder("戒指只支持 ring_count=1"))
+            if data.get("hand_side") not in {"left", "right"}:
+                errors.append(error_builder("戒指 hand_side 必须是 left 或 right"))
+            if data.get("finger_position") not in {
+                "thumb", "index", "middle", "ring", "little"
+            }:
+                errors.append(error_builder("戒指 finger_position 必须是明确手指"))
+            if data.get("ring_wear_style") != "finger_base":
+                errors.append(error_builder("戒指 ring_wear_style 必须是 finger_base"))
     return errors
 
 
@@ -1240,60 +461,14 @@ def _validate_selected_references(path: Path, run_root: Path) -> tuple[list[str]
         else:
             ranks.add(rank)
         reference = item.get("selected_reference")
-        resolved_reference: Path | None = None
         if not isinstance(reference, str) or not reference.strip():
             errors.append(f"selected_references[{index}].selected_reference 必须是非空字符串")
         else:
             resolved_reference = _resolve_artifact_path(reference, run_root, path.parent)
             if not resolved_reference.is_file():
                 errors.append(f"选中参考图文件不存在：{reference}")
-        if type(item.get("score")) is not int:
-            errors.append(
-                f"selected_references[{index}].score 必须是 JSON 整数，不能使用布尔值"
-            )
-        metadata = item.get("metadata")
-        metadata_integrity_fields = (
-            isinstance(metadata, dict)
-            and any(
-                field_name in metadata
-                for field_name in ("source_sha256", "review_sha256")
-            )
-        )
-        has_integrity_fields = metadata_integrity_fields or any(
-            field_name in item for field_name in ("source_sha256", "review_sha256")
-        )
-        if not has_integrity_fields:
-            continue
-        if not isinstance(metadata, dict):
-            errors.append(f"selected_references[{index}] 完整性字段不完整")
-            continue
-        source_value = metadata.get("source_reference")
-        if not isinstance(source_value, str) or not source_value.strip():
-            errors.append(f"selected_references[{index}].metadata.source_reference 必填")
-            continue
-        source_path = _resolve_artifact_path(source_value, run_root, path.parent)
-        if not source_path.is_file():
-            errors.append(f"源参考图文件不存在：{source_value}")
-            continue
-        source_digest = _sha256(source_path)
-        review_digest = _sha256(resolved_reference) if resolved_reference is not None and resolved_reference.is_file() else None
-        for field_name, actual_digest in (
-            ("source_sha256", source_digest),
-            ("review_sha256", review_digest),
-        ):
-            value = item.get(field_name)
-            metadata_value = metadata.get(field_name)
-            if (
-                not isinstance(value, str)
-                or SHA256_PATTERN.fullmatch(value) is None
-                or value != metadata_value
-                or value != actual_digest
-            ):
-                errors.append(
-                    f"selected_references[{index}].{field_name} 与文件或 metadata 摘要不一致"
-                )
-        if review_digest is not None and source_digest != review_digest:
-            errors.append(f"selected_references[{index}] 源图与 review 副本内容不一致")
+        if "score" not in item:
+            errors.append(f"selected_references[{index}].score 为必填字段")
     for required_rank in (1, 2, 3):
         if required_rank not in ranks:
             errors.append(f"analysis/selected_references.json 缺少 rank {required_rank}")
@@ -1310,9 +485,9 @@ def _validate_review_decision(
     if not isinstance(data, dict):
         return ["review/review_decision.json 必须包含 JSON 对象"], []
     action = data.get("action")
-    if isinstance(action, str) and action in BLOCKED_ACTIONS:
+    if action in BLOCKED_ACTIONS:
         errors.append(f"review_decision 的 action={action} 不允许进入生成")
-    if not isinstance(action, str) or action not in GENERATE_ACTIONS:
+    if action not in GENERATE_ACTIONS:
         errors.append(
             "review_decision 的 action 必须是 generate_rank_1、generate_selected 或 generate_multiple"
         )
@@ -1345,7 +520,6 @@ def _validate_review_decision(
     if (
         isinstance(analysis, dict)
         and _is_modern_analysis(analysis)
-        and isinstance(action, str)
         and action in GENERATE_ACTIONS
     ):
         errors.extend(_validate_modern_decision(data, analysis))
@@ -1362,26 +536,21 @@ def _validate_modern_decision(
 
     product_type = analysis.get("confirmed_product_type")
     snapshot = decision.get("confirmation_snapshot")
-    if (
-        isinstance(product_type, str)
-        and product_type in (NECKLACE_PRODUCT_TYPES | {"ring"})
-        and snapshot is None
-    ):
-        errors.append("review/review_decision.json：生成决策缺少完整产品确认快照")
+    if product_type in NECKLACE_PRODUCT_TYPES | {"ring"} and snapshot is None:
+        label = "项链" if product_type in NECKLACE_PRODUCT_TYPES else "戒指"
+        errors.append(f"review/review_decision.json：{label}生成决策缺少完整产品确认快照")
         return errors
     if snapshot is None:
         return errors
     if not isinstance(snapshot, dict):
-        errors.append("review/review_decision.json：确认快照 confirmation_snapshot 必须是 JSON 对象")
+        errors.append("review/review_decision.json：confirmation_snapshot 必须是 JSON 对象")
         return errors
 
     required_snapshot_fields = SNAPSHOT_FIELDS + (
-        RING_SNAPSHOT_FIELDS if product_type == "ring" else ()
+        RING_FIELDS if product_type == "ring" else ()
     )
     missing = [
-        field_name
-        for field_name in required_snapshot_fields
-        if field_name not in snapshot
+        field_name for field_name in required_snapshot_fields if field_name not in snapshot
     ]
     if missing:
         errors.append(
@@ -1391,19 +560,13 @@ def _validate_modern_decision(
         return errors
 
     snapshot_product_type = snapshot.get("confirmed_product_type")
-    if (
-        not isinstance(snapshot_product_type, str)
-        or snapshot_product_type not in KNOWN_PRODUCT_TYPES
-    ):
+    if snapshot_product_type not in KNOWN_PRODUCT_TYPES:
         errors.append("review/review_decision.json：快照 confirmed_product_type 必须是规范品类")
     snapshot_source = snapshot.get("source_image_type")
-    if (
-        not isinstance(snapshot_source, str)
-        or snapshot_source not in SUPPORTED_SOURCE_IMAGE_TYPES
-    ):
+    if snapshot_source not in SUPPORTED_SOURCE_IMAGE_TYPES:
         errors.append("review/review_decision.json：快照 source_image_type 值无效")
     snapshot_mode = snapshot.get("display_mode")
-    if not isinstance(snapshot_mode, str) or snapshot_mode not in SUPPORTED_DISPLAY_MODES:
+    if snapshot_mode not in SUPPORTED_DISPLAY_MODES:
         errors.append("review/review_decision.json：快照 display_mode 值无效")
     errors.extend(
         _validate_product_structure(
@@ -1412,28 +575,9 @@ def _validate_modern_decision(
             lambda message: f"review/review_decision.json：确认快照 {message}",
         )
     )
-    if snapshot_product_type == "ring":
-        ring_count = snapshot.get("ring_count")
-        if type(ring_count) is not int or ring_count != 1:
-            errors.append("review/review_decision.json：戒指确认快照 ring_count 必须是 JSON 整数 1")
-        if snapshot.get("hand_side") not in {"left", "right"}:
-            errors.append("review/review_decision.json：戒指确认快照 hand_side 必须是 left/right")
-        if snapshot.get("finger_position") not in {
-            "thumb",
-            "index",
-            "middle",
-            "ring",
-            "little",
-        }:
-            errors.append("review/review_decision.json：戒指确认快照 finger_position 无效")
-        if snapshot.get("ring_wear_style") != "finger_base":
-            errors.append("review/review_decision.json：戒指确认快照 ring_wear_style 必须是 finger_base")
 
     for field_name in required_snapshot_fields:
-        expected = analysis.get(
-            field_name,
-            ANALYSIS_CONFIRMATION_DEFAULTS.get(field_name),
-        )
+        expected = analysis.get(field_name)
         actual = snapshot.get(field_name)
         if actual != expected:
             errors.append(
@@ -1539,9 +683,6 @@ def _validate_final_summary(summary_path: Path, run_root: Path) -> list[str]:
 
 
 def inspect_run(run_root: Path, final_summary: Path | None = None) -> list[str]:
-    state = inspect_run_state(run_root)
-    if state["classified"]:
-        return list(state["errors"])
     errors: list[str] = []
     if not (run_root / "input" / "product-on-hand.jpg").is_file():
         errors.append("缺少 input/product-on-hand.jpg")
@@ -1555,6 +696,18 @@ def inspect_run(run_root: Path, final_summary: Path | None = None) -> list[str]:
         loaded_analysis = _load_json(product_path)
         if isinstance(loaded_analysis, dict):
             product_analysis = loaded_analysis
+
+    constraints_path = run_root / "analysis" / "product_fidelity_constraints.json"
+    if product_analysis is not None and constraints_path.is_file():
+        loaded_constraints = _load_json(constraints_path)
+        if not isinstance(loaded_constraints, dict):
+            errors.append("analysis/product_fidelity_constraints.json 必须包含 JSON 对象")
+        else:
+            constraint_errors, _legacy_read_only = _validate_fidelity_constraints_data(
+                product_analysis,
+                loaded_constraints,
+            )
+            errors.extend(constraint_errors)
 
     selected_path = run_root / "analysis" / "selected_references.json"
     selected_ranks: set[int] = set()
@@ -1604,9 +757,6 @@ def inspect_run(run_root: Path, final_summary: Path | None = None) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 2 and argv[1] in {"-h", "--help"}:
-        print("用法：inspect_run_artifacts.py <run-root> [final-summary.json]")
-        return 0
     if len(argv) not in (2, 3):
         print("用法：inspect_run_artifacts.py <run-root> [final-summary.json]", file=sys.stderr)
         return 2
@@ -1614,12 +764,6 @@ def main(argv: list[str]) -> int:
     if not run_root.is_dir():
         print(f"run 根目录不存在：{run_root}", file=sys.stderr)
         return 2
-    for json_path in sorted(run_root.rglob("*.json")):
-        try:
-            json.loads(json_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            print(f"JSON 输入无法读取或语法错误：{json_path}；{exc}", file=sys.stderr)
-            return 2
     final_summary = _resolve_artifact_path(argv[2], run_root) if len(argv) == 3 else None
     errors = inspect_run(run_root, final_summary)
     if errors:
@@ -1627,8 +771,16 @@ def main(argv: list[str]) -> int:
             print(error, file=sys.stderr)
         return 1
     print("run 产物检查通过")
-    state = inspect_run_state(run_root)
-    print(f"legacy_read_only={'true' if state['legacy_read_only'] else 'false'}")
+    constraints_path = run_root / "analysis" / "product_fidelity_constraints.json"
+    legacy_read_only = False
+    if constraints_path.is_file():
+        constraints = _load_json(constraints_path)
+        legacy_read_only = (
+            isinstance(constraints, dict)
+            and constraints.get("schema_version") == 1
+            and type(constraints.get("schema_version")) is int
+        )
+    print(f"legacy_read_only={'true' if legacy_read_only else 'false'}")
     return 0
 
 

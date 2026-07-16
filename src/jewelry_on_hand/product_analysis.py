@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from jewelry_on_hand.category_policies import get_category_policy
-from jewelry_on_hand.display_modes import SourceImageType, validate_product_mode
-from jewelry_on_hand.models import PendantSemantics, ProductAnalysis
+from jewelry_on_hand.display_modes import validate_product_mode
+from jewelry_on_hand.models import ProductAnalysis
 from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.product_fidelity import build_product_fidelity_constraints
 from jewelry_on_hand.run_paths import read_json
@@ -14,19 +14,6 @@ from jewelry_on_hand.run_paths import read_json
 
 class UnsupportedProductError(ValueError):
     """当前产品品类或输入模式不在自动流程支持范围内。"""
-
-
-_REFERENCE_SELECTION_PRODUCT_TYPES = frozenset(
-    {
-        ProductType.BRACELET,
-        ProductType.NECKLACE,
-        ProductType.PENDANT_NECKLACE,
-        ProductType.RING,
-    }
-)
-_NECKLACE_PRODUCT_TYPES = frozenset(
-    {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}
-)
 
 
 def build_analysis_prompt(product_image: str | Path, dimensions: dict[str, Any] | None = None) -> str:
@@ -111,54 +98,6 @@ def build_analysis_prompt(product_image: str | Path, dimensions: dict[str, Any] 
 - 即使识别为无链独立吊坠、其他品类或 unknown，也要如实输出完整 JSON，交由加载阶段明确拒绝。"""
 
 
-def product_analysis_to_dict(product: ProductAnalysis) -> dict[str, Any]:
-    """返回 ProductAnalysis 的完整、确定性、可再次解析投影。"""
-    if not isinstance(product, ProductAnalysis):
-        raise ValueError("product 必须是 ProductAnalysis")
-    dimensions = product.product_dimensions
-    return {
-        "product_type": product.product_type,
-        "detected_product_type": product.detected_product_type.value,
-        "confirmed_product_type": product.confirmed_product_type.value,
-        "classification_confidence": product.classification_confidence,
-        "classification_evidence": list(product.classification_evidence),
-        "classification_source": product.classification_source,
-        "display_mode": product.display_mode.value,
-        "source_image_type": product.source_image_type.value,
-        "wear_position": product.wear_position,
-        "visible_appearance": product.visible_appearance,
-        "color_family": list(product.color_family),
-        "style_mood": product.style_mood,
-        "composition": product.composition,
-        "product_dimensions": {
-            "length_mm": dimensions.length_mm,
-            "width_mm": dimensions.width_mm,
-            "height_mm": dimensions.height_mm,
-            "bead_diameter_mm": dimensions.bead_diameter_mm,
-            "dimension_source": dimensions.dimension_source,
-        },
-        "needs_full_front_display": product.needs_full_front_display,
-        "special_requirements": list(product.special_requirements),
-        "layer_count": product.layer_count,
-        "length_category": product.length_category,
-        "chain_or_strand_type": product.chain_or_strand_type,
-        "has_pendant": product.has_pendant,
-        "pendant_count": product.pendant_count,
-        "pendant_layer": product.pendant_layer,
-        "pendant_position": product.pendant_position,
-        "pendant_orientation": product.pendant_orientation,
-        "connection_structure": product.connection_structure,
-        "symmetry": product.symmetry,
-        "occluded_parts": list(product.occluded_parts),
-        "uncertain_details": list(product.uncertain_details),
-        "is_independent_multi_item": product.is_independent_multi_item,
-        "ring_count": product.ring_count,
-        "hand_side": product.hand_side.value,
-        "finger_position": product.finger_position.value,
-        "ring_wear_style": product.ring_wear_style.value,
-    }
-
-
 def load_product_analysis(path: str | Path) -> ProductAnalysis:
     analysis = ProductAnalysis.from_dict(read_json(path))
     if not analysis.is_supported_product():
@@ -184,96 +123,15 @@ def load_product_analysis(path: str | Path) -> ProductAnalysis:
 def validate_analysis_ready_for_reference_selection(
     analysis: ProductAnalysis,
 ) -> None:
-    """只校验产品身份是否完整到足以进入参考选择。"""
+    """保留可解析的待纠正状态，但禁止不完整项链进入评分或生成。"""
     if not isinstance(analysis, ProductAnalysis):
         raise ValueError("analysis 必须是 ProductAnalysis")
-
-    product_type = analysis.confirmed_product_type
-    if product_type not in _REFERENCE_SELECTION_PRODUCT_TYPES:
+    if (
+        analysis.confirmed_product_type
+        in {ProductType.NECKLACE, ProductType.PENDANT_NECKLACE}
+        and analysis.length_category is None
+    ):
         raise ValueError(
-            "当前只支持 bracelet、necklace、pendant_necklace、ring "
-            "进入参考选择；产品品类必须先确认"
+            "现代项链 length_category 不能为空；必须在参考评分前人工纠正为 "
+            "choker、collarbone、upper_chest 或 long"
         )
-    if analysis.source_image_type is not SourceImageType.WORN_SOURCE:
-        raise ValueError(
-            "source_image_type 必须为 worn_source；"
-            "第一阶段只接受真人佩戴原图，才能进入参考选择"
-        )
-
-    classification_source = analysis.classification_source
-    if classification_source == "legacy_inferred":
-        if (
-            product_type is not ProductType.BRACELET
-            or analysis.detected_product_type is not ProductType.BRACELET
-            or analysis.classification_confidence != "high"
-        ):
-            raise ValueError("历史分析尚未确认，只允许明确的旧手串/手链记录")
-    elif classification_source not in {"auto_confirmed", "manual_override"}:
-        raise ValueError(
-            "产品分析尚未确认：classification_source 必须为 "
-            "auto_confirmed、manual_override 或受限的 legacy_inferred"
-        )
-    else:
-        if not analysis.classification_evidence or any(
-            not evidence.strip() for evidence in analysis.classification_evidence
-        ):
-            raise ValueError("现代产品分析必须提供非空分类证据")
-        if classification_source == "auto_confirmed":
-            if analysis.classification_confidence != "high":
-                raise ValueError("自动确认的分类置信度必须为 high")
-            if analysis.detected_product_type is not product_type:
-                raise ValueError("自动确认的检测品类与确认品类必须一致")
-
-    if analysis.is_independent_multi_item:
-        raise ValueError("多件独立产品结构未确认，不得进入参考选择")
-    if product_type is ProductType.BRACELET and analysis.layer_count != 1:
-        raise ValueError("手串/手链 layer_count 必须为 1")
-    if product_type in _NECKLACE_PRODUCT_TYPES:
-        if analysis.length_category is None:
-            raise ValueError(
-                "现代项链 length_category 不能为空；必须在参考评分前人工纠正为 "
-                "choker、collarbone、upper_chest 或 long"
-            )
-        if analysis.chain_or_strand_type is None:
-            raise ValueError(
-                "现代项链 chain_or_strand_type 不能为空；必须先确认链条或串线结构"
-            )
-
-    pendant_fields_present = (
-        analysis.has_pendant
-        or analysis.pendant_count != 0
-        or analysis.pendant_layer is not None
-        or analysis.pendant_position is not None
-        or analysis.pendant_orientation is not None
-        or analysis.connection_structure is not None
-    )
-    if product_type is not ProductType.PENDANT_NECKLACE:
-        if pendant_fields_present:
-            raise ValueError("非吊坠品类不得声明吊坠语义")
-    else:
-        for field_name in (
-            "pendant_position",
-            "pendant_orientation",
-            "connection_structure",
-        ):
-            if getattr(analysis, field_name) is None:
-                raise ValueError(f"吊坠项链 {field_name} 不能为空；必须先确认吊坠结构")
-        PendantSemantics(
-            presence="present",
-            count=analysis.pendant_count,
-            layer=analysis.pendant_layer,
-            creation_policy="forbid",
-            position=analysis.pendant_position,
-            orientation=analysis.pendant_orientation,
-            connection=analysis.connection_structure,
-        )
-
-    if product_type is ProductType.RING:
-        if analysis.ring_count != 1:
-            raise ValueError("戒指 ring_count 必须为 1")
-        if analysis.hand_side.value == "unknown":
-            raise ValueError("戒指 hand_side 必须确认 left 或 right")
-        if analysis.finger_position.value == "unknown":
-            raise ValueError("戒指 finger_position 必须确认具体手指")
-        if analysis.ring_wear_style.value != "finger_base":
-            raise ValueError("戒指 ring_wear_style 必须为 finger_base")

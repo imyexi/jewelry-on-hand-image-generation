@@ -47,13 +47,7 @@ from jewelry_on_hand.product_fidelity import (
 )
 from jewelry_on_hand.prompt_builder import build_prompt
 from jewelry_on_hand.qc import write_qc_result
-from jewelry_on_hand.qc_review import ensure_qc_review_ready
 from jewelry_on_hand.reference_catalog import load_reference_rows
-from jewelry_on_hand.reference_composition import (
-    REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
-    build_candidate_snapshot,
-    load_reference_composition_snapshot,
-)
 from jewelry_on_hand.ring_attributes import FingerPosition, HandSide, RingWearStyle
 from jewelry_on_hand.review_decision import (
     ReviewGateError,
@@ -64,11 +58,7 @@ from jewelry_on_hand.review_decision import (
 )
 from jewelry_on_hand.review_package import write_review_package
 from jewelry_on_hand.run_paths import RunPaths, create_run_id, read_json, write_json
-from jewelry_on_hand.scoring import (
-    require_three_review_candidates,
-    select_batch_diverse_references,
-    select_reference_candidates,
-)
+from jewelry_on_hand.scoring import select_batch_diverse_references, select_top_references
 
 
 DEFAULT_OUTPUT_ROOT = "outputs/auto_reference_runs"
@@ -245,9 +235,8 @@ def _build_parser() -> argparse.ArgumentParser:
     qc.add_argument("--passed", action="append")
     qc.add_argument("--failed", action="append")
     qc.add_argument("--notes", default="")
-    qc.add_argument("--fidelity-checks-json", required=True)
-    qc.add_argument("--checklist-checks-json", required=True)
-    qc.add_argument("--reference-preservation-checks-json", required=True)
+    qc.add_argument("--fidelity-checks-json")
+    qc.add_argument("--checklist-checks-json")
     qc.add_argument(
         "--critical-failures",
         action="append",
@@ -314,73 +303,26 @@ def _prepare_review(args: argparse.Namespace) -> int:
         paths.analysis_dir / OUTPUT_ROLE_FILE_NAME,
         {"output_role": output_role.value},
     )
-    selection = select_reference_candidates(
+    selected, candidates = select_top_references(
         product,
         rows,
         output_role=output_role,
     )
-    write_json(
-        paths.analysis_dir / "reference_snapshot_readiness.json",
-        selection.readiness_audit(),
-    )
-    require_three_review_candidates(selection)
-    selected = list(selection.selected)
-    candidates = list(selection.candidates)
-    composition_snapshots = [
-        build_candidate_snapshot(product, item, output_role) for item in selected
-    ]
-    write_review_package(
-        paths,
-        product_identity,
-        selected,
-        candidates,
-        composition_snapshots=composition_snapshots,
-    )
+    write_review_package(paths, product_identity, selected, candidates)
     return 0
 
 
 def _rerank_batch(args: argparse.Namespace) -> int:
     output_root = Path(args.output_root)
     paths_list = [RunPaths(root=output_root / run_id) for run_id in args.run_id]
-    output_roles = [
-        require_scene_replacement_role(
-            _load_run_output_role(paths),
-            stage="rerank-batch",
-        )
-        for paths in paths_list
-    ]
-    products = [
-        load_product_analysis(paths.analysis_dir / "product_analysis.json")
-        for paths in paths_list
-    ]
     candidate_sets = [
         _load_selected_references(paths.analysis_dir / "reference_candidates.json")
         for paths in paths_list
     ]
-    selections = select_batch_diverse_references(
-        candidate_sets,
-        output_roles,
-        limit=3,
-    )
-    for paths, product, output_role, selected, candidates in zip(
-        paths_list,
-        products,
-        output_roles,
-        selections,
-        candidate_sets,
-        strict=True,
-    ):
+    selections = select_batch_diverse_references(candidate_sets, limit=3)
+    for paths, selected, candidates in zip(paths_list, selections, candidate_sets, strict=True):
         product_image = paths.input_dir / "product-on-hand.jpg"
-        composition_snapshots = [
-            build_candidate_snapshot(product, item, output_role) for item in selected
-        ]
-        write_review_package(
-            paths,
-            product_image,
-            selected,
-            candidates,
-            composition_snapshots=composition_snapshots,
-        )
+        write_review_package(paths, product_image, selected, candidates)
     return 0
 
 
@@ -625,11 +567,11 @@ def _parse_nullable_integer(value: str, field_name: str) -> int | None:
 
 def _generate(args: argparse.Namespace) -> int:
     paths = _paths_from_run_root(args.run_root)
+    decision = require_generation_decision(paths)
     output_role = require_scene_replacement_role(
         _load_run_output_role(paths),
         stage="generate",
     )
-    decision = require_generation_decision(paths)
     decision_output_role = require_scene_replacement_role(
         decision.output_role,
         stage="generate review-decision",
@@ -637,18 +579,23 @@ def _generate(args: argparse.Namespace) -> int:
     if decision_output_role != output_role:
         raise ValueError("review_decision.json 的 output_role 与当前 run 不一致")
 
-    analysis_path = paths.analysis_dir / "product_analysis.json"
-    canonical_path = paths.analysis_dir / "product_fidelity_constraints.json"
-    snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
-    product = load_product_analysis(analysis_path)
-    fidelity_constraints = load_product_fidelity_constraints(canonical_path)
-    reference_snapshot = load_reference_composition_snapshot(snapshot_path)
+    product = load_product_analysis(paths.analysis_dir / "product_analysis.json")
+    fidelity_constraints = load_product_fidelity_constraints(
+        paths.analysis_dir / "product_fidelity_constraints.json"
+    )
     validate_product_fidelity_constraints(product, fidelity_constraints)
     validate_necklace_reference_selection(paths, product, decision)
     selected_references = _load_selected_references(paths.analysis_dir / "selected_references.json")
     references_by_rank = _references_by_rank(selected_references)
     prompts_by_rank = {}
-    for rank in _generation_ranks(decision):
+    requested_ranks = _generation_ranks(decision)
+    prompt_ranks = (
+        sorted(references_by_rank)
+        if product.confirmed_product_type is ProductType.RING
+        and len(requested_ranks) == 1
+        else requested_ranks
+    )
+    for rank in prompt_ranks:
         if rank not in references_by_rank:
             raise KeyError(f"人工决策选择的 rank {rank} 不在 selected_references.json 中")
         prompts_by_rank[rank] = build_prompt(
@@ -656,7 +603,6 @@ def _generate(args: argparse.Namespace) -> int:
             references_by_rank[rank],
             fidelity_constraints,
             output_role=output_role,
-            reference_snapshot=reference_snapshot,
         )
     run_generation(
         paths,
@@ -664,9 +610,6 @@ def _generate(args: argparse.Namespace) -> int:
         prompts_by_rank,
         args.helper_script,
         wait=not args.no_wait,
-        reference_snapshot=reference_snapshot,
-        product_analysis_path=analysis_path,
-        fidelity_constraints_path=canonical_path,
     )
     return 0
 
@@ -700,23 +643,15 @@ def _load_run_output_role(paths: RunPaths) -> OutputRole | None:
 
 
 def _qc(args: argparse.Namespace) -> int:
-    fidelity_checks = _load_optional_fidelity_checks(args.fidelity_checks_json)
-    checklist_checks = _load_optional_checklist_checks(args.checklist_checks_json)
-    reference_checks = _load_optional_reference_preservation_checks(
-        args.reference_preservation_checks_json
-    )
-    critical_failures = _parse_critical_failures(args.critical_failures)
-    ensure_qc_review_ready(args.generation_dir)
     write_qc_result(
         args.generation_dir,
         args.status,
         _parse_string_list(args.passed),
         _parse_string_list(args.failed),
         args.notes,
-        fidelity_checks=fidelity_checks,
-        checklist_checks=checklist_checks,
-        reference_preservation_checks=reference_checks,
-        critical_failures=critical_failures,
+        fidelity_checks=_load_optional_fidelity_checks(args.fidelity_checks_json),
+        checklist_checks=_load_optional_checklist_checks(args.checklist_checks_json),
+        critical_failures=_parse_critical_failures(args.critical_failures),
     )
     return 0
 
@@ -759,19 +694,6 @@ def _load_optional_checklist_checks(path: str | None) -> list[Any]:
     data = read_json(path)
     if not isinstance(data, list):
         raise ValueError("--checklist-checks-json 必须是 JSON 数组")
-    return data
-
-
-def _load_optional_reference_preservation_checks(
-    path: str | None,
-) -> list[Any]:
-    if not path:
-        return []
-    data = read_json(path)
-    if not isinstance(data, list):
-        raise ValueError(
-            "--reference-preservation-checks-json 必须是 JSON 数组"
-        )
     return data
 
 

@@ -86,6 +86,26 @@ def test_copy_product_image_copies_content(tmp_path):
     assert copied.read_bytes() == b"fake image bytes"
 
 
+def test_copy_product_detail_image_preserves_supported_suffix(tmp_path):
+    source = tmp_path / "ring-detail.png"
+    source.write_bytes(b"cropped ring")
+    paths = RunPaths.create(tmp_path, "ring-detail")
+
+    copied = paths.copy_product_detail_image(source)
+
+    assert copied == paths.input_dir / "product-detail.png"
+    assert copied.read_bytes() == b"cropped ring"
+
+
+def test_copy_product_detail_image_rejects_unsupported_format(tmp_path):
+    source = tmp_path / "ring-detail.txt"
+    source.write_text("not image", encoding="utf-8")
+    paths = RunPaths.create(tmp_path, "ring-detail-invalid")
+
+    with pytest.raises(ValueError, match="jpg/jpeg/png/webp"):
+        paths.copy_product_detail_image(source)
+
+
 @pytest.mark.parametrize("source_name", ["missing.jpg", "directory"])
 def test_copy_product_image_rejects_missing_file_or_directory(tmp_path, source_name):
     source = tmp_path / source_name

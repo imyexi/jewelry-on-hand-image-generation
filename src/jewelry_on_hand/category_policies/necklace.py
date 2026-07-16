@@ -9,7 +9,6 @@ from jewelry_on_hand.category_policies.base import (
     contains_affirmed_any,
     contains_any,
     contains_unnegated_any,
-    is_role_appropriate_priority_strategy,
     parse_confidence_level,
     parse_risk_level,
     parse_visibility_level,
@@ -26,7 +25,7 @@ _LENGTH_CATEGORY_NAMES = {
     "upper_chest": "上胸链",
     "long": "长链",
 }
-NECKLACE_IMAGE_ONE_ROLE = "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变。"
+NECKLACE_IMAGE_ONE_ROLE = "内部图1：自动参考图，只提供人物、姿势、身体关系、构图、背景、服装、光线和空间关系。"
 
 
 def _build_necklace_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
@@ -37,21 +36,6 @@ def _build_necklace_prompt_fragments(product: ProductAnalysis) -> PromptFragment
         "层间上下顺序：第 1 层位于最上方且最短，层号递增时依次向下；"
         "保持各层可辨识的相对落差，不得交换、合并或重组层间上下顺序。",
     ]
-    if product.has_pendant:
-        structure_lines.extend(
-            (
-                f"主吊坠数量：{product.pendant_count}。",
-                f"吊坠所属层：第 {product.pendant_layer} 层。",
-                f"吊坠位置：{product.pendant_position or '未确定'}。",
-                f"吊坠朝向：{product.pendant_orientation or '未确定'}。",
-                f"吊坠连接：{product.connection_structure or '未确定'}。",
-                "吊坠身份保持：不得换层、不得翻面、不得移位、不得复制、不得丢失，"
-                "不得脱离或改变原连接关系。",
-            )
-        )
-    else:
-        structure_lines.append("主吊坠：无；不得凭空添加吊坠或吊坠连接结构。")
-
     return PromptFragments(
         image_one_role=NECKLACE_IMAGE_ONE_ROLE,
         category_fidelity="\n".join(structure_lines),
@@ -73,12 +57,12 @@ def _length_category_text(value: str | None) -> str:
 def _necklace_display_mode_fragment(product: ProductAnalysis) -> str:
     if product.display_mode is DisplayMode.HAND_HELD:
         return (
-            "展示关系：保持底图手势不变，只重建手指与项链的真实接触；"
-            "链条按原连接关系受重力自然垂落。"
+            "手持展示：产品必须完整且可识别，链条在手部真实持握下完整进入画面，"
+            "不得以佩戴或贴图方式替代手持关系。"
         )
     return (
-        "展示关系：保持底图人物和姿势不变；项链按原层数与连接关系受重力"
-        "自然垂落，并与接触表面形成真实接触。"
+        "真人佩戴：根据有限可见的颈围和姿势适配，不改变人物体态；项链必须"
+        "真实绕颈并受重力自然垂落，长度等级、各层落点及相对落差与内部图2一致。"
     )
 
 
@@ -92,7 +76,7 @@ def _necklace_occlusion_fragment(product: ProductAnalysis) -> str:
     return (
         "项链与颈部、锁骨或衣物表面应有真实接触、遮挡关系和自然阴影；"
         "禁止把颈部或衣服连同项链作为贴片，不得让链条穿透皮肤或衣物。\n"
-        "头发和衣领只保留底图已有遮挡关系，不得借产品替换改变人物或衣物。"
+        "头发和衣领只能形成符合参考图姿势的有限自然遮挡，不得遮掉产品主要结构。"
     )
 
 
@@ -101,7 +85,7 @@ def _evaluate_necklace_reference(
 ) -> ReferenceAdaptation:
     score = 0
     reasons: list[str] = []
-    risks = _replacement_blocking_risks(row)
+    risks: list[str] = []
     product_type_matches = _matches_product_type(product.confirmed_product_type, row)
     display_mode_matches = _matches_display_mode(product.display_mode, row)
 
@@ -155,40 +139,6 @@ def _evaluate_necklace_reference(
         ignored_reference_jewelry=ignored,
         selection_tier=selection_tier or 0,
     )
-
-
-def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
-    text = row.combined_text()
-    risks: list[str] = []
-    if contains_unnegated_any(
-        text,
-        (
-            "大面积文字",
-            "blocking",
-            "平台界面",
-            "手机界面",
-            "网页界面",
-            "状态栏",
-            "操作按钮",
-        ),
-    ):
-        risks.append("画面含阻断替换的平台界面元素")
-    if contains_unnegated_any(
-        text,
-        (
-            "原首饰无法完整识别",
-            "原有首饰无法完整识别",
-            "原首饰不可完整识别",
-            "原有首饰不可完整识别",
-            "原首饰无法清除",
-            "原有首饰无法清除",
-            "无法完整识别",
-            "不可完整识别",
-            "无法清除",
-        ),
-    ):
-        risks.append("原首饰无法完整识别或安全清除")
-    return risks
 
 
 def _evaluate_worn_reference(
@@ -398,7 +348,9 @@ def _framing_fits_length(product: ProductAnalysis, row: ReferenceRow) -> bool:
 
 
 def _selection_tier(row: ReferenceRow, risks: list[str]) -> int | None:
-    priority = is_role_appropriate_priority_strategy(row)
+    priority = contains_any(row.default_strategy, ("优先使用", "可优先", "优先")) and not contains_any(
+        row.default_strategy, ("不优先", "不建议", "谨慎使用")
+    )
     relaxed = contains_any(
         row.default_strategy, ("无特殊要求不优先使用", "无特殊要求不优先")
     )

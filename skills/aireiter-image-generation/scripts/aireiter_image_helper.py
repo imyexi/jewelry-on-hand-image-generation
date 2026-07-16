@@ -65,14 +65,22 @@ def build_headers(api_key: str) -> dict[str, str]:
 def post_json(url: str, payload: dict, api_key: str) -> dict:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=build_headers(api_key), method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        fatal(f"HTTP {exc.code}: {body}")
-    except urllib.error.URLError as exc:
-        fatal(f"Request failed: {exc}")
+    raw = ""
+    last_error = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                raw = response.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            fatal(f"HTTP {exc.code}: {body}")
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    if not raw and last_error is not None:
+        fatal(f"Request failed: {last_error}")
 
     try:
         return json.loads(raw)

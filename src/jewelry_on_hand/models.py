@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any, Literal
 
 from jewelry_on_hand.display_modes import DisplayMode, SourceImageType
@@ -655,9 +654,6 @@ class PendantSemantics:
     count: int
     layer: int | None
     creation_policy: PendantCreationPolicy
-    position: str | None = None
-    orientation: str | None = None
-    connection: str | None = None
 
     def __post_init__(self) -> None:
         if self.presence not in {"present", "absent"}:
@@ -682,19 +678,6 @@ class PendantSemantics:
             self.count != 1 or self.layer is None
         ):
             raise ValueError("presence=present 时 count 必须为 1 且 layer 必须为 1 至 3")
-        for field_name in ("position", "orientation", "connection"):
-            value = getattr(self, field_name)
-            field_path = f"pendant_semantics.{field_name}"
-            if self.presence == "present":
-                object.__setattr__(
-                    self,
-                    field_name,
-                    _required_string_value(value, field_path),
-                )
-            elif value is not None:
-                raise ValueError(
-                    f"presence=absent 时 {field_path} 必须为 null"
-                )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "PendantSemantics":
@@ -703,18 +686,11 @@ class PendantSemantics:
             raise ValueError("pendant_semantics.layer 必填；absent 时必须显式为 null")
         return cls(
             presence=_required_string(source, "presence"),  # type: ignore[arg-type]
-            count=_json_int(  # type: ignore[arg-type]
-                source.get("count"), "pendant_semantics.count"
-            ),
-            layer=_json_int(
-                source["layer"], "pendant_semantics.layer", allow_none=True
-            ),
+            count=_json_int(source.get("count"), "count"),  # type: ignore[arg-type]
+            layer=_json_int(source["layer"], "layer", allow_none=True),
             creation_policy=_required_string(  # type: ignore[arg-type]
                 source, "creation_policy"
             ),
-            position=source.get("position"),
-            orientation=source.get("orientation"),
-            connection=source.get("connection"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -722,9 +698,6 @@ class PendantSemantics:
             "presence": self.presence,
             "count": self.count,
             "layer": self.layer,
-            "position": self.position,
-            "orientation": self.orientation,
-            "connection": self.connection,
             "creation_policy": self.creation_policy,
         }
 
@@ -820,30 +793,6 @@ class ProductFidelityConstraints:
                 )
         source = _ensure_mapping(self.source, "source")
         object.__setattr__(self, "source", dict(source))
-        if self.schema_version == 2:
-            product_type = normalize_product_type(source.get("product_type"))
-            if product_type not in {
-                ProductType.BRACELET,
-                ProductType.RING,
-                ProductType.NECKLACE,
-                ProductType.PENDANT_NECKLACE,
-            }:
-                raise ValueError(
-                    "v2 的 source.product_type 必须是 bracelet/ring/necklace/"
-                    "pendant_necklace"
-                )
-            assert self.pendant_semantics is not None
-            expected_presence = (
-                "present"
-                if product_type is ProductType.PENDANT_NECKLACE
-                else "absent"
-            )
-            if self.pendant_semantics.presence != expected_presence:
-                raise ValueError(
-                    f"source.product_type={product_type.value} 时 "
-                    "pendant_semantics.presence 必须为 "
-                    f"{expected_presence}"
-                )
         object.__setattr__(
             self,
             "detected_keywords",
@@ -1619,7 +1568,6 @@ class ReviewDecision:
     fidelity_constraints_path: str = "analysis/product_fidelity_constraints.json"
     confirmation_snapshot: ProductConfirmationSnapshot | None = None
     output_role: OutputRole | str | None = None
-    reference_snapshot_sha256: str | None = None
 
     def __post_init__(self) -> None:
         supported_actions = {
@@ -1675,22 +1623,9 @@ class ReviewDecision:
             raise ValueError("confirmation_snapshot 必须是产品确认快照或 null")
         object.__setattr__(self, "confirmation_snapshot", snapshot)
         object.__setattr__(self, "output_role", normalize_output_role(self.output_role))
-        object.__setattr__(
-            self,
-            "reference_snapshot_sha256",
-            self._parse_reference_snapshot_sha256(
-                self.reference_snapshot_sha256,
-                allow_none=True,
-            ),
-        )
 
     @classmethod
-    def from_dict(
-        cls,
-        data: dict[str, Any] | None,
-        *,
-        require_reference_snapshot_sha256: bool = False,
-    ) -> "ReviewDecision":
+    def from_dict(cls, data: dict[str, Any] | None) -> "ReviewDecision":
         source = _ensure_mapping(data, "ReviewDecision")
         action = _required_string(source, "action")
         supported_actions = {
@@ -1755,63 +1690,7 @@ class ReviewDecision:
             fidelity_constraints_path=fidelity_constraints_path,
             confirmation_snapshot=confirmation_snapshot,
             output_role=source.get("output_role"),
-            reference_snapshot_sha256=cls._parse_reference_snapshot_sha256(
-                source.get("reference_snapshot_sha256"),
-                allow_none=not require_reference_snapshot_sha256,
-            ),
         )
-
-    @staticmethod
-    def _parse_reference_snapshot_sha256(
-        value: Any,
-        *,
-        allow_none: bool,
-    ) -> str | None:
-        if value is None:
-            if allow_none:
-                return None
-            raise ValueError(
-                "reference_snapshot_sha256 必须是非空 64 位小写十六进制字符串"
-            )
-        if (
-            not isinstance(value, str)
-            or len(value) != 64
-            or any(character not in "0123456789abcdef" for character in value)
-        ):
-            raise ValueError(
-                "reference_snapshot_sha256 必须是非空 64 位小写十六进制字符串"
-            )
-        return value
-
-    def to_dict(self) -> dict[str, Any]:
-        is_generation_action = self.action in {
-            "generate_rank_1",
-            "generate_selected",
-            "generate_multiple",
-        }
-        data: dict[str, Any] = {
-            "action": self.action,
-            "selected_ranks": list(self.selected_ranks),
-        }
-        if self.manual_reference is not None:
-            data["manual_reference"] = self.manual_reference
-        if is_generation_action:
-            data["fidelity_confirmed"] = self.fidelity_confirmed
-            data["fidelity_constraints_path"] = self.fidelity_constraints_path
-        if self.fidelity_notes is not None:
-            data["fidelity_notes"] = self.fidelity_notes
-        if self.confirmation_snapshot is not None:
-            data["confirmation_snapshot"] = self.confirmation_snapshot.to_dict()
-        if self.output_role is not None:
-            data["output_role"] = self.output_role.value
-        if is_generation_action:
-            data["reference_snapshot_sha256"] = self._parse_reference_snapshot_sha256(
-                self.reference_snapshot_sha256,
-                allow_none=False,
-            )
-        elif self.reference_snapshot_sha256 is not None:
-            data["reference_snapshot_sha256"] = self.reference_snapshot_sha256
-        return data
 
     @staticmethod
     def _parse_ranks(value: Any) -> _FrozenList:
@@ -1850,15 +1729,6 @@ QcCriticalFailure = Literal[
     "ring_contact_error",
     "finger_deformation",
     "source_hand_leakage",
-    "reference_framing_changed",
-    "reference_pose_changed",
-    "reference_person_changed",
-    "reference_clothing_changed",
-    "reference_background_changed",
-    "reference_lighting_changed",
-    "reference_jewelry_leakage",
-    "replacement_target_changed",
-    "target_product_duplicated",
 ]
 
 _QC_CRITICAL_FAILURES = {
@@ -1880,15 +1750,6 @@ _QC_CRITICAL_FAILURES = {
     "ring_contact_error",
     "finger_deformation",
     "source_hand_leakage",
-    "reference_framing_changed",
-    "reference_pose_changed",
-    "reference_person_changed",
-    "reference_clothing_changed",
-    "reference_background_changed",
-    "reference_lighting_changed",
-    "reference_jewelry_leakage",
-    "replacement_target_changed",
-    "target_product_duplicated",
 }
 
 _QC_REJECT_FAILURES = {
@@ -1902,15 +1763,6 @@ _QC_REJECT_FAILURES = {
     "ring_structure_mismatch",
     "centerpiece_mismatch",
     "source_hand_leakage",
-    "reference_framing_changed",
-    "reference_pose_changed",
-    "reference_person_changed",
-    "reference_clothing_changed",
-    "reference_background_changed",
-    "reference_lighting_changed",
-    "reference_jewelry_leakage",
-    "replacement_target_changed",
-    "target_product_duplicated",
 }
 
 _QC_REJECT_FAILURE_TERMS = (
@@ -1941,9 +1793,6 @@ class QcResult:
     notes: str
     fidelity_checks: tuple["FidelityCheck", ...] = field(default_factory=tuple)
     checklist_checks: tuple["QcChecklistCheck", ...] = field(default_factory=tuple)
-    reference_preservation_checks: tuple["ReferencePreservationCheck", ...] = field(
-        default_factory=tuple
-    )
     critical_failures: tuple[QcCriticalFailure, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -1964,19 +1813,6 @@ class QcResult:
             check.result != "pass" for check in checklist_checks
         ):
             raise ValueError("checklist_checks 存在未通过项时不得标记为 pass")
-        reference_checks = _parse_reference_preservation_checks(
-            self.reference_preservation_checks
-        )
-        if self.status == "pass" and any(
-            check.result != "pass" for check in reference_checks
-        ):
-            raise ValueError(
-                "reference_preservation_checks 存在未通过项时不得标记为 pass"
-            )
-        if self.status != "reject" and any(
-            check.result == "fail" for check in reference_checks
-        ):
-            raise ValueError("参考底图保留检查失败时必须标记为 reject")
         critical_failures = _parse_qc_critical_failures(self.critical_failures)
         if self.status == "pass" and critical_failures:
             raise ValueError("存在关键 QC 失败时不得标记为 pass")
@@ -1985,27 +1821,8 @@ class QcResult:
             or _contains_any_text(failure_text, _QC_REJECT_FAILURE_TERMS)
         ):
             raise ValueError("品类、结构、自动补链或严重穿模错误必须标记为 reject")
-        required_reference_failures = {
-            REFERENCE_FAILURE_CODES[check.name]
-            for check in reference_checks
-            if check.result == "fail" and check.name in REFERENCE_FAILURE_CODES
-        }
-        actual_reference_failures = set(critical_failures).intersection(
-            _REFERENCE_FAILURE_CODE_SET
-        )
-        if actual_reference_failures != required_reference_failures:
-            raise ValueError(
-                "reference fail 与 critical_failures 映射不一致："
-                f"需要 {sorted(required_reference_failures)}，"
-                f"实际 {sorted(actual_reference_failures)}；拒绝缺少或错码"
-            )
         object.__setattr__(self, "fidelity_checks", checks)
         object.__setattr__(self, "checklist_checks", checklist_checks)
-        object.__setattr__(
-            self,
-            "reference_preservation_checks",
-            reference_checks,
-        )
         object.__setattr__(self, "critical_failures", critical_failures)
 
 
@@ -2094,296 +1911,6 @@ class QcChecklistCheck:
         }
 
 
-ReferencePreservationCheckResult = Literal["pass", "rerun", "fail"]
-ReferenceComparisonSource = Literal[
-    "scene_reference",
-    "confirmed_snapshot",
-    "product_identity",
-]
-ReferenceResidualScope = Literal[
-    "none",
-    "edge_pixels",
-    "contact_shadow",
-    "subject_or_large_area",
-]
-
-REFERENCE_FAILURE_CODES = MappingProxyType({
-    "framing_preserved": "reference_framing_changed",
-    "pose_preserved": "reference_pose_changed",
-    "subject_placement_preserved": "replacement_target_changed",
-    "person_preserved": "reference_person_changed",
-    "clothing_preserved": "reference_clothing_changed",
-    "background_preserved": "reference_background_changed",
-    "lighting_preserved": "reference_lighting_changed",
-    "source_jewelry_removed": "reference_jewelry_leakage",
-    "replacement_target_preserved": "replacement_target_changed",
-    "single_target_product": "target_product_duplicated",
-})
-REFERENCE_EVIDENCE_SOURCES = MappingProxyType(
-    {
-        **{name: "scene_reference" for name in REFERENCE_FAILURE_CODES},
-        "replacement_target_preserved": "confirmed_snapshot",
-        "single_target_product": "product_identity",
-    }
-)
-REFERENCE_RERUN_ISSUES = MappingProxyType({
-    "source_jewelry_removed": frozenset({"minor_edge_residue"}),
-    "replacement_target_preserved": frozenset(
-        {
-            "local_blending_artifact",
-            "local_shadow_mismatch",
-            "non_core_texture_mismatch",
-        }
-    ),
-})
-_REFERENCE_FAILURE_CODE_SET = frozenset(REFERENCE_FAILURE_CODES.values())
-_REFERENCE_LOCAL_ISSUE_CODES = frozenset().union(*REFERENCE_RERUN_ISSUES.values())
-_REFERENCE_COMPARISON_SOURCES = frozenset(REFERENCE_EVIDENCE_SOURCES.values())
-_REFERENCE_RESIDUAL_SCOPES = frozenset(
-    {"none", "edge_pixels", "contact_shadow", "subject_or_large_area"}
-)
-
-
-@dataclass(frozen=True)
-class ReferencePreservationEvidence:
-    comparison_source: ReferenceComparisonSource
-    region: str
-    observation: str
-    source_jewelry_subject_visible: bool | None = None
-    residual_scope: ReferenceResidualScope | None = None
-
-    def __post_init__(self) -> None:
-        if self.comparison_source not in _REFERENCE_COMPARISON_SOURCES:
-            raise ValueError(
-                "reference_preservation_checks.evidence.comparison_source "
-                "必须是 scene_reference/confirmed_snapshot/product_identity"
-            )
-        object.__setattr__(
-            self,
-            "region",
-            _required_string_value(
-                self.region,
-                "reference_preservation_checks.evidence.region",
-            ),
-        )
-        object.__setattr__(
-            self,
-            "observation",
-            _required_string_value(
-                self.observation,
-                "reference_preservation_checks.evidence.observation",
-            ),
-        )
-        if self.source_jewelry_subject_visible is not None and not isinstance(
-            self.source_jewelry_subject_visible,
-            bool,
-        ):
-            raise ValueError(
-                "evidence.source_jewelry_subject_visible 必须是布尔值或 null"
-            )
-        if (
-            self.residual_scope is not None
-            and self.residual_scope not in _REFERENCE_RESIDUAL_SCOPES
-        ):
-            raise ValueError(
-                "evidence.residual_scope 必须是 "
-                "none/edge_pixels/contact_shadow/subject_or_large_area"
-            )
-
-    @classmethod
-    def from_dict(
-        cls,
-        data: dict[str, Any] | None,
-    ) -> "ReferencePreservationEvidence":
-        source = _ensure_mapping(data, "ReferencePreservationEvidence")
-        return cls(
-            comparison_source=_required_string(  # type: ignore[arg-type]
-                source,
-                "comparison_source",
-            ),
-            region=_required_string(source, "region"),
-            observation=_required_string(source, "observation"),
-            source_jewelry_subject_visible=source.get(
-                "source_jewelry_subject_visible"
-            ),
-            residual_scope=source.get("residual_scope"),  # type: ignore[arg-type]
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        data: dict[str, Any] = {
-            "comparison_source": self.comparison_source,
-            "region": self.region,
-            "observation": self.observation,
-        }
-        if self.source_jewelry_subject_visible is not None:
-            data["source_jewelry_subject_visible"] = (
-                self.source_jewelry_subject_visible
-            )
-        if self.residual_scope is not None:
-            data["residual_scope"] = self.residual_scope
-        return data
-
-
-@dataclass(frozen=True)
-class ReferencePreservationCheck:
-    name: str
-    question: str
-    result: ReferencePreservationCheckResult
-    notes: str
-    issue_code: str | None = None
-    evidence: ReferencePreservationEvidence | dict[str, Any] | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "name",
-            _required_string_value(self.name, "reference_preservation_checks.name"),
-        )
-        object.__setattr__(
-            self,
-            "question",
-            _required_string_value(
-                self.question,
-                "reference_preservation_checks.question",
-            ),
-        )
-        if self.result not in {"pass", "rerun", "fail"}:
-            raise ValueError(
-                "reference_preservation_checks.result 必须是 pass/rerun/fail"
-            )
-        object.__setattr__(
-            self,
-            "notes",
-            _required_string_value(
-                self.notes,
-                "reference_preservation_checks.notes",
-            ),
-        )
-        if self.evidence is None:
-            raise ValueError(
-                "reference_preservation_checks.evidence 必填，notes 不能代替证据"
-            )
-        evidence = (
-            self.evidence
-            if isinstance(self.evidence, ReferencePreservationEvidence)
-            else ReferencePreservationEvidence.from_dict(self.evidence)
-        )
-        expected_source = REFERENCE_EVIDENCE_SOURCES.get(self.name)
-        if (
-            expected_source is not None
-            and evidence.comparison_source != expected_source
-        ):
-            raise ValueError(
-                "reference_preservation_checks.evidence.comparison_source "
-                f"与 {self.name} 不一致，必须为 {expected_source}"
-            )
-        issue_code = self.issue_code
-        if issue_code is not None and (
-            not isinstance(issue_code, str) or not issue_code.strip()
-        ):
-            raise ValueError(
-                "reference_preservation_checks.issue_code "
-                "必须是非空字符串或 null"
-            )
-        if isinstance(issue_code, str):
-            issue_code = issue_code.strip()
-        allowed_issues = _REFERENCE_FAILURE_CODE_SET | _REFERENCE_LOCAL_ISSUE_CODES
-        if issue_code is not None and issue_code not in allowed_issues:
-            raise ValueError(
-                f"reference_preservation_checks.issue_code 未定义：{issue_code}"
-            )
-        if self.result == "pass" and issue_code is not None:
-            raise ValueError("reference preservation pass 时 issue_code 必须为 null")
-        if self.result == "rerun":
-            allowed_rerun = REFERENCE_RERUN_ISSUES.get(self.name, frozenset())
-            if issue_code not in allowed_rerun:
-                raise ValueError(
-                    f"{self.name} 的 rerun issue_code 未受控或不允许：{issue_code}"
-                )
-        if self.result == "fail":
-            expected_failure = REFERENCE_FAILURE_CODES.get(self.name)
-            if issue_code != expected_failure:
-                raise ValueError(
-                    f"{self.name} fail 时 issue_code 必须为 {expected_failure}"
-                )
-        _validate_reference_evidence_facts(
-            name=self.name,
-            result=self.result,
-            issue_code=issue_code,
-            evidence=evidence,
-        )
-        object.__setattr__(self, "issue_code", issue_code)
-        object.__setattr__(self, "evidence", evidence)
-
-    @classmethod
-    def from_dict(
-        cls,
-        data: dict[str, Any] | None,
-    ) -> "ReferencePreservationCheck":
-        source = _ensure_mapping(data, "ReferencePreservationCheck")
-        return cls(
-            name=_required_string(source, "name"),
-            question=_required_string(source, "question"),
-            result=_required_string(source, "result"),  # type: ignore[arg-type]
-            notes=_required_string(source, "notes"),
-            issue_code=source.get("issue_code"),
-            evidence=source.get("evidence"),  # type: ignore[arg-type]
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        assert self.evidence is not None
-        return {
-            "name": self.name,
-            "question": self.question,
-            "result": self.result,
-            "issue_code": self.issue_code,
-            "notes": self.notes,
-            "evidence": self.evidence.to_dict(),
-        }
-
-
-def _validate_reference_evidence_facts(
-    *,
-    name: str,
-    result: ReferencePreservationCheckResult,
-    issue_code: str | None,
-    evidence: ReferencePreservationEvidence,
-) -> None:
-    visible = evidence.source_jewelry_subject_visible
-    scope = evidence.residual_scope
-    if name != "source_jewelry_removed":
-        if visible is not None or scope is not None:
-            raise ValueError(
-                "非 source_jewelry_removed 检查不得声明原首饰残留严重度字段"
-            )
-        return
-    if visible is None or scope is None:
-        raise ValueError(
-            "source_jewelry_removed evidence 必须包含 "
-            "source_jewelry_subject_visible 与 residual_scope"
-        )
-    if result == "pass" and (visible or scope != "none"):
-        raise ValueError(
-            "source_jewelry_removed pass 要求 subject_visible=false 且 residual_scope=none"
-        )
-    if result == "rerun" and (
-        issue_code != "minor_edge_residue"
-        or visible
-        or scope not in {"edge_pixels", "contact_shadow"}
-    ):
-        raise ValueError(
-            "minor_edge_residue rerun 要求 subject_visible=false，"
-            "residual_scope 仅可为 edge_pixels/contact_shadow"
-        )
-    if result == "fail" and not (
-        visible or scope == "subject_or_large_area"
-    ):
-        raise ValueError(
-            "source_jewelry_removed fail 必须由 subject_visible=true "
-            "或 residual_scope=subject_or_large_area 支撑"
-        )
-
-
 def _parse_fidelity_checks(value: Any) -> tuple[FidelityCheck, ...]:
     if value is None:
         return ()
@@ -2409,22 +1936,6 @@ def _parse_qc_checklist_checks(value: Any) -> tuple[QcChecklistCheck, ...]:
             checks.append(item)
         else:
             checks.append(QcChecklistCheck.from_dict(item))
-    return tuple(checks)
-
-
-def _parse_reference_preservation_checks(
-    value: Any,
-) -> tuple[ReferencePreservationCheck, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, (list, tuple)):
-        raise ValueError("reference_preservation_checks 必须是列表")
-    checks: list[ReferencePreservationCheck] = []
-    for item in value:
-        if isinstance(item, ReferencePreservationCheck):
-            checks.append(item)
-        else:
-            checks.append(ReferencePreservationCheck.from_dict(item))
     return tuple(checks)
 
 

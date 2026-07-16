@@ -1,0 +1,4 @@
+interface:
+  display_name: "珠宝产品主图工作流"
+  short_description: "从多视角商品照和飞书参考图生成高保真珠宝产品主图流程"
+  default_prompt: "使用 $jewelry-product-hero-workflow，根据产品正面图、侧视图和细节图，从飞书主图库选择参考并生成一张通过 QC 的主图。"

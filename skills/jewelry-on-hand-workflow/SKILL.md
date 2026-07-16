@@ -1,71 +1,101 @@
 ---
 name: jewelry-on-hand-workflow
-description: "用于需要在真人手部佩戴图或生活场景参考底图中替换首饰，并严格保留原人物、姿势、构图、服装、背景与光线时。"
+description: "用于编排手串、普通项链、带链吊坠和单枚常规指根戒指的产品分析、参考图 review、AIReiter 生成、严格 QC、重跑与最终交付。"
 ---
 
-# 真人参考底图首饰替换
+# 珠宝上手图工作流
 
-## 角色边界
+在当前工作区编排 `jewelry-on-hand`。先确认项目根目录包含 `pyproject.toml`、`src/jewelry_on_hand/`、`reference/` 和 `skills/aireiter-image-generation/`；不要依赖固定绝对路径。这个 Skill 固定四阶段流程和 gate，不替代用户的参考图、产品结构确认与结果 QC。新项链 canonical 必须为 `schema_version=2` 并包含 `pendant_semantics`；历史 v1 只读，不自动升级，必须新建 run 并重新执行 `prepare-review` 才能继续。
 
-- 只支持 `hand_worn` 和 `lifestyle`。收到 `hero` 时立即拒绝；主图必须交给独立主图 Skill，不得静默降级角色。
-- 参考底图是画面结构唯一来源。锁定人物、姿势、手势、构图、景别、服装、背景、光线、留白和替换位置。
-- 产品上手图只提供珠宝身份。不得迁移其中的人物、皮肤、手腕、手臂、手指、颈部、胸部、服装、头发、脸或背景。
-- 只移除参考底图中的原首饰，在同一位置放入一件目标产品；只允许补充必要接触、遮挡、受力、局部阴影和小面积水印处理。
+## 支持边界
 
-在当前工作区运行 `jewelry-on-hand`。向上定位同时包含 `pyproject.toml` 与 `src/jewelry_on_hand/` 的项目根目录；`skills/aireiter-image-generation/` 只在真正生成且已通过所有 gate 时使用。不要依赖机器绝对路径。
+- `bracelet`：输入 `worn_source`，输出 `worn`，固定 1 层。
+- `necklace`：输入 `worn_source`，输出 `worn` 或 `hand_held`，同一产品 1 至 3 层。
+- `pendant_necklace`：输入 `worn_source`，输出 `worn` 或 `hand_held`，同一产品 1 至 3 层且保留完整主吊坠。
+- `ring`：输入 `worn_source`，输出 `worn`；固定 `ring_count=1`，必须明确 `hand_side`、`finger_position`，且 `ring_wear_style=finger_base`。
+- `pendant_only` 和 `unknown` 可分析但不得生成；无链吊坠禁止自动补链。
 
-## 支持的产品
+拒绝 `hand_held_source`、`flat_lay_source`、`unknown_source`、白底/平铺产品源、多件独立项链叠戴，以及对不可见扣头、背面或连接结构的推断。`hand_held` 只表示项链输出模式，不改变输入必须为真人佩戴原图的规则。双圈附件是同一条连续长链形成 2 层、`presence=absent`，不是两件项链或带链吊坠；1 至 3 层只是运行时能力，不代表存在三圈吊坠商品。
 
-- `bracelet`：`worn_source`，`display_mode=worn`，单件单层。
-- `necklace`：`worn_source`，`worn` 或 `hand_held`，同一产品 1 至 3 层。
-- `pendant_necklace`：与项链相同，但必须保留 `schema_version=2` 的 `pendant_semantics` 与恰好一个主吊坠。
-- `ring`：`worn_source`，`worn`，单枚常规指根戒指；确认 `ring_count`、`hand_side`、`finger_position`、`ring_wear_style`。
-- `pendant_only`、`unknown` 只允许分析，不得生成；无链吊坠不得自动补链。
+## 协作 Skill
 
-拒绝 `hand_held_source`、`flat_lay_source`、`unknown_source`、多件独立项链、不可见结构推断或来源图冲突。品类规则只控制珠宝结构和佩戴物理，不能改变参考底图的景别、人物或构图。
+- 飞书 Base 产品记录：使用 `lark-base`，默认只读，不主动写回。
+- 图片生成、轮询和结果下载：使用 `aireiter-image-generation`。
+- 生成失败、人物局部迁移或结构漂移：使用 `superpowers:systematic-debugging`。
+- 对外报告完成前：使用 `superpowers:verification-before-completion`。
 
-## 核心原则
+## 先读哪份参考
 
-优先级固定：保留参考画面结构 -> 清除全部原首饰 -> 在确认位置替换一件目标产品 -> 保持产品 canonical 保真 -> 仅做必要融合。任何低优先级指令与已确认参考快照冲突时停止，不猜测、不折中。
+- 完整操作或 dry run：读 `references/workflow.md`。
+- Prompt 构建与检查：读 `references/prompt-contract.md`。
+- `pass`、`rerun`、`reject` 判定：读 `references/qc-checklist.md`。
+- Gate、结构、编码或轮询故障：读 `references/troubleshooting.md`。
 
-飞书素材表的 `图片类型` 字段是角色唯一来源：`hand_worn` 仅接收“手部佩戴图”，`lifestyle` 仅接收“生活场景图”。不得用关键词、视觉推断、推荐使用方式或风格字段替代。默认飞书同步只读；只有显式传入 `--classification` 时才优先使用本地 Excel。
+## 项目定位与参考源
 
-两个角色都执行深色背景硬 gate；`背景干净` 不能单独放行。`lifestyle` 中的非手腕半身、行走或环境构图是有效角色语义，不得因品类是手串而强制降级为腕部近景。人工例外 `RP000298` 只豁免深色背景判定，不得绕过 `图片类型` gate、品类、展示模式、唯一替换位置或产品可见性检查。
+- 优先使用 Codex 当前工作区；否则向上查找同时包含 `pyproject.toml` 和 `src/jewelry_on_hand/` 的目录。
+- Skill 安装目录只用于读取自身 `references/` 和 `scripts/`；业务代码、产品图、参考图和产物都来自项目根目录。
+- 默认未传 `--classification` 时同步并读取飞书参考源。
+- `prepare-review --classification <xlsx>` 是历史兼容的本地 Excel 参考源；仅在显式提供时优先。两者是同一个 `prepare-review` 阶段的来源选择，不是互斥流程。
+- 飞书参考源默认对任一 `pending_enrichment=true` 严格阻断。只有用户明确批准忽略待补全素材的临时批次，才可加 `--ignore-pending-enrichment`；该参数与 `--classification` 互斥。
+- 临时忽略模式仍先完整分页同步线上 Base，只从候选中排除 pending 记录，不写回参考图库；过滤后无可用候选立即失败。每个正式 run 固定写入 `analysis/reference_source_snapshot.json`，记录来源、全量/忽略/保留数量、被忽略素材编号与 record_id、manifest SHA-256 和分页完成状态。
 
 ## 四阶段强制流程
 
-严格按 `prepare-review -> record-decision -> generate -> qc` 执行，不得跳步、补写或倒序。
+1. `prepare-review`：以 correction-only 方式解析产品分析，先合并项链人工纠正并校验最终 analysis，再生成 `schema_version=2` canonical、选择 Top 3 和 review 包；戒指细节图只作为 review、结构分析、canonical 约束和人工 QC 对照证据；不得自动创建决策。
+2. `record-decision`：在写任何文件前交叉校验 v2 `pendant_semantics`、analysis、快照、摘要和 canonical 路径，再记录 rank、完整快照和 `fidelity_confirmed`；冲突时中文报错，必须新建 run 回到第 1 步。
+3. `generate`：在创建 generation 目录、写 prompt/submit 或调用 helper/provider 前重新执行品类、来源、模式、结构、快照、v2 canonical、rank 和参考副本 gate 后才提交模型；戒指固定以 `input/product-on-hand.jpg` 作为内部图 2，并保存内容一致的 `product-identity.jpg` 审计副本，细节图不提交给 AIReiter；失败后按未尝试 Top 3 切换 Rank，并按 QC 失败码注入纠偏。
+4. `qc`：写严格 JSON，完整覆盖 runtime checklist 与 `must_keep` 后才能进入最终汇总。
 
-1. `prepare-review`：显式传 `--output-role hand_worn|lifestyle`，完成产品分析、canonical、飞书候选硬 gate、Top 3、候选参考构图快照和人工 review 包。不得自动生成决策。
-2. `record-decision`：人工只能选择一个 rank；同时确认产品保真和参考构图快照。角色、rank、源图/review 双 SHA、analysis、canonical 或快照冲突时停止并重新执行 `prepare-review`。
-3. `generate`：只接受完整的 `modern_snapshot`。提交前固化五输入：`scene-reference.*`、`product-reference.*`、`reference-composition-snapshot.json`、`product-analysis.json`、`product-fidelity-constraints.json`，并写 `input-manifest.json`；模型图像顺序固定为参考底图、产品身份图。
-4. `qc`：同时完成 `reference_preservation`、`fidelity_checks`、`checklist_checks` 三层检查。参考结构改变、原首饰泄漏、替换位置改变或产品复制均是严重错误并 `reject`。
+## 三图输出角色
+
+- 需要每个 SKU 交付三张图时，为 `hero`、`hand_worn`、`lifestyle` 分别创建独立 run；不得在同一 run 中混用角色或展示模式。
+- `prepare-review --output-role` 必须以飞书素材表的 `图片类型` 字段（本地 `purpose_category`）作为角色唯一分类来源，并把角色写入 `analysis/output_role.json`：`hero` 只能选含“主图”的候选，`hand_worn` 只能选含“手部佩戴图”的候选，`lifestyle` 只能选含“生活场景图”的候选。不得依据关键词、风格、推荐使用方式或视觉内容推断、替代或跨用图片类型；三个角色均须同时通过深色背景 gate。深色文本 gate 接受“深色/黑色/暗色背景或布景”、低调暗色背景、暗黑背景，以及黑色托盘、石材、岩石、石板、底座和黑绒/黑色绒布等明确深色支撑面；“背景干净”不能单独放行。人工视觉确认的例外按角色受控：主图为 `RP000137`、`RP000144`，生活场景图为 `RP000298`；例外只判断深色背景，绝不绕过图片类型 gate。`record-decision --output-role` 必须传入相同值，生成阶段会再次校验。
+- 三个角色都要求深色背景、产品完整清晰且无文字。`hero` 为产品主体近景；`lifestyle` 保留日常氛围但不得遮挡主体；`hand_worn` 对手链/戒指为自然佩戴，对项链必须使用 `hand_held` 并要求手指轻持链条自然垂落。
 
 ## 强制 Gate
 
-- 产品分析五个现代分类字段完整；最终品类、来源、展示模式、层数和结构合法。
-- 新项链 canonical 为 `schema_version=2`，包含 `pendant_semantics`；分析、完整产品确认快照与 canonical 完全一致。
-- 戒指参考审核覆盖左右手、可见手指、手部朝向、戒面可见度、手指分离度、手指遮挡风险；关键失败包括 `ring_count_mismatch`、`hand_side_mismatch`、`finger_position_mismatch`、`ring_structure_mismatch`、`centerpiece_mismatch`、`ring_contact_error`、`finger_deformation`、`source_hand_leakage`。
-- 产品上手图是生成阶段唯一产品身份来源；同一件产品有多张真人上手图时，可按审计规则确定性拼成一张多视角身份图。不得使用 AI 修改产品像素，不得用白底或平铺图补视角；细节图仍只用于 review、结构分析和 QC，不得作为第三张模型输入。
-- `--fidelity-constraints-path` 只作为 `record-decision` 的导入源；canonical 必须落在 `analysis/product_fidelity_constraints.json`，非标准路径或摘要不匹配时拒绝。
-- 生成决策必须绑定单一 rank、`fidelity_confirmed=true`、确认快照摘要和不变的源/review 文件 SHA。
-- Prompt 必须从确认快照取构图，只能修改允许区域；任何五输入或 manifest 摘要不一致都在 provider 调用前停止。
-- 只有三层 QC 全部覆盖且 `critical_failures` 合法时才可 `pass`；严重错误必须 `reject`，错误用中文报告。
+1. `input/product-on-hand.jpg` 与 `analysis/product_analysis.json` 已存在。产品上手图是生成阶段唯一产品身份图。戒指可另有经过确认的 `input/product-detail.<ext>`；细节图只用于 review、结构分析和 QC，并可用于 canonical 约束和人工 QC 对照，不进入模型，也不得作为第三张模型输入。
+2. 最终品类是 `bracelet`、`necklace`、`pendant_necklace` 或 `ring`；`pendant_only`、`unknown` 停止。
+3. 输入是 `worn_source`；模式、层数、主吊坠和多件标志符合支持矩阵；现代项链 `length_category` 必须是四个合法值之一，`null` 只能停留在 correction-only。
+4. `analysis/selected_references.json` 已保存 Top 3 的 run 内副本，用户已选 rank；非 HERO 项链的路径、审核摘要和最终品类/模式/长度/裁切/手持策略仍有效。
+5. 默认飞书同步不存在 pending；若本 run 经批准显式使用 `--ignore-pending-enrichment`，`analysis/reference_source_snapshot.json` 必须存在，过滤范围可追溯，且不得与本地 `--classification` 混用。
+6. 生成决策有 `fidelity_confirmed: true`；项链和戒指还有与最终 analysis 完全一致的完整产品确认快照。戒指同时要求三张合格、源图/review 双 SHA-256 未变化且内容互异的 Top 3 参考图。
+7. `--fidelity-constraints-path` 只作为 `record-decision` 导入源；外部约束的 `product_analysis_sha256` 必须匹配已经完成评分的最终 analysis。项链分析发生变化时不得在决策阶段重绑旧 canonical，必须重新 `prepare-review`。
+8. canonical 约束状态是 `confirmed`、`corrected` 或 `not_applicable`，且摘要绑定最终规范化 `ProductAnalysis`；新项链必须为 `schema_version=2`。普通项链为 `absent/0/null/forbid`，带链吊坠第一阶段为 `present/1/实际所属层/forbid`。
+9. Prompt 通过 `scripts/validate_prompt_contract.py`。
+10. 默认使用 `gpt_image_2`；同一 run 超过 1 次非 `pass` QC 后，下一次才切 `nano_banana_v2`。
+11. 每个非空 `generation/NN/` 都有 `model.txt`、`prompt.txt`、`hand-reference.*`、提交/结果文件和 `qc.json`；不得覆盖或跳过。
+12. 标准 QC 路径同时反推 analysis 与 canonical；普通项链精确检查 `主吊坠应为无，且没有新增、补造、复制或悬挂化吊坠`，带链吊坠精确检查 `现有主吊坠数量是否为 {count}，且仍位于第 {layer} 层并保持原连接关系`；`checklist_checks` 以稳定 ID 完整覆盖 runtime checklist。
+13. `critical_failures` 严格使用非空允许代码；存在关键失败不能 `pass`，严重错误必须 `reject`。
 
-## 按需读取
+## 品类专属检查
 
-- 完整 CLI、输入输出、人工确认和 dry run：读 [工作流](references/workflow.md)。
-- Prompt 层序、双图职责和冲突停止：读 [Prompt 契约](references/prompt-contract.md)。
-- 快照 schema、绑定、不可编辑字段和三态迁移：读 [参考构图契约](references/reference-composition-contract.md)。
-- 三层 QC、十项证据、状态和错误码：读 [QC 清单](references/qc-checklist.md)。
-- SHA、角色、快照、历史、构图漂移和退出码恢复：读 [故障排查](references/troubleshooting.md)。
+- bracelet：手腕环绕、松紧与阴影自然，并明确检查原图手腕、手臂、掌纹、指甲和皮肤块没有迁移。
+- necklace `worn`：层数、长度等级、层间落差和吊坠所属层正确，链条不穿肤、穿衣或穿发。
+- necklace `hand_held`：手指接触和重力垂落真实，不虚构绕颈链路，不补链或补扣头。
+- ring：参考图必须完整标注左右手、可见手指、手部朝向、戒面可见度、手指分离度和手指遮挡风险；明确水印/logo/平台标识或非手部近景时拒绝。QC 检查单枚、目标指位、戒指结构、接触物理、手指畸变和产品图来源手迁移。
+- 所有品类：禁止迁移内部图 2 中的人物、手腕、手臂、颈部、胸部、衣服、头发、脸、皮肤块或背景。
 
-详细 schema 只在对应 reference 维护；不要在此复制或另建 README/CHANGELOG。
+戒指 `critical_failures` 允许代码为 `ring_count_mismatch`、`hand_side_mismatch`、`finger_position_mismatch`、`ring_structure_mismatch`、`centerpiece_mismatch`、`ring_contact_error`、`finger_deformation`、`source_hand_leakage`。数量、指位、核心结构、戒面/主石或来源手迁移必须 `reject`；手侧、接触或手指畸变至少不得 `pass`。
 
-## 历史与安全边界
+## Legacy 边界
 
-`modern_snapshot` 表示候选快照、确认快照、decision digest 与 generation 固化链完整；全部新参考文件缺失的旧 run 是 `legacy_read_only`；部分存在或不一致是 `damaged`。历史 run 只读，可检查和审计但不得追加 decision、generation 或 QC。要重做旧 SKU，必须新建 run 并重新执行 `prepare-review`。
+历史手串自由文本、旧 JSON/run、缺现代快照的 bracelet，以及 analysis 与 canonical 同时不存在的旧 QC 可兼容；只存在其中一个文件不得降级 legacy。历史 v1 canonical 仅供 inspector、validator 和 QC 只读，inspector 标记 `legacy_read_only=true`，不得改写或补写 `pendant_semantics`；历史项链 v1 禁止进入新的 `record-decision` / `generate`。五个现代分类字段 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。
 
-历史 v1 canonical 只读，不得补写 `pendant_semantics` 或自动升级。五个现代分类字段 `detected_product_type`、`confirmed_product_type`、`classification_confidence`、`classification_evidence`、`classification_source` 是原子契约：要么全部缺失并按历史 bracelet 解析，要么全部完整。历史 bracelet 可以单独保留合法的 `source_image_type=worn_source`、`display_mode=worn`、`layer_count=1`；显式非法来源、模式或结构不得借 legacy 绕过。
+## 禁止行为
 
-默认不写回飞书，不联网补数据，不覆盖历史产物，不把 dry run、mock 或本地测试称为真实生成验收。真实第三方模型 proof 属于 Task 12，尚未完成。
+- 不要把自动 Top 3 当作用户确认，也不要让 `rerank` 或 `manual_reference` 进入生成。
+- 不要在 `record-decision` 晚期修改项链品类、来源、展示模式、层数、长度或吊坠结构；新建 run，在 `prepare-review` 评分前纠正并重选 Top 3。
+- 不要直接编辑历史决策指向外部约束；重新执行 `record-decision` 产生 canonical 决策。
+- 不要用删除分析文件、漏写 `fidelity_checks` / `checklist_checks`、空 `critical_failures` 或宽松 truthy 值降级 gate。
+- 不要提交包含乱码的 Prompt；脚本以 UTF-8 读取并返回中文错误文案。
+- 不要写回飞书，除非用户明确要求。
+- 真实第三方模型 proof 属于 Task 11，尚未完成。本次 v2 只关闭结构化主吊坠语义 I1；I5 真实双圈成功 proof 与 HERO 仍为开放项。不要把本地自动化测试写成真实模型验收。
+
+## 输出规则
+
+- 测试过程和临时运行产物放在项目 `output/`。
+- 主参考文档放在项目 `reference/`；本 Skill 的便携副本放在 `references/`。
+- 最终汇总只包含当前 run 内 QC 为 `pass` 的 `generation/NN/result.png`。
+- 多电脑复用时从项目根目录运行 `scripts/install_codex_skills.py`，再重启 Codex。

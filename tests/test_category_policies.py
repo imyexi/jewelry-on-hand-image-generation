@@ -3,42 +3,9 @@ from pathlib import Path
 import pytest
 
 from jewelry_on_hand.category_policies import get_category_policy
-from jewelry_on_hand.category_policies.base import contains_unnegated_any
 from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow
 from jewelry_on_hand.product_types import ProductType
-
-
-@pytest.mark.parametrize(
-    ("text", "terms", "expected"),
-    [
-        ("不含blocking风险", ("blocking",), False),
-        ("不含 BLOCKING 风险", ("blocking",), False),
-        ("不存在任何原首饰无法清除的问题", ("无法清除",), False),
-        ("不存在 原首饰无法完整识别问题", ("无法完整识别",), False),
-        ("存在 blocking 风险", ("blocking",), True),
-        ("原首饰确实无法清除", ("无法清除",), True),
-        ("不含blocking风险，但另一处存在 blocking 风险", ("blocking",), True),
-        (
-            "不存在任何原首饰无法清除的问题，"
-            "但另一枚原首饰确实无法清除",
-            ("无法清除",),
-            True,
-        ),
-    ],
-    ids=[
-        "不含无空格",
-        "不含大小写与空格",
-        "不存在插入修饰词",
-        "不存在分隔空格",
-        "肯定blocking",
-        "肯定插入修饰词",
-        "blocking冲突",
-        "原首饰冲突",
-    ],
-)
-def test_共用未否定语义区分安全否定与独立危险(text, terms, expected):
-    assert contains_unnegated_any(text, terms) is expected
 
 
 def necklace_product(display_mode="worn"):
@@ -246,52 +213,33 @@ def test_ring_policy_reports_hard_filter_risks(overrides, risk_text):
 @pytest.mark.parametrize(
     ("overrides", "risk_text"),
     [
-        ({"hand_side": "right"}, "左右手"),
-        ({"existing_jewelry": "食指上的戒指"}, "目标手指"),
+        ({"notes": "画面右下角带豆包AI生成水印"}, "水印"),
+        ({"style_category": "带平台logo的自然光"}, "logo"),
+        ({"framing": "人物半身"}, "手部近景"),
+        ({"visible_body_regions": "脸、头发、胸部、手部"}, "宽场景"),
     ],
 )
-def test_戒指参考手侧与原戒指指位必须匹配目标(overrides, risk_text):
+def test_ring_policy_rejects_marked_watermark_or_wide_framing(overrides, risk_text):
     adaptation = get_category_policy(ProductType.RING).evaluate_reference(
         ring_product(),
         ring_reference(**overrides),
     )
 
     assert not adaptation.eligible
-    assert any(risk_text in risk for risk in adaptation.risks)
+    assert any(risk_text.lower() in risk.lower() for risk in adaptation.risks)
 
 
-def test_项链参考含界面或原首饰不可识别时被硬门拒绝():
-    policy = get_category_policy(ProductType.NECKLACE)
-    references = [
-        necklace_reference(notes="颈部完整，但画面含平台界面和状态栏"),
-        necklace_reference(existing_jewelry="原首饰无法完整识别"),
-    ]
+def test_ring_policy_accepts_explicit_no_watermark_hand_closeup():
+    adaptation = get_category_policy(ProductType.RING).evaluate_reference(
+        ring_product(),
+        ring_reference(
+            notes="无水印、无logo，手指完整",
+            framing="手部近景",
+            visible_body_regions="完整手部和五指",
+        ),
+    )
 
-    adaptations = [
-        policy.evaluate_reference(necklace_product(), reference)
-        for reference in references
-    ]
-
-    assert all(not adaptation.eligible for adaptation in adaptations)
-    assert any("界面" in risk for risk in adaptations[0].risks)
-    assert any("原首饰" in risk for risk in adaptations[1].risks)
-
-
-def test_戒指参考含界面或原首饰不可识别时被硬门拒绝():
-    policy = get_category_policy(ProductType.RING)
-    references = [
-        ring_reference(notes="手指完整，但画面含平台界面和状态栏"),
-        ring_reference(existing_jewelry="原首饰无法完整识别"),
-    ]
-
-    adaptations = [
-        policy.evaluate_reference(ring_product(), reference)
-        for reference in references
-    ]
-
-    assert all(not adaptation.eligible for adaptation in adaptations)
-    assert any("界面" in risk for risk in adaptations[0].risks)
-    assert any("原首饰" in risk for risk in adaptations[1].risks)
+    assert adaptation.eligible
 
 
 def test_pendant_only_policy_explains_current_block():

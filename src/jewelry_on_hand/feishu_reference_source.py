@@ -18,17 +18,9 @@ DEFAULT_TABLE_NAME = "素材收录池"
 DEFAULT_CACHE_ROOT = Path("output/feishu_reference_cache")
 ENRICHMENT_VERSION = "1"
 IMPORT_AUDIT_FILENAME = "enrichment-import-audit.json"
-IMPORT_TRANSACTION_JOURNAL_FILENAME = ".enrichment-import-transaction.json"
-IMPORT_TRANSACTION_DIRECTORY_NAME = ".enrichment-import-transaction"
-IMPORT_TRANSACTION_FILES = (
-    "manifest.json",
-    "enrichment.json",
-    "pending_enrichment.json",
-    IMPORT_AUDIT_FILENAME,
-)
-IMPORT_ATOMIC_WRITE_CONTRACT = (
-    "远端写回只允许使用网关的原子条件写，并要求本次 patch 的全部字段在提交瞬间仍为空；"
-    "不支持该能力的网关必须在任何远端写前拒绝。"
+IMPORT_RESIDUAL_CAS_RISK = (
+    "飞书 record-upsert 不支持 revision、etag 或 if-match；最后一次写前复读后到 "
+    "upsert 前仍存在无法消除的并发覆盖窗口，写后核验也无法识别已被本次写入覆盖的值。"
 )
 READBACK_AUDIT_LIMITATION = (
     "该审计只证明执行时远端字段与当前缓存一致，不能追溯或替代导入时的写后核验。"
@@ -98,10 +90,6 @@ class InvalidEnrichmentError(FeishuReferenceError):
     pass
 
 
-class AtomicConditionalWriteUnsupportedError(FeishuReferenceError):
-    pass
-
-
 class FeishuGateway(Protocol):
     def resolve_source(self, config: "FeishuReferenceConfig") -> tuple[str, str]: ...
     def list_fields(self, base_token: str, table_id: str) -> list[dict[str, Any]]: ...
@@ -125,15 +113,6 @@ class FeishuGateway(Protocol):
     def update_record(
         self, base_token: str, table_id: str, record_id: str, fields: dict[str, Any]
     ) -> None: ...
-    def update_record_if_fields_empty(
-        self,
-        base_token: str,
-        table_id: str,
-        record_id: str,
-        fields: dict[str, Any],
-        required_empty_fields: tuple[str, ...],
-        expected_fields: dict[str, Any],
-    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -291,74 +270,26 @@ class LarkCliGateway:
         file_token: str,
         destination: Path,
     ) -> None:
-        temporary = destination.with_name(destination.name + ".download.tmp")
-        try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise FeishuReferenceError(
-                f"创建飞书附件目录失败：{destination.parent}；"
-                "请检查目录权限和磁盘空间"
-            ) from exc
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError as exc:
-            raise FeishuReferenceError(
-                f"清理旧的飞书附件临时文件失败：{temporary}；"
-                "请检查文件占用和目录权限"
-            ) from exc
-
-        primary_error: Exception | None = None
-        primary_cause: OSError | None = None
-        try:
-            self._run(
-                "base",
-                "+record-download-attachment",
-                "--base-token",
-                base_token,
-                "--table-id",
-                table_id,
-                "--record-id",
-                record_id,
-                "--file-token",
-                file_token,
-                "--output",
-                str(temporary),
-                "--overwrite",
-                "--as",
-                "user",
-            )
-            if not temporary.is_file():
-                raise FeishuReferenceError(
-                    f"飞书附件下载后临时文件不存在：{temporary}"
-                )
-            os.replace(temporary, destination)
-        except FeishuReferenceError as exc:
-            primary_error = exc
-        except OSError as exc:
-            primary_error = FeishuReferenceError(
-                f"无法发布飞书附件 {destination}，请检查目录权限和磁盘空间"
-            )
-            primary_cause = exc
-        except Exception as exc:
-            primary_error = exc
-
-        cleanup_error: OSError | None = None
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError as exc:
-            cleanup_error = exc
-
-        if primary_error is not None:
-            if cleanup_error is not None:
-                raise primary_error from cleanup_error
-            if primary_cause is not None:
-                raise primary_error from primary_cause
-            raise primary_error
-        if cleanup_error is not None:
-            raise FeishuReferenceError(
-                f"清理飞书附件临时文件失败：{temporary}；"
-                "附件已发布，请检查文件占用和目录权限"
-            ) from cleanup_error
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._run(
+            "base",
+            "+record-download-attachment",
+            "--base-token",
+            base_token,
+            "--table-id",
+            table_id,
+            "--record-id",
+            record_id,
+            "--file-token",
+            file_token,
+            "--output",
+            str(destination),
+            "--overwrite",
+            "--as",
+            "user",
+        )
+        if not destination.is_file():
+            raise FeishuReferenceError(f"飞书附件下载后文件不存在：{destination}")
 
     def create_field(
         self, base_token: str, table_id: str, field: dict[str, Any]
@@ -394,74 +325,25 @@ class LarkCliGateway:
             "user",
         )
 
-    def update_record_if_fields_empty(
-        self,
-        base_token: str,
-        table_id: str,
-        record_id: str,
-        fields: dict[str, Any],
-        required_empty_fields: tuple[str, ...],
-        expected_fields: dict[str, Any],
-    ) -> dict[str, Any]:
-        del (
-            base_token,
-            table_id,
-            record_id,
-            fields,
-            required_empty_fields,
-            expected_fields,
-        )
-        raise AtomicConditionalWriteUnsupportedError(
-            "当前 lark-cli 网关不支持原子条件写；请改用支持“指定字段仍为空才写入”"
-            "的飞书网关后重试"
-        )
-
     def _run(self, *args: str) -> dict[str, Any]:
         env = os.environ.copy()
         env["LARKSUITE_CLI_NO_UPDATE_NOTIFIER"] = "1"
         env["LARKSUITE_CLI_NO_SKILLS_NOTIFIER"] = "1"
-        try:
-            completed = subprocess.run(
-                [self.executable, *args],
-                capture_output=True,
-                env=env,
-                check=False,
-            )
-        except OSError as exc:
-            raise FeishuReferenceError(
-                "无法启动 lark-cli，请检查安装路径、执行权限并重新完成飞书授权"
-            ) from exc
-        try:
-            stdout = completed.stdout.decode("utf-8", errors="strict")
-            stderr = completed.stderr.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise FeishuReferenceError(
-                "lark-cli 输出不是有效 UTF-8，请检查 CLI 版本和终端编码"
-            ) from exc
-        if completed.returncode != 0:
-            try:
-                failure_payload = json.loads(stdout) if stdout else {}
-            except json.JSONDecodeError:
-                failure_payload = {}
-            error = (
-                failure_payload.get("error", {})
-                if isinstance(failure_payload, dict)
-                else {}
-            )
-            message = error.get("message") or stderr or stdout or "无错误详情"
-            raise FeishuReferenceError(
-                f"飞书命令执行失败（退出码 {completed.returncode}）：{message}；"
-                "请检查网络、权限和飞书授权"
-            )
+        completed = subprocess.run(
+            [self.executable, *args],
+            capture_output=True,
+            env=env,
+            check=False,
+        )
+        stdout = completed.stdout.decode("utf-8", errors="strict")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise FeishuReferenceError(
                 f"lark-cli 未返回有效 JSON：{stderr or stdout}"
             ) from exc
-        if not isinstance(payload, dict):
-            raise FeishuReferenceError("lark-cli 未返回 JSON 对象，请检查 CLI 版本")
-        if not payload.get("ok"):
+        if completed.returncode != 0 or not payload.get("ok"):
             error = payload.get("error", {})
             message = error.get("message") or stderr or stdout
             raise FeishuReferenceError(f"飞书命令执行失败：{message}")
@@ -475,7 +357,6 @@ class FeishuReferenceSync:
 
     def sync(self) -> SyncResult:
         cache_root = self.config.cache_root
-        _recover_import_transaction(cache_root)
         images_dir = cache_root / "images"
         cache_root.mkdir(parents=True, exist_ok=True)
         images_dir.mkdir(parents=True, exist_ok=True)
@@ -620,11 +501,8 @@ class FeishuReferenceSync:
         if attachment is None:
             issue = "素材图片为空，无法作为参考图候选"
         else:
-            image_path = images_dir / _attachment_cache_filename(
-                record_id,
-                _field_text(fields.get("素材编号")),
-                attachment,
-            )
+            suffix = Path(_required_text(attachment.get("name"), "附件文件名")).suffix.lower() or ".bin"
+            image_path = images_dir / f"{_safe_file_stem(_field_text(fields.get('素材编号')) or record_id)}{suffix}"
             same_attachment = bool(
                 previous
                 and previous.get("attachment", {}).get("file_token")
@@ -706,7 +584,6 @@ def import_enrichment_results(
 ) -> ImportResult:
     gateway = gateway or LarkCliGateway()
     root = config.cache_root
-    _recover_import_transaction(root)
     manifest = _read_json(root / "manifest.json", None)
     pending_document = _read_json(root / "pending_enrichment.json", None)
     if not manifest or not pending_document:
@@ -717,156 +594,120 @@ def import_enrichment_results(
         raise InvalidEnrichmentError("补齐结果必须是包含 records 数组的 JSON 对象")
 
     results_by_id: dict[str, dict[str, str]] = {}
-    audit_records: list[dict[str, Any]] = []
-    audit_by_id: dict[str, dict[str, Any]] = {}
     for item in submitted["records"]:
         if not isinstance(item, dict):
             raise InvalidEnrichmentError("补齐结果 records 中每项必须是对象")
         record_id = _field_text(item.get("record_id"))
         if record_id not in pending_by_id:
             raise InvalidEnrichmentError(f"记录 {record_id!r} 不在待补齐清单")
-        if record_id not in audit_by_id:
-            audit_item = _new_audit_item(record_id)
-            audit_records.append(audit_item)
-            audit_by_id[record_id] = audit_item
-            _write_import_audit(root, audit_records)
-        audit_item = audit_by_id[record_id]
-        try:
-            fields = item.get("fields")
-            if not isinstance(fields, dict):
-                raise InvalidEnrichmentError(f"记录 {record_id} 缺少 fields 对象")
-            missing = [
-                name
-                for name in REQUIRED_AI_FIELD_NAMES
-                if not _field_text(fields.get(name))
-            ]
-            if missing:
-                raise InvalidEnrichmentError(
-                    f"记录 {record_id} 缺少必需补齐字段：{'、'.join(missing)}"
-                )
-        except InvalidEnrichmentError as exc:
-            audit_item["status"] = "failed"
-            audit_item["error"] = str(exc)
-            _write_import_audit(root, audit_records)
-            raise
+        fields = item.get("fields")
+        if not isinstance(fields, dict):
+            raise InvalidEnrichmentError(f"记录 {record_id} 缺少 fields 对象")
+        missing = [
+            name
+            for name in REQUIRED_AI_FIELD_NAMES
+            if not _field_text(fields.get(name))
+        ]
+        if missing:
+            raise InvalidEnrichmentError(
+                f"记录 {record_id} 缺少必需补齐字段：{'、'.join(missing)}"
+            )
         results_by_id[record_id] = {
             name: _field_text(fields.get(name)) for name in AI_FIELD_NAMES
         }
 
-    try:
-        base_token, table_id = gateway.resolve_source(config)
-        current_by_id = {
-            item["record_id"]: item
-            for item in _read_all_records(
-                gateway, base_token, table_id, config.page_size
-            )
-        }
-    except Exception as exc:
-        for audit_item in audit_records:
-            audit_item["status"] = "failed"
-            audit_item["error"] = str(exc)
-        _write_import_audit(root, audit_records)
-        raise
-
+    base_token, table_id = gateway.resolve_source(config)
+    current_by_id = {
+        item["record_id"]: item
+        for item in _read_all_records(
+            gateway, base_token, table_id, config.page_size
+        )
+    }
     manifest_by_id = {item["record_id"]: item for item in manifest.get("records", [])}
-    preflight_errors: list[Exception] = []
     for record_id, generated in results_by_id.items():
-        audit_item = audit_by_id[record_id]
-        try:
-            current = current_by_id.get(record_id)
-            if current is None:
-                raise InvalidEnrichmentError(
-                    f"记录 {record_id} 已不在当前飞书数据表中"
-                )
-            manifest_item = manifest_by_id[record_id]
-            _prepare_enrichment_update(
-                record_id,
-                manifest_item,
-                current,
-                generated,
-            )
-        except Exception as exc:
-            audit_item["status"] = "failed"
-            audit_item["error"] = str(exc)
-            preflight_errors.append(exc)
-
-    if preflight_errors:
-        _write_import_audit(root, audit_records)
-        raise preflight_errors[0]
+        current = current_by_id.get(record_id)
+        if current is None:
+            raise InvalidEnrichmentError(f"记录 {record_id} 已不在当前飞书数据表中")
+        manifest_item = manifest_by_id[record_id]
+        current_fields = dict(current.get("fields") or {})
+        _validate_source_unchanged(record_id, manifest_item, current_fields)
+        remote = {
+            name: _field_text(current_fields.get(name)) for name in AI_FIELD_NAMES
+        }
+        final_values = {
+            name: remote[name] or generated[name] for name in AI_FIELD_NAMES
+        }
+        _validate_ring_required_fields(record_id, current_fields, final_values)
 
     updated = 0
-    fatal_error: FeishuReferenceError | None = None
+    audit_records: list[dict[str, Any]] = []
     for record_id, generated in results_by_id.items():
         manifest_item = manifest_by_id[record_id]
-        audit_item = audit_by_id[record_id]
-        audit_item.update(status="failed", patch={}, details={}, error="")
+        audit_item: dict[str, Any] = {
+            "record_id": record_id,
+            "status": "failed",
+            "patch": {},
+            "details": {},
+            "error": "",
+        }
         try:
             latest = gateway.get_record(base_token, table_id, record_id)
-            current_fields, remote, final_values, patch = _prepare_enrichment_update(
-                record_id,
-                manifest_item,
-                latest,
-                generated,
+            current_fields = dict(latest.get("fields") or {})
+            _validate_source_unchanged(record_id, manifest_item, current_fields)
+            remote = {
+                name: _field_text(current_fields.get(name))
+                for name in AI_FIELD_NAMES
+            }
+            final_values = {
+                name: remote[name] or generated[name] for name in AI_FIELD_NAMES
+            }
+            _validate_ring_required_fields(
+                record_id, current_fields, final_values
             )
+
+            prewrite = gateway.get_record(base_token, table_id, record_id)
+            current_fields = dict(prewrite.get("fields") or {})
+            _validate_source_unchanged(record_id, manifest_item, current_fields)
+            remote = {
+                name: _field_text(current_fields.get(name))
+                for name in AI_FIELD_NAMES
+            }
+            final_values = {
+                name: remote[name] or generated[name] for name in AI_FIELD_NAMES
+            }
+            _validate_ring_required_fields(
+                record_id, current_fields, final_values
+            )
+            patch = {
+                name: generated[name]
+                for name in AI_FIELD_NAMES
+                if not remote[name] and generated[name]
+            }
             patch["AI补齐状态"] = "已完成"
             patch["AI补齐版本"] = ENRICHMENT_VERSION
-            expected_fields = _atomic_expected_fields(current_fields)
             audit_item["patch"] = patch
-            conditional_result = gateway.update_record_if_fields_empty(
-                base_token,
-                table_id,
-                record_id,
-                patch,
-                tuple(patch),
-                expected_fields,
-            )
-            if not conditional_result.get("updated"):
-                conflicts = dict(conditional_result.get("conflicts") or {})
-                audit_item["status"] = "conflict"
-                audit_item["details"] = {
-                    name: {
-                        "expected": _field_text(
-                            patch[name]
-                            if name in patch
-                            else expected_fields.get(name)
-                        ),
-                        "actual": _field_text(actual),
-                    }
-                    for name, actual in conflicts.items()
-                }
-                continue
-            written = conditional_result.get("record")
-            if not isinstance(written, dict):
-                raise FeishuReferenceError(
-                    f"记录 {record_id} 的原子条件写网关未返回写后记录"
-                )
+            gateway.update_record(base_token, table_id, record_id, patch)
+            written = gateway.get_record(base_token, table_id, record_id)
 
             written_fields = dict(written.get("fields") or {})
+            mismatches = {
+                name: {
+                    "expected": _field_text(expected),
+                    "actual": _field_text(written_fields.get(name)),
+                }
+                for name, expected in patch.items()
+                if _field_text(written_fields.get(name)) != _field_text(expected)
+            }
+            if mismatches:
+                audit_item["status"] = "conflict"
+                audit_item["details"] = mismatches
+                audit_records.append(audit_item)
+                continue
+
             verified_values = {
                 name: _field_text(written_fields.get(name))
                 for name in AI_FIELD_NAMES
             }
-            missing_ai_fields = _missing_ai_fields(
-                written_fields, verified_values
-            )
-            mismatches = _conditional_readback_mismatches(
-                written_fields,
-                patch,
-                expected_fields,
-            )
-            if mismatches:
-                audit_item["status"] = "conflict"
-                audit_item["details"] = mismatches
-                if missing_ai_fields:
-                    audit_item["details"]["missing_ai_fields"] = missing_ai_fields
-                continue
-
-            if missing_ai_fields:
-                audit_item["status"] = "conflict"
-                audit_item["details"] = {
-                    "missing_ai_fields": missing_ai_fields,
-                }
-                continue
             source_fields = {
                 name: written_fields.get(name) for name in SOURCE_FIELD_NAMES
             }
@@ -875,12 +716,12 @@ def import_enrichment_results(
                 source_fields,
                 manifest_item.get("attachment"),
             )
-        except AtomicConditionalWriteUnsupportedError as exc:
-            audit_item["error"] = str(exc)
-            fatal_error = exc
-            continue
+            missing_ai_fields = _missing_ai_fields(
+                written_fields, verified_values
+            )
         except Exception as exc:
             audit_item["error"] = str(exc)
+            audit_records.append(audit_item)
             continue
 
         manifest_item["resolved_enrichment"] = verified_values
@@ -889,6 +730,7 @@ def import_enrichment_results(
         manifest_item["missing_ai_fields"] = missing_ai_fields
         manifest_item["pending_enrichment"] = False
         audit_item["status"] = "verified"
+        audit_records.append(audit_item)
         updated += 1
 
     remaining = [
@@ -901,20 +743,20 @@ def import_enrichment_results(
         for item in manifest.get("records", [])
         if item.get("usable")
     }
-    _commit_import_documents(
-        root,
+    _write_json(root / "manifest.json", manifest)
+    _write_json(root / "enrichment.json", local_enrichment)
+    _write_json(
+        root / "pending_enrichment.json",
+        {"version": ENRICHMENT_VERSION, "records": remaining},
+    )
+    _write_json(
+        root / IMPORT_AUDIT_FILENAME,
         {
-            "manifest.json": manifest,
-            "enrichment.json": local_enrichment,
-            "pending_enrichment.json": {
-                "version": ENRICHMENT_VERSION,
-                "records": remaining,
-            },
-            IMPORT_AUDIT_FILENAME: _import_audit_document(audit_records),
+            "version": 1,
+            "residual_cas_risk": IMPORT_RESIDUAL_CAS_RISK,
+            "records": audit_records,
         },
     )
-    if fatal_error is not None:
-        raise fatal_error
     return ImportResult(updated_records=updated, remaining_pending=len(remaining))
 
 
@@ -924,7 +766,6 @@ def audit_enrichment_readback(
     """复读远端补齐字段，为缺失的历史导入审计提供当前状态证据。"""
     gateway = gateway or LarkCliGateway()
     root = config.cache_root
-    _recover_import_transaction(root)
     manifest = _read_json(root / "manifest.json", None)
     if not manifest:
         raise InvalidEnrichmentError("缺少飞书同步缓存，请先执行 reference-sync")
@@ -965,29 +806,13 @@ def audit_enrichment_readback(
                 for name, expected in expected_values.items()
                 if expected != actual_values[name]
             }
-            tracking_expected = {
-                "AI补齐状态": "已完成",
-                "AI补齐版本": ENRICHMENT_VERSION,
-            }
-            tracking_mismatches = {
-                name: {
-                    "expected": expected,
-                    "actual": _field_text(current_fields.get(name)),
-                }
-                for name, expected in tracking_expected.items()
-                if _field_text(current_fields.get(name)) != expected
-            }
             if missing:
                 audit_item["details"]["missing_ai_fields"] = missing
             if mismatches:
                 audit_item["details"]["mismatches"] = mismatches
-            if tracking_mismatches:
-                audit_item["details"]["tracking_mismatches"] = tracking_mismatches
             if manifest_item.get("pending_enrichment"):
                 audit_item["details"]["pending_enrichment"] = True
             if audit_item["details"]:
-                if mismatches or tracking_mismatches:
-                    audit_item["status"] = "conflict"
                 audit_records.append(audit_item)
                 continue
         except Exception as exc:
@@ -1032,7 +857,6 @@ def build_reference_source_snapshot(
     ignore_pending_enrichment: bool,
 ) -> dict[str, Any]:
     root = Path(cache_root)
-    _recover_import_transaction(root)
     manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         raise FeishuReferenceError(f"飞书参考图库缓存不存在：{manifest_path}")
@@ -1081,7 +905,6 @@ def load_cached_reference_rows(
     ignore_pending_enrichment: bool = False,
 ) -> list[ReferenceRow]:
     root = Path(cache_root)
-    _recover_import_transaction(root)
     manifest = _read_json(root / "manifest.json", None)
     if not manifest:
         raise FeishuReferenceError(f"飞书参考图库缓存不存在：{root / 'manifest.json'}")
@@ -1246,61 +1069,6 @@ def _missing_ai_fields(
             if not resolved_enrichment.get(name)
         )
     return missing
-
-
-def _prepare_enrichment_update(
-    record_id: str,
-    manifest_item: dict[str, Any],
-    current_record: dict[str, Any],
-    generated: dict[str, str],
-) -> tuple[dict[str, Any], dict[str, str], dict[str, str], dict[str, str]]:
-    current_fields = dict(current_record.get("fields") or {})
-    _validate_source_unchanged(record_id, manifest_item, current_fields)
-    remote = {
-        name: _field_text(current_fields.get(name)) for name in AI_FIELD_NAMES
-    }
-    final_values = {
-        name: remote[name] or generated[name] for name in AI_FIELD_NAMES
-    }
-    _validate_ring_required_fields(record_id, current_fields, final_values)
-    patch = {
-        name: generated[name]
-        for name in AI_FIELD_NAMES
-        if not remote[name] and generated[name]
-    }
-    return current_fields, remote, final_values, patch
-
-
-def _atomic_expected_fields(current_fields: dict[str, Any]) -> dict[str, Any]:
-    names = dict.fromkeys(
-        SOURCE_FIELD_NAMES + AI_FIELD_NAMES + TRACKING_FIELD_NAMES
-    )
-    return {name: current_fields.get(name) for name in names}
-
-
-def _conditional_readback_mismatches(
-    written_fields: dict[str, Any],
-    patch: dict[str, Any],
-    expected_fields: dict[str, Any],
-) -> dict[str, dict[str, str]]:
-    mismatches: dict[str, dict[str, str]] = {}
-    for name, expected in expected_fields.items():
-        if name in patch:
-            continue
-        actual = written_fields.get(name)
-        if actual != expected:
-            mismatches[name] = {
-                "expected": _field_text(expected),
-                "actual": _field_text(actual),
-            }
-    for name, expected in patch.items():
-        actual = written_fields.get(name)
-        if _field_text(actual) != _field_text(expected):
-            mismatches[name] = {
-                "expected": _field_text(expected),
-                "actual": _field_text(actual),
-            }
-    return mismatches
 
 
 def _validate_source_unchanged(
@@ -1548,236 +1316,6 @@ def _safe_file_stem(value: str) -> str:
     return safe.strip("-_") or "reference"
 
 
-def _attachment_cache_filename(
-    record_id: str,
-    material_number: str,
-    attachment: dict[str, Any],
-) -> str:
-    file_token = _required_text(attachment.get("file_token"), "file_token")
-    original_name = _required_text(attachment.get("name"), "附件文件名")
-    suffix = Path(original_name).suffix.lower()
-    if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
-        suffix = ".bin"
-    stem = _safe_file_stem(material_number or record_id)
-    reserved_names = {"CON", "PRN", "AUX", "NUL"} | {
-        f"{prefix}{index}"
-        for prefix in ("COM", "LPT")
-        for index in range(1, 10)
-    }
-    if stem.upper() in reserved_names:
-        stem = f"_{stem}"
-    digest = hashlib.sha256(
-        f"{record_id}\0{file_token}".encode("utf-8")
-    ).hexdigest()[:12]
-    return f"{stem}-{digest}{suffix}"
-
-
-def _new_audit_item(record_id: str) -> dict[str, Any]:
-    return {
-        "record_id": record_id,
-        "status": "pending",
-        "patch": {},
-        "details": {},
-        "error": "",
-    }
-
-
-def _import_audit_document(audit_records: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "version": 1,
-        "atomic_write_contract": IMPORT_ATOMIC_WRITE_CONTRACT,
-        "records": audit_records,
-    }
-
-
-def _write_import_audit(root: Path, audit_records: list[dict[str, Any]]) -> None:
-    _write_json(root / IMPORT_AUDIT_FILENAME, _import_audit_document(audit_records))
-
-
-def _commit_import_documents(
-    root: Path,
-    documents: dict[str, Any],
-) -> None:
-    _recover_import_transaction(root)
-    if set(documents) != set(IMPORT_TRANSACTION_FILES):
-        raise FeishuReferenceError("本地缓存事务缺少四个固定文件，拒绝发布")
-
-    transaction_dir = root / IMPORT_TRANSACTION_DIRECTORY_NAME
-    journal_path = root / IMPORT_TRANSACTION_JOURNAL_FILENAME
-    if transaction_dir.exists():
-        shutil.rmtree(transaction_dir)
-    transaction_dir.mkdir(parents=True, exist_ok=False)
-
-    entries: list[dict[str, str]] = []
-    try:
-        for name in IMPORT_TRANSACTION_FILES:
-            data = _json_bytes(documents[name])
-            staged_path = transaction_dir / f"{name}.new"
-            _write_file_fsync(staged_path, data)
-            entries.append(
-                {
-                    "target": name,
-                    "staged": staged_path.name,
-                    "sha256": hashlib.sha256(data).hexdigest(),
-                }
-            )
-        _fsync_directory(transaction_dir)
-        _write_json(
-            journal_path,
-            {"version": 1, "phase": "prepared", "files": entries},
-        )
-        _publish_import_transaction(
-            root,
-            {"version": 1, "phase": "prepared", "files": entries},
-        )
-    except FeishuReferenceError:
-        raise
-    except OSError as exc:
-        raise FeishuReferenceError(
-            "本地缓存事务准备失败；未发布不完整文件，请检查磁盘空间和目录权限"
-        ) from exc
-
-
-def _recover_import_transaction(root: Path) -> None:
-    journal_path = root / IMPORT_TRANSACTION_JOURNAL_FILENAME
-    transaction_dir = root / IMPORT_TRANSACTION_DIRECTORY_NAME
-    if not journal_path.exists():
-        if transaction_dir.exists():
-            try:
-                shutil.rmtree(transaction_dir)
-            except OSError as exc:
-                raise FeishuReferenceError(
-                    "本地缓存事务残留目录无法清理，缓存状态 damaged；请保留现场并人工处理"
-                ) from exc
-        return
-    try:
-        journal = _read_json(journal_path, None)
-    except FeishuReferenceError as exc:
-        raise FeishuReferenceError(
-            "本地缓存事务 journal 无法读取，缓存状态 damaged；请保留现场并人工处理"
-        ) from exc
-    _publish_import_transaction(root, journal)
-
-
-def _validate_import_journal(
-    root: Path,
-    journal: Any,
-) -> list[tuple[Path, Path, str]]:
-    transaction_dir = root / IMPORT_TRANSACTION_DIRECTORY_NAME
-    damaged_message = (
-        "本地缓存事务 journal 或 staged 文件无效，缓存状态 damaged；"
-        "请保留现场并人工处理"
-    )
-    if not isinstance(journal, dict) or set(journal) != {
-        "version",
-        "phase",
-        "files",
-    }:
-        raise FeishuReferenceError(damaged_message)
-    if type(journal["version"]) is not int or journal["version"] != 1:
-        raise FeishuReferenceError(damaged_message)
-    if journal["phase"] != "prepared":
-        raise FeishuReferenceError(damaged_message)
-
-    entries = journal["files"]
-    if not isinstance(entries, list) or len(entries) != len(IMPORT_TRANSACTION_FILES):
-        raise FeishuReferenceError(damaged_message)
-
-    validated: list[tuple[Path, Path, str]] = []
-    try:
-        for expected_name, entry in zip(IMPORT_TRANSACTION_FILES, entries, strict=True):
-            if not isinstance(entry, dict) or set(entry) != {
-                "target",
-                "staged",
-                "sha256",
-            }:
-                raise FeishuReferenceError(damaged_message)
-            if entry["target"] != expected_name:
-                raise FeishuReferenceError(damaged_message)
-
-            staged_name = entry["staged"]
-            expected_sha256 = entry["sha256"]
-            if not isinstance(staged_name, str) or staged_name != f"{expected_name}.new":
-                raise FeishuReferenceError(damaged_message)
-            if not isinstance(expected_sha256, str) or re.fullmatch(
-                r"[0-9a-f]{64}", expected_sha256
-            ) is None:
-                raise FeishuReferenceError(damaged_message)
-
-            relative_staged_path = Path(staged_name)
-            if relative_staged_path.is_absolute() or ".." in relative_staged_path.parts:
-                raise FeishuReferenceError(damaged_message)
-            staged_path = transaction_dir / relative_staged_path
-            if staged_path.resolve().parent != transaction_dir.resolve():
-                raise FeishuReferenceError(damaged_message)
-            if not staged_path.is_file() or _file_sha256(staged_path) != expected_sha256:
-                raise FeishuReferenceError(damaged_message)
-            validated.append((staged_path, root / expected_name, expected_sha256))
-    except FeishuReferenceError:
-        raise
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise FeishuReferenceError(damaged_message) from exc
-    return validated
-
-
-def _publish_import_transaction(root: Path, journal: dict[str, Any]) -> None:
-    transaction_dir = root / IMPORT_TRANSACTION_DIRECTORY_NAME
-    journal_path = root / IMPORT_TRANSACTION_JOURNAL_FILENAME
-    validated = _validate_import_journal(root, journal)
-    try:
-        for staged_path, target_path, expected_sha256 in validated:
-            if target_path.is_file() and _file_sha256(target_path) == expected_sha256:
-                continue
-            temporary = root / f".{target_path.name}.transaction.tmp"
-            _write_file_fsync(temporary, staged_path.read_bytes())
-            os.replace(temporary, target_path)
-            _fsync_directory(root)
-    except FeishuReferenceError:
-        raise
-    except OSError as exc:
-        raise FeishuReferenceError(
-            "本地缓存事务发布失败；journal 已保留，下次调用将自动恢复："
-            f"{exc}"
-        ) from exc
-
-    try:
-        journal_path.unlink(missing_ok=True)
-        shutil.rmtree(transaction_dir)
-        _fsync_directory(root)
-    except OSError as exc:
-        raise FeishuReferenceError(
-            "本地缓存事务已发布但清理失败；下次调用将继续核验并清理："
-            f"{exc}"
-        ) from exc
-
-
-def _json_bytes(data: Any) -> bytes:
-    return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-
-
-def _write_file_fsync(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-
-
-def _fsync_directory(path: Path) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _read_json(path: Path, default: Any) -> Any:
     if not path.is_file():
         return default
@@ -1790,9 +1328,7 @@ def _read_json(path: Path, default: Any) -> Any:
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    try:
-        _write_file_fsync(temporary, _json_bytes(data))
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+

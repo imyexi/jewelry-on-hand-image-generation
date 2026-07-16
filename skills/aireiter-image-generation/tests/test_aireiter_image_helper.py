@@ -13,6 +13,10 @@ SPEC.loader.exec_module(MODULE)
 
 
 class AIReiterImageHelperTests(unittest.TestCase):
+    def test_python_sources_have_no_utf8_bom(self) -> None:
+        for path in (SCRIPT_PATH, Path(__file__)):
+            self.assertFalse(path.read_bytes().startswith(b"\xef\xbb\xbf"), path)
+
     def test_submit_uses_environment_api_key_when_flag_is_omitted(self) -> None:
         with patch.dict(os.environ, {"AIREITER_API_KEY": "env-key"}, clear=False):
             parser = MODULE.build_parser()
@@ -48,6 +52,27 @@ class AIReiterImageHelperTests(unittest.TestCase):
                 MODULE.submit_task(args)
 
         self.assertEqual(exc.exception.code, 1)
+
+    def test_post_json_retries_temporary_url_error(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        with patch.object(
+            MODULE.urllib.request,
+            "urlopen",
+            side_effect=[MODULE.urllib.error.URLError("reset"), Response()],
+        ) as urlopen, patch.object(MODULE.time, "sleep"):
+            result = MODULE.post_json("https://example.com", {"demo": True}, "key")
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(urlopen.call_count, 2)
 
     def test_submit_task_uses_defaults_and_image_array(self) -> None:
         args = MODULE.build_parser().parse_args([

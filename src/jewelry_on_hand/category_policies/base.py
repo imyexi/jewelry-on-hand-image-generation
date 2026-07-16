@@ -13,23 +13,11 @@ if TYPE_CHECKING:
 
 
 SHARED_BASIC_QC_ITEMS = ("禁止推断不可见扣头或背面结构",)
-_BROAD_NEGATION_PREFIXES = (
-    "没有明显",
-    "无明显",
-    "不存在",
-    "不包括",
-    "不含",
-    "不是",
-    "不适合",
-    "未见",
-    "没有",
-    "无",
-    "未",
-)
+_BROAD_NEGATION_PREFIXES = ("没有明显", "无明显", "不是", "不适合", "未见", "没有", "无", "未")
 _DIRECT_NEGATION_PREFIXES = ("不", "非")
 _NEGATION_PREFIXES = _BROAD_NEGATION_PREFIXES + _DIRECT_NEGATION_PREFIXES
 _NON_NEGATION_PREFIXES = ("非常", "不错", "不只是", "不仅", "不但", "不单", "不止", "不局限于")
-_NEGATION_BOUNDARIES = "，,。；;：:\n\r\t"
+_NEGATION_BOUNDARIES = " 　，,。；;：:\n\r\t"
 _NEGATION_CONTRAST_BOUNDARIES = ("但是", "不过", "然而", "但", "却")
 _NEGATION_CONNECTORS = ("或", "和", "及", "与", "/", "、")
 _CONTROLLED_NEGATIONS = (
@@ -105,19 +93,6 @@ PromptFragmentBuilder = Callable[["ProductAnalysis"], PromptFragments]
 def contains_any(text: str, terms: Iterable[str]) -> bool:
     lowered = text.lower()
     return any(term.lower() in lowered for term in terms)
-
-
-def is_role_appropriate_priority_strategy(row: "ReferenceRow") -> bool:
-    strategy = row.default_strategy
-    standard_priority = contains_any(
-        strategy,
-        ("优先使用", "可优先", "优先"),
-    ) and not contains_any(strategy, ("不优先", "不建议", "谨慎使用"))
-    lifestyle_non_wrist = (
-        row.purpose_category.strip() == "生活场景图"
-        and contains_any(strategy, ("非手腕构图，默认不优先", "非手腕构图"))
-    )
-    return standard_priority or lifestyle_non_wrist
 
 
 def contains_unnegated_any(text: str, terms: Iterable[str]) -> bool:

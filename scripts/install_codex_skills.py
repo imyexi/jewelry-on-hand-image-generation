@@ -9,7 +9,11 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_SKILLS_DIR = PROJECT_ROOT / "skills"
-DEFAULT_SKILLS = ("jewelry-on-hand-workflow",)
+DEFAULT_SKILLS = (
+    "jewelry-on-hand-workflow",
+    "jewelry-product-hero-workflow",
+    "aireiter-image-generation",
+)
 EXCLUDED_NAMES = {"__pycache__"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}
 
@@ -44,7 +48,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skill",
         action="append",
-        help="要安装的 Skill 名称；可重复。默认只安装 jewelry-on-hand-workflow。",
+        help="要安装的 Skill 名称；可重复。默认安装两个珠宝工作流及 AIReiter 依赖 Skill。",
     )
     parser.add_argument(
         "--codex-home",

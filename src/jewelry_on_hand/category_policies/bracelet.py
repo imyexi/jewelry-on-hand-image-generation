@@ -4,13 +4,9 @@ from jewelry_on_hand.category_policies.base import (
     PromptFragments,
     ReferenceAdaptation,
     SHARED_BASIC_QC_ITEMS,
-    contains_affirmed_any,
     contains_any,
     contains_unnegated_any,
-    is_role_appropriate_priority_strategy,
     parse_confidence_level,
-    parse_risk_level,
-    parse_visibility_level,
 )
 from jewelry_on_hand.display_modes import DisplayMode
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow
@@ -23,7 +19,7 @@ _NON_TARGET_TERMS = ("戒指", "耳饰", "耳环", "项链", "吊坠", "颈链")
 
 BRACELET_PRODUCT_ISOLATION_SENTENCE = "内部图2只提取珠子、隔圈、金属件、颜色、透明度、纹理、反光和排列；禁止继承内部图2里的皮肤、手腕、手臂、掌纹、指甲、肤色、手臂粗细、背景。"
 BRACELET_WRIST_SOURCE_SENTENCE = "手腕宽度、手臂轮廓、皮肤连续性和肤色必须以内部图1为准；不要把内部图2中的手串+手腕局部作为整体贴到内部图1。"
-BRACELET_IMAGE_ONE_ROLE = "内部图1：底图锁定，不提供产品身份，除唯一允许修改外不得改变。"
+BRACELET_IMAGE_ONE_ROLE = "内部图1：自动参考图，只参考手部姿势、手模构图、场景氛围、光线和画面比例。"
 
 
 def _build_bracelet_prompt_fragments(product: ProductAnalysis) -> PromptFragments:
@@ -34,8 +30,8 @@ def _build_bracelet_prompt_fragments(product: ProductAnalysis) -> PromptFragment
             "透明度、纹理、反光和可见比例必须与内部图2一致。"
         ),
         display_mode=(
-            "展示关系：只在确认快照的唯一替换位置放入一件目标产品；"
-            "手串保持原结构并自然环绕接触部位，松紧和受力真实。"
+            f"真人佩戴：将内部图2的产品自然佩戴到{product.wear_position}位置；"
+            "手串环绕手腕，松紧和落点自然。"
         ),
         occlusion_physics=(
             f"{BRACELET_PRODUCT_ISOLATION_SENTENCE}\n"
@@ -90,91 +86,38 @@ def _evaluate_bracelet_reference(
     pure_target = has_filter_target and not has_non_target
     combined_target = has_filter_target and has_non_target
     selection_tier = _selection_tier(row)
-    risks.extend(_replacement_blocking_risks(row))
-    eligible = (
-        applicable
-        and selection_tier is not None
-        and (pure_target or combined_target)
-        and not risks
-    )
+    eligible = applicable and selection_tier is not None and (pure_target or combined_target)
     return ReferenceAdaptation(
         eligible=eligible,
         score_adjustment=score,
         reasons=tuple(reasons),
         risks=tuple(risks),
-        ignored_reference_jewelry=_ignored_reference_jewelry(
-            row.existing_jewelry
-        ),
+        ignored_reference_jewelry=_ignored_reference_jewelry(row_text),
         selection_tier=selection_tier or 0,
         diversity_candidate=combined_target,
     )
 
 
-def _replacement_blocking_risks(row: ReferenceRow) -> list[str]:
-    text = row.combined_text()
-    risks: list[str] = []
-    target_text = f"{row.visible_body_regions} {row.recommended_usage} {row.notes}"
-    if not contains_affirmed_any(target_text, ("手腕", "腕部", "前臂")):
-        risks.append("缺少可替换目标所在的手腕或前臂区域")
-    product_visibility = parse_visibility_level(row.product_visibility)
-    if not row.product_visibility.strip():
-        risks.append("缺少产品预计展示面积标注")
-    elif product_visibility is None:
-        risks.append("产品预计展示面积标注无法识别")
-    elif product_visibility is ControlledLevel.LOW:
-        risks.append("产品预计展示面积过低")
-    crop_risk = parse_risk_level(row.crop_risk)
-    if not row.crop_risk.strip():
-        risks.append("缺少目标手腕或首饰区域裁切风险标注")
-    elif crop_risk is None:
-        risks.append("目标手腕或首饰区域裁切风险标注无法识别")
-    elif crop_risk is ControlledLevel.HIGH:
-        risks.append("目标手腕或首饰区域裁切风险过高")
-    if contains_unnegated_any(text, ("严重遮挡", "大面积遮挡")):
-        risks.append("目标手腕或首饰区域存在严重遮挡")
-    if contains_unnegated_any(
-        text,
-        (
-            "大面积文字",
-            "blocking",
-            "平台界面",
-            "手机界面",
-            "网页界面",
-            "状态栏",
-            "操作按钮",
-        ),
-    ):
-        risks.append("画面含阻断替换的平台界面元素")
-    if contains_unnegated_any(
-        text,
-        (
-            "原首饰无法完整识别",
-            "原有首饰无法完整识别",
-            "原首饰不可完整识别",
-            "原有首饰不可完整识别",
-            "原首饰无法清除",
-            "原有首饰无法清除",
-            "无法完整识别",
-            "不可完整识别",
-            "无法清除",
-        ),
-    ):
-        risks.append("原首饰无法完整识别或安全清除")
-    return risks
-
-
 def _selection_tier(row: ReferenceRow) -> int | None:
     confidence = parse_confidence_level(row.confidence)
-    priority = is_role_appropriate_priority_strategy(row)
+    priority = _is_priority_strategy(row.default_strategy)
     relaxed = contains_any(
         row.default_strategy, ("无特殊要求不优先使用", "无特殊要求不优先")
     )
+    scene_supplement = contains_any(
+        row.default_strategy, ("可作为场景或细节补充",)
+    )
+    lifestyle_fallback = "生活场景图" in row.purpose_category
     if confidence is ControlledLevel.HIGH and priority:
         return 0
     if confidence is ControlledLevel.MEDIUM and priority:
         return 1
     if confidence in {ControlledLevel.HIGH, ControlledLevel.MEDIUM} and relaxed:
         return 2
+    if confidence in {ControlledLevel.HIGH, ControlledLevel.MEDIUM} and scene_supplement:
+        return 3
+    if confidence in {ControlledLevel.HIGH, ControlledLevel.MEDIUM} and lifestyle_fallback:
+        return 4
     return None
 
 
@@ -199,16 +142,7 @@ def _ignored_reference_jewelry(text: str) -> tuple[str, ...]:
     if contains_unnegated_any(text, ("项链", "吊坠", "颈链")):
         ignored.append("参考图中的项链")
     if contains_unnegated_any(
-        text,
-        (
-            "原有手链",
-            "原有细手链",
-            "原手链",
-            "已有手链",
-            "旧手链",
-            "原有手串",
-            "已有手串",
-        ),
+        text, ("原有手链", "原手链", "已有手链", "旧手链", "原有手串", "已有手串")
     ):
         ignored.append("参考图中的原有手链")
     return tuple(ignored)

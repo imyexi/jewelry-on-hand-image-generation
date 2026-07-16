@@ -85,7 +85,7 @@
 | `needs_full_front_display` | 布尔值 | 后续结果是否需要完整露出正面主体。 |
 | `special_requirements` | 字符串列表 | 整体展示要求，不替代局部保真约束。 |
 | `layer_count` | 正整数 | 单件产品自身层数；普通项链和带链吊坠仅支持 1 至 3 层。 |
-| `length_category` | 闭集字符串或 `null` | 普通项链和带链吊坠只能为 `choker`、`collarbone`、`upper_chest`、`long`；无法确认时为 `null`。 |
+| `length_category` | 闭集字符串或 `null` | 普通项链和带链吊坠只能为 `choker`、`collarbone`、`upper_chest`、`long`；分析阶段无法确认时可暂存 `null`，但只能用于 correction-only，参考评分前必须人工纠正。 |
 | `chain_or_strand_type` | 字符串或 `null` | 肉眼可见链条或串线类型，例如 `metal_chain`、`beaded`。 |
 | `has_pendant` | 布尔值 | 是否肉眼可见吊坠。 |
 | `pendant_count` | 非负整数 | 肉眼可见吊坠数量。 |
@@ -125,7 +125,7 @@
 - JSON 中显式提供的 `layer_count`、`pendant_count`、`pendant_layer` 必须分别为整数、整数、整数或 `null`，不得使用字符串、布尔值或浮点数；字段缺失时才使用历史结构默认值。
 - JSON 中显式提供的 `has_pendant`、`is_independent_multi_item` 必须为布尔值，不接受 `"true"`、`"false"` 等字符串；旧字段的既有兼容解析不受影响。
 - `layer_count` 必须大于等于 1；普通项链和带链吊坠不得超过 3 层，手串/手链只支持 1 层。
-- `length_category` 对普通项链和带链吊坠只允许 `choker`、`collarbone`、`upper_chest`、`long` 或 `null`。
+- `length_category` 对普通项链和带链吊坠只允许 `choker`、`collarbone`、`upper_chest`、`long` 或 correction-only 的 `null`；`null` 不得进入 Top 3、决策、生成或便携 inspector 成功状态。
 - `has_pendant=false` 时 `pendant_count` 必须为 0 且 `pendant_layer` 必须为空；`has_pendant=true` 时 `pendant_count` 必须大于等于 1 且必须填写 `pendant_layer`。
 - 带链吊坠必须声明完整主吊坠，即 `has_pendant=true`、`pendant_count` 大于等于 1 且 `pendant_layer` 有效；普通项链不得声明主吊坠，三项必须分别为 `false`、`0`、`null`。
 - 无链独立吊坠是层位规则的明确例外：必须声明 `has_pendant=true`、`pendant_count` 大于等于 1、`pendant_layer=null`，解析成功后再由支持范围 gate 拒绝生成并禁止自动补链。
@@ -135,7 +135,7 @@
 - 戒指必须满足 `ring_count=1`、`hand_side` 为 `left/right`、`finger_position` 为五种明确手指之一、`ring_wear_style=finger_base`、`layer_count=1`、`has_pendant=false`、`pendant_count=0`、`pendant_layer=null`、`is_independent_multi_item=false`。
 - 非戒指品类必须使用 `ring_count=0` 和三个 `unknown` 戒指枚举值，禁止在品类纠正后残留戒指结构字段。
 - 列表字段只能包含字符串；布尔、整数、枚举和可选字符串字段必须符合上表类型。
-- `confirmed_product_type` 可以与 `detected_product_type` 不同，用于保存人工纠正；后续支持判断以 `confirmed_product_type` 为准。
+- `confirmed_product_type` 可以与 `detected_product_type` 不同，用于保存人工纠正；项链纠正必须在 `prepare-review` 评分前完成，后续支持判断和参考选择都以该最终值为准。
 
 ## 历史手串 JSON 兼容
 

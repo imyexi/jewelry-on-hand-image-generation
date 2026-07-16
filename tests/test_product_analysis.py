@@ -2,14 +2,12 @@ from pathlib import Path
 
 import pytest
 
-import jewelry_on_hand.product_analysis as product_analysis_module
 from jewelry_on_hand.models import ProductAnalysis
 from jewelry_on_hand.product_analysis import (
     UnsupportedProductError,
     build_analysis_prompt,
     build_product_fidelity_constraints,
     load_product_analysis,
-    validate_analysis_ready_for_reference_selection,
 )
 from jewelry_on_hand.run_paths import write_json
 
@@ -37,109 +35,6 @@ def _modern_classification(product_type):
         "classification_source": "auto_confirmed",
         "source_image_type": "worn_source",
     }
-
-
-_CANONICAL_ANALYSIS_KEYS = (
-    "product_type",
-    "detected_product_type",
-    "confirmed_product_type",
-    "classification_confidence",
-    "classification_evidence",
-    "classification_source",
-    "display_mode",
-    "source_image_type",
-    "wear_position",
-    "visible_appearance",
-    "color_family",
-    "style_mood",
-    "composition",
-    "product_dimensions",
-    "needs_full_front_display",
-    "special_requirements",
-    "layer_count",
-    "length_category",
-    "chain_or_strand_type",
-    "has_pendant",
-    "pendant_count",
-    "pendant_layer",
-    "pendant_position",
-    "pendant_orientation",
-    "connection_structure",
-    "symmetry",
-    "occluded_parts",
-    "uncertain_details",
-    "is_independent_multi_item",
-    "ring_count",
-    "hand_side",
-    "finger_position",
-    "ring_wear_style",
-)
-
-
-def _ready_analysis_data(product_type):
-    display_names = {
-        "bracelet": "手串/手链",
-        "necklace": "普通项链",
-        "pendant_necklace": "带链吊坠",
-        "ring": "戒指",
-    }
-    data = _analysis_data(display_names[product_type]) | {
-        **_modern_classification(product_type),
-        "display_mode": "worn",
-        "source_image_type": "worn_source",
-        "wear_position": "产品对应的真人佩戴位置",
-        "visible_appearance": "产品主体、排列与连接结构清晰可见",
-        "product_dimensions": {
-            "length_mm": 180,
-            "width_mm": 8.5,
-            "height_mm": None,
-            "bead_diameter_mm": 10,
-            "dimension_source": "用户提供尺寸信息",
-        },
-        "layer_count": 1,
-        "length_category": None,
-        "chain_or_strand_type": None,
-        "has_pendant": False,
-        "pendant_count": 0,
-        "pendant_layer": None,
-        "pendant_position": None,
-        "pendant_orientation": None,
-        "connection_structure": None,
-        "symmetry": "主体结构清晰",
-        "occluded_parts": [],
-        "uncertain_details": [],
-        "is_independent_multi_item": False,
-        "ring_count": 0,
-        "hand_side": "unknown",
-        "finger_position": "unknown",
-        "ring_wear_style": "unknown",
-    }
-    if product_type in {"necklace", "pendant_necklace"}:
-        data |= {
-            "wear_position": "颈部至锁骨",
-            "length_category": "collarbone",
-            "chain_or_strand_type": "beaded",
-        }
-    if product_type == "pendant_necklace":
-        data |= {
-            "visible_appearance": "单层珠链正面中央连接一枚吊坠",
-            "has_pendant": True,
-            "pendant_count": 1,
-            "pendant_layer": 1,
-            "pendant_position": "front_center",
-            "pendant_orientation": "front_facing",
-            "connection_structure": "metal_bail",
-        }
-    if product_type == "ring":
-        data |= {
-            "wear_position": "左手无名指根部",
-            "visible_appearance": "单枚戒指的戒面、戒圈与主石清晰可见",
-            "ring_count": 1,
-            "hand_side": "left",
-            "finger_position": "ring",
-            "ring_wear_style": "finger_base",
-        }
-    return data
 
 
 def test_prompt_forbids_material_guessing(tmp_path):
@@ -327,6 +222,73 @@ def test_build_default_fidelity_constraints_marks_not_applicable_without_keyword
     assert constraints.needs_user_review is False
 
 
+def test_built_constraints_bind_to_normalized_product_analysis_sha256():
+    analysis = ProductAnalysis.from_dict(_analysis_data("手链/手串"))
+
+    constraints = build_product_fidelity_constraints(analysis)
+
+    assert constraints.source["product_analysis"] == "analysis/product_analysis.json"
+    digest = constraints.source["product_analysis_sha256"]
+    assert isinstance(digest, str)
+    assert len(digest) == 64
+
+
+def test_build_default_fidelity_constraints_for_ring_covers_all_visible_facts():
+    visible_appearance = (
+        "单枚银色金属光泽开口戒，椭圆戒面中央有一颗透明圆形主石，"
+        "戒圈两个开口端点各有一颗小石，两侧装饰对称排列"
+    )
+    special_requirements = (
+        "保持主石竖向朝向",
+        "保留开口端点与两侧小石的排列顺序",
+    )
+    analysis = ProductAnalysis.from_dict(
+        _analysis_data("戒指")
+        | {
+            **_modern_classification("ring"),
+            "wear_position": "左手无名指根部",
+            "visible_appearance": visible_appearance,
+            "color_family": ["银色", "透明"],
+            "special_requirements": list(special_requirements),
+            "ring_count": 1,
+            "hand_side": "left",
+            "finger_position": "ring",
+            "ring_wear_style": "finger_base",
+            "occluded_parts": ["戒圈背面"],
+            "uncertain_details": ["镶嵌背面结构"],
+        }
+    )
+
+    constraints = build_product_fidelity_constraints(analysis)
+
+    assert constraints.review_status == "pending"
+    assert constraints.needs_user_review is True
+    assert constraints.detail_crop_recommended is True
+    assert constraints.must_keep
+    assert constraints.must_keep[0].source_text == visible_appearance
+    assert all(
+        color in " ".join(item.source_text for item in constraints.must_keep)
+        for color in analysis.color_family
+    )
+    assert all(
+        any(item.source_text == requirement for item in constraints.must_keep)
+        for requirement in special_requirements
+    )
+    for visible_fact in ("戒面", "主石", "戒圈", "开口端点", "装饰排列"):
+        assert visible_fact in constraints.must_keep[0].qc_question
+    assert "关闭现有开口或新增开口" in constraints.must_keep[0].forbid
+    assert (
+        "把不可见戒圈背面、镶嵌背面或连接结构补写为确定结构"
+        in constraints.must_keep[0].forbid
+    )
+    serialized = str(constraints.to_dict())
+    assert "戒圈背面" in serialized
+    assert "镶嵌背面" in serialized
+    assert "不可推断" in serialized
+    assert "珠子排列顺序" not in serialized
+    assert "主珠" not in serialized
+
+
 def test_accepts_necklace_analysis_with_worn_source(tmp_path):
     path = tmp_path / "analysis.json"
     write_json(
@@ -340,7 +302,6 @@ def test_accepts_necklace_analysis_with_worn_source(tmp_path):
             "display_mode": "worn",
             "layer_count": 1,
             "length_category": "collarbone",
-            "chain_or_strand_type": "beaded",
         },
     )
 
@@ -361,7 +322,6 @@ def test_rejects_necklace_flat_lay_source(tmp_path):
             "display_mode": "worn",
             "layer_count": 1,
             "length_category": "collarbone",
-            "chain_or_strand_type": "beaded",
         },
     )
 
@@ -388,197 +348,3 @@ def test_rejects_pendant_only_before_generation(tmp_path):
 
     with pytest.raises(UnsupportedProductError, match="无链独立吊坠"):
         load_product_analysis(path)
-
-
-@pytest.mark.parametrize(
-    "product_type",
-    ["bracelet", "necklace", "pendant_necklace", "ring"],
-)
-def test_product_analysis_canonical_projection_roundtrips_all_supported_categories(
-    product_type,
-):
-    analysis = ProductAnalysis.from_dict(_ready_analysis_data(product_type))
-
-    serialized = product_analysis_module.product_analysis_to_dict(analysis)
-    reparsed = ProductAnalysis.from_dict(serialized)
-
-    assert tuple(serialized) == _CANONICAL_ANALYSIS_KEYS
-    assert reparsed == analysis
-    assert product_analysis_module.product_analysis_to_dict(reparsed) == serialized
-    assert "pendant_semantics" not in serialized
-
-
-@pytest.mark.parametrize("number", [10, 10.5])
-def test_product_analysis_projection_normalizes_integer_and_float_dimensions(number):
-    payload = _ready_analysis_data("bracelet")
-    payload["product_dimensions"]["bead_diameter_mm"] = number
-
-    analysis = ProductAnalysis.from_dict(payload)
-    serialized = product_analysis_module.product_analysis_to_dict(analysis)
-
-    assert serialized["product_dimensions"]["bead_diameter_mm"] == float(number)
-    assert isinstance(serialized["product_dimensions"]["bead_diameter_mm"], float)
-
-
-def test_product_analysis_rejects_bool_disguised_as_dimension_number():
-    payload = _ready_analysis_data("bracelet")
-    payload["product_dimensions"]["bead_diameter_mm"] = True
-
-    with pytest.raises(ValueError, match="bead_diameter_mm 必须是正数"):
-        ProductAnalysis.from_dict(payload)
-
-
-@pytest.mark.parametrize(
-    "product_type",
-    ["bracelet", "necklace", "pendant_necklace", "ring"],
-)
-def test_reference_selection_gate_accepts_all_supported_complete_categories(
-    product_type,
-):
-    analysis = ProductAnalysis.from_dict(_ready_analysis_data(product_type))
-
-    assert validate_analysis_ready_for_reference_selection(analysis) is None
-
-
-def test_reference_selection_gate_requires_product_analysis_instance():
-    with pytest.raises(ValueError, match="analysis 必须是 ProductAnalysis"):
-        validate_analysis_ready_for_reference_selection({})
-
-
-def test_reference_selection_gate_rejects_unsupported_category():
-    analysis = ProductAnalysis.from_dict(
-        _analysis_data("无法识别")
-        | {
-            **_modern_classification("unknown"),
-            "classification_evidence": ["无法确认产品品类"],
-        }
-    )
-
-    with pytest.raises(ValueError, match="当前只支持.*bracelet.*necklace.*ring"):
-        validate_analysis_ready_for_reference_selection(analysis)
-
-
-@pytest.mark.parametrize(
-    "source_image_type",
-    ["hand_held_source", "flat_lay_source", "unknown_source"],
-)
-def test_reference_selection_gate_requires_worn_source(source_image_type):
-    payload = _ready_analysis_data("bracelet")
-    payload["source_image_type"] = source_image_type
-    analysis = ProductAnalysis.from_dict(payload)
-
-    with pytest.raises(ValueError, match="source_image_type 必须为 worn_source"):
-        validate_analysis_ready_for_reference_selection(analysis)
-
-
-@pytest.mark.parametrize(
-    ("overrides", "error"),
-    [
-        ({"classification_source": "auto_pending"}, "分析尚未确认"),
-        ({"classification_confidence": "low"}, "分类置信度"),
-        ({"classification_evidence": []}, "分类证据"),
-        (
-            {"detected_product_type": "unknown"},
-            "自动确认的检测品类与确认品类必须一致",
-        ),
-    ],
-)
-def test_reference_selection_gate_rejects_unconfirmed_modern_analysis(
-    overrides,
-    error,
-):
-    payload = _ready_analysis_data("bracelet") | overrides
-    analysis = ProductAnalysis.from_dict(payload)
-
-    with pytest.raises(ValueError, match=error):
-        validate_analysis_ready_for_reference_selection(analysis)
-
-
-def test_reference_selection_gate_accepts_manual_category_override():
-    payload = _ready_analysis_data("necklace") | {
-        "detected_product_type": "unknown",
-        "classification_confidence": "low",
-        "classification_source": "manual_override",
-    }
-    analysis = ProductAnalysis.from_dict(payload)
-
-    assert validate_analysis_ready_for_reference_selection(analysis) is None
-
-
-@pytest.mark.parametrize("product_type", ["bracelet", "necklace"])
-def test_reference_selection_gate_rejects_pendant_semantics_on_non_pendant_categories(
-    product_type,
-):
-    payload = _ready_analysis_data(product_type)
-    if product_type == "bracelet":
-        payload |= {
-            "has_pendant": True,
-            "pendant_count": 1,
-            "pendant_layer": 1,
-            "pendant_position": "front_center",
-            "pendant_orientation": "front_facing",
-            "connection_structure": "metal_bail",
-        }
-    else:
-        payload["pendant_position"] = "不应残留的吊坠位置"
-    analysis = ProductAnalysis.from_dict(payload)
-
-    with pytest.raises(ValueError, match="非吊坠品类不得声明吊坠语义"):
-        validate_analysis_ready_for_reference_selection(analysis)
-
-
-def test_reference_selection_gate_applies_committed_single_pendant_semantics():
-    payload = _ready_analysis_data("pendant_necklace")
-    payload["pendant_count"] = 2
-    analysis = ProductAnalysis.from_dict(payload)
-
-    with pytest.raises(ValueError, match=r"pendant_semantics\.count"):
-        validate_analysis_ready_for_reference_selection(analysis)
-
-
-@pytest.mark.parametrize(
-    ("product_type", "field", "error"),
-    [
-        ("necklace", "length_category", "length_category"),
-        ("necklace", "chain_or_strand_type", "chain_or_strand_type"),
-        ("pendant_necklace", "length_category", "length_category"),
-        ("pendant_necklace", "chain_or_strand_type", "chain_or_strand_type"),
-        ("pendant_necklace", "pendant_position", "pendant_position"),
-        ("pendant_necklace", "pendant_orientation", "pendant_orientation"),
-        ("pendant_necklace", "connection_structure", "connection_structure"),
-    ],
-)
-def test_reference_selection_gate_rejects_missing_required_structure(
-    product_type,
-    field,
-    error,
-):
-    payload = _ready_analysis_data(product_type)
-    payload[field] = None
-    analysis = ProductAnalysis.from_dict(payload)
-
-    with pytest.raises(ValueError, match=error):
-        validate_analysis_ready_for_reference_selection(analysis)
-
-
-@pytest.mark.parametrize("field", ["hand_side", "finger_position"])
-def test_ring_analysis_rejects_missing_hand_identity_before_gate(field):
-    payload = _ready_analysis_data("ring")
-    payload.pop(field)
-
-    with pytest.raises(ValueError, match=f"戒指分析契约不完整.*{field}"):
-        ProductAnalysis.from_dict(payload)
-
-
-def test_reference_selection_gate_does_not_interpret_composition_or_style_mood():
-    first = ProductAnalysis.from_dict(_ready_analysis_data("bracelet"))
-    second = ProductAnalysis.from_dict(
-        _ready_analysis_data("bracelet")
-        | {
-            "composition": "白底产品静物、参考图人物与镜头语言描述",
-            "style_mood": "电影感、杂志感、复古风格描述",
-        }
-    )
-
-    assert validate_analysis_ready_for_reference_selection(first) is None
-    assert validate_analysis_ready_for_reference_selection(second) is None

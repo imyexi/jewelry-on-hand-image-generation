@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import hashlib
 import re
 import secrets
 import shutil
@@ -17,16 +17,8 @@ from typing import Any
 
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ReviewDecision
-from jewelry_on_hand.output_roles import OutputRole, require_scene_replacement_role
+from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.product_types import ProductType
-from jewelry_on_hand.qc_review import write_qc_review_page
-from jewelry_on_hand.reference_composition import (
-    REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
-    ReferenceCompositionSnapshot,
-    load_reference_composition_snapshot,
-    reference_composition_sha256,
-    require_modern_reference_run,
-)
 from jewelry_on_hand.review_decision import require_generation_decision
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
@@ -37,23 +29,6 @@ FALLBACK_MODEL_NAME = "nano_banana_v2"
 FALLBACK_AFTER_FAILED_QC_COUNT = 1
 ASPECT_RATIO = "3:4"
 RESOLUTION = "2K"
-REFERENCE_STRUCTURE_FAILURES = frozenset(
-    {
-        "reference_framing_changed",
-        "reference_pose_changed",
-        "reference_person_changed",
-        "reference_clothing_changed",
-        "reference_background_changed",
-        "reference_lighting_changed",
-        "reference_jewelry_leakage",
-        "replacement_target_changed",
-        "target_product_duplicated",
-    }
-)
-REFERENCE_STRUCTURE_RETRY_SUFFIX = (
-    "这是当前参考底图唯一一次构图纠偏重跑。逐项锁定已确认快照，"
-    "除原首饰替换区域外不得重绘、裁切、移动或重构任何画面元素。"
-)
 
 
 class GenerationError(RuntimeError):
@@ -74,23 +49,9 @@ class _GenerationJob:
 class _GenerationHistory:
     next_output_index: int
     failed_qc_count: int
-    reference_structure_rejects: int = 0
     attempted_ranks: tuple[int, ...] = ()
     latest_critical_failures: tuple[str, ...] = ()
     latest_qc_status: str = ""
-
-
-@dataclass(frozen=True)
-class GenerationFailureHistory:
-    reference_structure_rejects: int
-    model_switch_failures: int
-
-
-@dataclass(frozen=True)
-class _AuditSource:
-    source_path: Path
-    copied_file: str
-    sha256: str
 
 
 def run_generation(
@@ -99,86 +60,49 @@ def run_generation(
     prompts_by_rank: Mapping[int | str, str],
     helper_script: str | Path,
     wait: bool = True,
-    *,
-    reference_snapshot: ReferenceCompositionSnapshot | None = None,
-    product_analysis_path: str | Path | None = None,
-    fidelity_constraints_path: str | Path | None = None,
 ) -> list[Path]:
-    _reject_known_unsupported_decision(paths)
+    # 生命周期门禁必须先于 generation 目录写入和任何 helper/provider 调用。
     decision = require_generation_decision(paths)
-    try:
-        modern_snapshot = require_modern_reference_run(paths)
-    except ValueError as exc:
-        raise GenerationError(str(exc)) from exc
-    if decision.action == "generate_multiple":
-        raise GenerationError(
-            "历史 generate_multiple run 不允许继续生成，请回到 prepare-review 重新确认。"
-        )
-    require_reference_retry_allowed(paths)
+    if decision.action == "manual_reference":
+        raise GenerationError("manual_reference 第一版暂不支持自动生成，请改用已选 rank 决策。")
 
     product_path = Path(product_image)
     helper_path = Path(helper_script)
-    analysis_path = Path(
-        product_analysis_path or paths.analysis_dir / "product_analysis.json"
-    )
-    canonical_path = Path(
-        fidelity_constraints_path
-        or paths.analysis_dir / "product_fidelity_constraints.json"
-    )
-    snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
-    _ensure_original_audit_path(
-        product_path,
-        paths.input_dir / "product-on-hand.jpg",
-        "产品图",
-    )
-    _ensure_original_audit_path(
-        analysis_path,
-        paths.analysis_dir / "product_analysis.json",
-        "产品分析",
-    )
-    _ensure_original_audit_path(
-        canonical_path,
-        paths.analysis_dir / "product_fidelity_constraints.json",
-        "产品保真约束",
-    )
-    _ensure_file(product_path, "产品图不存在，请回到 prepare-review 重新确认")
     _ensure_file(helper_path, "AIReiter helper 不存在")
-    _ensure_file(analysis_path, "产品分析不存在，请回到 prepare-review 重新确认")
-    _ensure_file(canonical_path, "产品保真约束不存在，请回到 prepare-review 重新确认")
-    _ensure_file(snapshot_path, "确认快照不存在，请回到 prepare-review 重新确认")
-    supplied_snapshot = reference_snapshot
-    if supplied_snapshot is None:
-        supplied_snapshot = modern_snapshot
-    elif supplied_snapshot != modern_snapshot:
-        raise GenerationError("传入快照与现代 run gate 的确认快照不一致，请重新确认。")
-    confirmed_snapshot = _validate_confirmed_snapshot(
-        decision,
-        supplied_snapshot,
-        snapshot_path,
-    )
-    _validate_run_role(paths, confirmed_snapshot)
 
     normalized_prompts = _normalize_prompts_by_rank(prompts_by_rank)
     references_by_rank = _load_references_by_rank(
         paths.analysis_dir / SELECTED_REFERENCES_FILE
     )
-    try:
-        product = ProductAnalysis.from_dict(read_json(analysis_path))
-    except (OSError, TypeError, ValueError) as exc:
-        raise GenerationError(f"生成前无法读取完整产品分析：{analysis_path}；{exc}") from exc
-    if product.confirmed_product_type is ProductType.RING:
-        expected_product_path = paths.input_dir / "product-on-hand.jpg"
-        if product_path.resolve() != expected_product_path.resolve():
-            raise GenerationError(
-                "戒指生成只允许使用当前 run 的 input/product-on-hand.jpg 作为唯一产品身份图"
-            )
     _require_ring_reference_top_three(paths, decision, references_by_rank)
-    validate_necklace_reference_selection(
-        paths,
-        product,
-        decision,
-        references_by_rank=references_by_rank,
-    )
+    product: ProductAnalysis | None = None
+    analysis_path = paths.analysis_dir / "product_analysis.json"
+    if analysis_path.is_file():
+        try:
+            product = ProductAnalysis.from_dict(read_json(analysis_path))
+        except (OSError, TypeError, ValueError) as exc:
+            raise GenerationError(f"生成前无法读取完整产品分析：{analysis_path}；{exc}") from exc
+        if product.confirmed_product_type is ProductType.RING:
+            expected_product_path = paths.input_dir / "product-on-hand.jpg"
+            if not expected_product_path.is_file():
+                raise GenerationError(
+                    "戒指生成要求当前 run 存在 input/product-on-hand.jpg，"
+                    "该文件是唯一产品身份图"
+                )
+            if product_path.resolve() != expected_product_path.resolve():
+                raise GenerationError(
+                    "戒指生成只允许使用当前 run 的 input/product-on-hand.jpg "
+                    "作为唯一产品身份图"
+                )
+    _ensure_file(product_path, "产品图不存在")
+    if product is not None:
+        validate_necklace_reference_selection(
+            paths,
+            product,
+            decision,
+            references_by_rank=references_by_rank,
+        )
+    product_identity_path = product_path
     model_name = select_generation_model(paths)
     jobs = _build_generation_jobs(
         paths=paths,
@@ -188,68 +112,38 @@ def run_generation(
         model_name=model_name,
         product=product,
     )
-    if len(jobs) != 1:
-        raise GenerationError("新快照 run 必须且只能生成唯一 selected rank，请重新确认。")
-    _validate_job_snapshot(
-        jobs[0],
-        references_by_rank[jobs[0].rank],
-        confirmed_snapshot,
-        decision,
-    )
-    audit_sources = _build_audit_sources(
-        job=jobs[0],
-        product_path=product_path,
-        snapshot_path=snapshot_path,
-        analysis_path=analysis_path,
-        canonical_path=canonical_path,
-    )
-    for job in jobs:
-        _ensure_generation_dir_available(job.generation_dir)
-
-    staged: list[tuple[_GenerationJob, Path]] = []
-    published: list[Path] = []
-    try:
-        for job in jobs:
-            staged.append(
-                (
-                    job,
-                    _stage_generation_inputs(
-                        job,
-                        audit_sources,
-                        confirmed_snapshot,
-                    ),
-                )
-            )
-        for job, staging_dir in staged:
-            if job.generation_dir.exists():
-                job.generation_dir.rmdir()
-            staging_dir.replace(job.generation_dir)
-            published.append(job.generation_dir)
-    except Exception as exc:
-        for _job, staging_dir in staged:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        for generation_dir in published:
-            shutil.rmtree(generation_dir, ignore_errors=True)
-        if isinstance(exc, GenerationError):
-            raise
-        raise GenerationError(
-            "generation 输入固化失败，未提交任何任务；请回到 prepare-review 重新确认。"
-        ) from exc
-
     generation_dirs: list[Path] = []
 
     for job in jobs:
-        generation_dir = job.generation_dir
-        scene_copy = generation_dir / _scene_reference_name(job.reference_path)
-        product_copy = generation_dir / _product_reference_name(product_path)
+        generation_dir = _prepare_generation_dir(job.generation_dir)
+
+        (generation_dir / "model.txt").write_text(job.model_name, encoding="utf-8")
+        (generation_dir / "prompt.txt").write_text(job.prompt, encoding="utf-8")
+        (generation_dir / "reference-rank.txt").write_text(
+            str(job.rank), encoding="utf-8"
+        )
+        if job.retry_failures:
+            write_json(
+                generation_dir / "retry-failures.json",
+                list(job.retry_failures),
+            )
+        shutil.copy2(
+            job.reference_path,
+            _reference_destination(generation_dir, job.reference_path),
+        )
+        if product is not None and product.confirmed_product_type is ProductType.RING:
+            shutil.copy2(
+                product_identity_path,
+                generation_dir / f"product-identity{product_identity_path.suffix.lower()}",
+            )
 
         task_id = _make_task_id(paths.root.name, job.rank)
         submit = _run_helper(
             _submit_command(
                 helper_path,
                 job.prompt,
-                scene_copy,
-                product_copy,
+                job.reference_path,
+                product_identity_path,
                 task_id,
                 job.model_name,
             ),
@@ -273,328 +167,17 @@ def run_generation(
                 rank=job.rank,
                 generation_dir=generation_dir,
             )
-            write_qc_review_page(generation_dir)
 
         generation_dirs.append(generation_dir)
 
     return generation_dirs
 
 
-def _reject_known_unsupported_decision(paths: RunPaths) -> None:
-    """在完整性 gate 前保留已知决策的精确业务错误。"""
-    decision_path = paths.review_dir / "review_decision.json"
-    snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
-    if not decision_path.is_file():
-        return
-    try:
-        data = read_json(decision_path)
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, Mapping):
-        return
-    if snapshot_path.is_file():
-        product_path = paths.input_dir / "product-on-hand.jpg"
-        selected_path = paths.analysis_dir / SELECTED_REFERENCES_FILE
-        _ensure_file(product_path, "产品图不存在，请回到 prepare-review 重新确认")
-        _ensure_file(selected_path, "缺少 selected_references.json")
-        references_by_rank = _load_references_by_rank(selected_path)
-        try:
-            analysis = ProductAnalysis.from_dict(
-                read_json(paths.analysis_dir / "product_analysis.json")
-            )
-            decision = ReviewDecision.from_dict(
-                data,
-                require_reference_snapshot_sha256=True,
-            )
-        except (OSError, TypeError, ValueError):
-            analysis = None
-            decision = None
-        if (
-            analysis is not None
-            and decision is not None
-            and analysis.confirmed_product_type is ProductType.RING
-        ):
-            _require_ring_reference_top_three(
-                paths,
-                decision,
-                references_by_rank,
-            )
-    action = data.get("action")
-    ranks = data.get("selected_ranks")
-    ranks_are_valid = (
-        isinstance(ranks, list)
-        and bool(ranks)
-        and all(type(rank) is int and 1 <= rank <= 3 for rank in ranks)
-        and len(ranks) == len(set(ranks))
-    )
-    if action == "generate_multiple" and ranks_are_valid:
-        raise GenerationError(
-            "历史 generate_multiple run 不允许继续生成，"
-            "请回到 prepare-review 重新确认。"
-        )
-    if not ranks_are_valid or len(ranks) != 1 or not snapshot_path.is_file():
-        return
-    try:
-        snapshot = load_reference_composition_snapshot(snapshot_path)
-    except ValueError:
-        return
-    if ranks != [snapshot.rank]:
-        raise GenerationError(
-            "ReviewDecision 与确认快照的唯一 selected rank 不一致，"
-            "请重新确认。"
-        )
-
-
-def _validate_confirmed_snapshot(
-    decision: ReviewDecision,
-    supplied_snapshot: ReferenceCompositionSnapshot,
-    snapshot_path: Path,
-) -> ReferenceCompositionSnapshot:
-    if not isinstance(supplied_snapshot, ReferenceCompositionSnapshot):
-        raise GenerationError("reference_snapshot 必须是人工确认快照，请重新确认。")
-    try:
-        persisted_snapshot = load_reference_composition_snapshot(snapshot_path)
-    except ValueError as exc:
-        raise GenerationError(f"确认快照无效，请回到 prepare-review 重新确认：{exc}") from exc
-    if persisted_snapshot != supplied_snapshot:
-        raise GenerationError("传入快照与 review 确认快照不一致，请重新确认。")
-    digest = reference_composition_sha256(persisted_snapshot)
-    if decision.reference_snapshot_sha256 != digest:
-        raise GenerationError("ReviewDecision 的快照摘要与确认快照不一致，请重新确认。")
-    ranks = _generation_ranks(decision)
-    if ranks != [persisted_snapshot.rank]:
-        raise GenerationError("ReviewDecision 与确认快照的唯一 selected rank 不一致，请重新确认。")
-    try:
-        decision_role = require_scene_replacement_role(
-            decision.output_role,
-            stage="generation ReviewDecision",
-        )
-        snapshot_role = require_scene_replacement_role(
-            persisted_snapshot.output_role,
-            stage="generation 确认快照",
-        )
-    except ValueError as exc:
-        raise GenerationError(f"生成角色无效，请回到 prepare-review 重新确认：{exc}") from exc
-    if decision_role is not snapshot_role:
-        raise GenerationError("ReviewDecision 与确认快照的角色不一致，请重新确认。")
-    return persisted_snapshot
-
-
-def _validate_job_snapshot(
-    job: _GenerationJob,
-    selected: Mapping[str, Any],
-    snapshot: ReferenceCompositionSnapshot,
-    decision: ReviewDecision,
-) -> None:
-    if job.rank != snapshot.rank:
-        raise GenerationError("generation job 与确认快照 rank 不一致，请重新确认。")
-    metadata = selected.get("metadata")
-    if not isinstance(metadata, Mapping):
-        raise GenerationError("selected 参考图缺少审核元数据，请回到 prepare-review 重新确认。")
-    source_file_name = metadata.get("source_file_name") or metadata.get("文件名")
-    if source_file_name != snapshot.reference_file:
-        raise GenerationError("selected 参考图文件名与确认快照不一致，请重新确认。")
-    actual_sha = _file_sha256(job.reference_path)
-    declared_review_sha = selected.get("review_sha256") or metadata.get("review_sha256")
-    if declared_review_sha != actual_sha or actual_sha != snapshot.reference_sha256:
-        raise GenerationError("selected 参考图 SHA-256 与确认快照不一致，请重新确认。")
-    if decision.output_role is not snapshot.output_role:
-        raise GenerationError("输出角色与确认快照角色不一致，请重新确认。")
-
-
-def _validate_run_role(
-    paths: RunPaths,
-    snapshot: ReferenceCompositionSnapshot,
-) -> None:
-    role_path = paths.analysis_dir / "output_role.json"
-    _ensure_file(role_path, "输出角色文件不存在，请回到 prepare-review 重新确认")
-    try:
-        role_data = read_json(role_path)
-    except (OSError, ValueError) as exc:
-        raise GenerationError("输出角色文件无效，请回到 prepare-review 重新确认。") from exc
-    if not isinstance(role_data, Mapping):
-        raise GenerationError("输出角色文件必须是 JSON 对象，请重新确认。")
-    try:
-        run_role = require_scene_replacement_role(
-            role_data.get("output_role"),
-            stage="generation 当前 run",
-        )
-    except ValueError as exc:
-        raise GenerationError(f"当前 run 角色无效，请重新确认：{exc}") from exc
-    if run_role is not snapshot.output_role:
-        raise GenerationError("当前 run 角色与确认快照角色不一致，请重新确认。")
-
-
-def _build_audit_sources(
-    *,
-    job: _GenerationJob,
-    product_path: Path,
-    snapshot_path: Path,
-    analysis_path: Path,
-    canonical_path: Path,
-) -> dict[str, _AuditSource]:
-    sources = {
-        "scene": _AuditSource(
-            job.reference_path,
-            _scene_reference_name(job.reference_path),
-            _file_sha256(job.reference_path),
-        ),
-        "product": _AuditSource(
-            product_path,
-            _product_reference_name(product_path),
-            _file_sha256(product_path),
-        ),
-        "snapshot": _AuditSource(
-            snapshot_path,
-            "reference-composition-snapshot.json",
-            _file_sha256(snapshot_path),
-        ),
-        "analysis": _AuditSource(
-            analysis_path,
-            "product-analysis.json",
-            _file_sha256(analysis_path),
-        ),
-        "canonical": _AuditSource(
-            canonical_path,
-            "product-fidelity-constraints.json",
-            _file_sha256(canonical_path),
-        ),
-    }
-    copied_names = [item.copied_file for item in sources.values()]
-    if len(copied_names) != len(set(copied_names)):
-        raise GenerationError("generation 输入复制文件名冲突，请重新确认。")
-    return sources
-
-
-def _stage_generation_inputs(
-    job: _GenerationJob,
-    sources: Mapping[str, _AuditSource],
-    snapshot: ReferenceCompositionSnapshot,
-) -> Path:
-    staging_dir = job.generation_dir.parent / (
-        f".{job.generation_dir.name}.staging-{secrets.token_hex(8)}"
-    )
-    try:
-        staging_dir.mkdir(parents=False, exist_ok=False)
-        for item in sources.values():
-            _ensure_source_unchanged(item)
-            destination = staging_dir / item.copied_file
-            shutil.copy2(item.source_path, destination)
-            _ensure_copied_digest(destination, item)
-        (staging_dir / "model.txt").write_text(job.model_name, encoding="utf-8")
-        (staging_dir / "prompt.txt").write_text(job.prompt, encoding="utf-8")
-        (staging_dir / "reference-rank.txt").write_text(
-            str(job.rank), encoding="utf-8"
-        )
-        if job.retry_failures:
-            write_json(staging_dir / "retry-failures.json", list(job.retry_failures))
-        write_json(
-            staging_dir / "input-manifest.json",
-            _input_manifest(sources, snapshot),
-        )
-        for item in sources.values():
-            _ensure_source_unchanged(item)
-            _ensure_copied_digest(staging_dir / item.copied_file, item)
-        return staging_dir
-    except Exception as exc:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        if isinstance(exc, GenerationError):
-            raise
-        raise GenerationError(
-            "generation 输入固化或 manifest 写入失败，未发布半成品；"
-            "请回到 prepare-review 重新确认。"
-        ) from exc
-
-
-def _input_manifest(
-    sources: Mapping[str, _AuditSource],
-    snapshot: ReferenceCompositionSnapshot,
-) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "output_role": snapshot.output_role.value,
-        "reference_snapshot": _manifest_file(sources["snapshot"]),
-        "product_analysis": _manifest_file(sources["analysis"]),
-        "fidelity_constraints": _manifest_file(sources["canonical"]),
-        "inputs": [
-            _manifest_input(sources["scene"], order=1, role="scene_reference"),
-            _manifest_input(sources["product"], order=2, role="product_identity"),
-        ],
-    }
-
-
-def _manifest_file(source: _AuditSource) -> dict[str, str]:
-    return {"copied_file": source.copied_file, "sha256": source.sha256}
-
-
-def _manifest_input(
-    source: _AuditSource,
-    *,
-    order: int,
-    role: str,
-) -> dict[str, Any]:
-    return {
-        "order": order,
-        "role": role,
-        "source_path": str(source.source_path.resolve()),
-        "copied_file": source.copied_file,
-        "sha256": source.sha256,
-    }
-
-
-def _ensure_source_unchanged(source: _AuditSource) -> None:
-    if _file_sha256(source.source_path) != source.sha256:
-        raise GenerationError(
-            f"generation 输入源在固化期间被篡改：{source.source_path}；请重新确认。"
-        )
-
-
-def _ensure_copied_digest(destination: Path, source: _AuditSource) -> None:
-    if _file_sha256(destination) != source.sha256:
-        raise GenerationError(
-            f"generation 输入复制后摘要不一致：{destination.name}；请重新确认。"
-        )
-
-
-def _ensure_original_audit_path(path: Path, expected: Path, label: str) -> None:
-    if path.resolve() != expected.resolve():
-        raise GenerationError(f"{label}必须使用人工确认链原始文件，请重新确认。")
-
-
 def select_generation_model(paths: RunPaths) -> str:
-    history = generation_failure_history(paths.generation_dir)
-    if history.model_switch_failures > FALLBACK_AFTER_FAILED_QC_COUNT:
+    failed_qc_count = _generation_history(paths.generation_dir).failed_qc_count
+    if failed_qc_count > FALLBACK_AFTER_FAILED_QC_COUNT:
         return FALLBACK_MODEL_NAME
     return DEFAULT_MODEL_NAME
-
-
-def generation_failure_history(
-    generation_root: str | Path,
-) -> GenerationFailureHistory:
-    history = _generation_history(Path(generation_root))
-    return GenerationFailureHistory(
-        reference_structure_rejects=history.reference_structure_rejects,
-        model_switch_failures=history.failed_qc_count,
-    )
-
-
-def reference_retry_suffix(history: GenerationFailureHistory) -> str:
-    if not isinstance(history, GenerationFailureHistory):
-        raise ValueError("history 必须是 GenerationFailureHistory")
-    return (
-        REFERENCE_STRUCTURE_RETRY_SUFFIX
-        if history.reference_structure_rejects == 1
-        else ""
-    )
-
-
-def require_reference_retry_allowed(paths: RunPaths) -> None:
-    history = generation_failure_history(paths.generation_dir)
-    if history.reference_structure_rejects >= 2:
-        raise GenerationError(
-            "当前参考图已连续两次发生结构严重错误，必须停用当前参考图并重新 "
-            "prepare-review；不得自动改用未确认 rank。"
-        )
 
 
 def _generation_ranks(
@@ -646,13 +229,8 @@ def _generation_history(
 ) -> _GenerationHistory:
     max_history_index = 0
     failed_qc_count = 0
-    reference_structure_rejects = 0
     if not generation_root.exists():
-        return _GenerationHistory(
-            next_output_index=1,
-            failed_qc_count=0,
-            reference_structure_rejects=0,
-        )
+        return _GenerationHistory(next_output_index=1, failed_qc_count=0)
 
     attempted_ranks: list[int] = []
     latest_critical_failures: tuple[str, ...] = ()
@@ -672,13 +250,8 @@ def _generation_history(
         qc_status = _qc_status(qc_path)
         latest_qc_status = qc_status
         if qc_status != "pass":
+            failed_qc_count += 1
             latest_critical_failures = _qc_critical_failures(qc_path)
-            if REFERENCE_STRUCTURE_FAILURES.intersection(
-                latest_critical_failures
-            ):
-                reference_structure_rejects += 1
-            else:
-                failed_qc_count += 1
         rank = _generation_reference_rank(generation_dir, references_by_rank)
         if rank is not None:
             attempted_ranks.append(rank)
@@ -686,7 +259,6 @@ def _generation_history(
     return _GenerationHistory(
         next_output_index=max_history_index + 1,
         failed_qc_count=failed_qc_count,
-        reference_structure_rejects=reference_structure_rejects,
         attempted_ranks=tuple(attempted_ranks),
         latest_critical_failures=latest_critical_failures,
         latest_qc_status=latest_qc_status,
@@ -730,12 +302,10 @@ def _generation_reference_rank(
         return rank if rank >= 1 else None
     if not references_by_rank:
         return None
-    audit_references = sorted(generation_dir.glob("scene-reference.*"))
-    if not audit_references:
-        audit_references = sorted(generation_dir.glob("hand-reference.*"))
-    if len(audit_references) != 1:
+    hand_references = sorted(generation_dir.glob("hand-reference.*"))
+    if len(hand_references) != 1:
         return None
-    digest = _file_sha256(audit_references[0])
+    digest = _file_sha256(hand_references[0])
     for rank, reference in references_by_rank.items():
         path_value = reference.get("selected_reference")
         if isinstance(path_value, str) and Path(path_value).is_file():
@@ -781,17 +351,8 @@ def _build_generation_jobs(
                     correction,
                     reference_path.suffix,
                 )
-        retry_suffix = reference_retry_suffix(
-            GenerationFailureHistory(
-                reference_structure_rejects=(
-                    history.reference_structure_rejects
-                ),
-                model_switch_failures=history.failed_qc_count,
-            )
-        )
-        if retry_suffix:
-            prompt = _append_reference_retry_suffix(prompt, retry_suffix)
         generation_dir = paths.generation_dir / f"{output_index:02d}"
+        _ensure_generation_dir_available(generation_dir)
         jobs.append(
             _GenerationJob(
                 rank=rank,
@@ -803,12 +364,6 @@ def _build_generation_jobs(
             )
         )
     return jobs
-
-
-def _append_reference_retry_suffix(prompt: str, suffix: str) -> str:
-    if REFERENCE_STRUCTURE_RETRY_SUFFIX in prompt:
-        raise GenerationError("基础 Prompt 不得预置参考结构纠偏后缀")
-    return f"{prompt.rstrip()}\n\n{suffix}"
 
 
 _RING_RETRY_CORRECTIONS = {
@@ -854,7 +409,7 @@ def _build_ring_retry_prompt(
     )
     if reference_start >= 0 and occlusion_start >= 0:
         reference_section = retry_prompt[reference_start:occlusion_start]
-        submitted_reference_name = f"scene-reference{reference_suffix or '.jpg'}"
+        submitted_reference_name = f"hand-reference{reference_suffix or '.jpg'}"
         compacted_section = re.sub(
             r"(?m)^参考图文件：[^；\r\n]+；",
             f"参考图文件：{submitted_reference_name}；",
@@ -1212,16 +767,11 @@ def _required_ring_metadata_string(
 
 
 def _file_sha256(path: Path) -> str:
-    try:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-    except OSError as exc:
-        raise GenerationError(
-            f"无法读取 generation 输入文件：{path}；请重新确认。"
-        ) from exc
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _prompt_for_rank(prompts_by_rank: Mapping[int, str], rank: int) -> str:
@@ -1251,6 +801,12 @@ def _reference_for_rank(
     return path
 
 
+def _prepare_generation_dir(generation_dir: Path) -> Path:
+    _ensure_generation_dir_available(generation_dir)
+    generation_dir.mkdir(parents=True, exist_ok=True)
+    return generation_dir
+
+
 def _ensure_generation_dir_available(generation_dir: Path) -> None:
     if generation_dir.exists() and any(generation_dir.iterdir()):
         raise GenerationError(f"生成目录已存在且非空，拒绝覆盖: {generation_dir}")
@@ -1277,14 +833,9 @@ def _ensure_writable_probe(directory: Path) -> None:
         raise
 
 
-def _scene_reference_name(reference_path: Path) -> str:
+def _reference_destination(generation_dir: Path, reference_path: Path) -> Path:
     suffix = reference_path.suffix or ".jpg"
-    return f"scene-reference{suffix}"
-
-
-def _product_reference_name(product_path: Path) -> str:
-    suffix = product_path.suffix or ".jpg"
-    return f"product-reference{suffix}"
+    return generation_dir / f"hand-reference{suffix}"
 
 
 def _make_task_id(run_id: str, rank: int) -> str:
@@ -1551,13 +1102,7 @@ def _ensure_file(path: Path, message: str) -> None:
 
 
 __all__ = [
-    "GenerationFailureHistory",
     "GenerationError",
-    "REFERENCE_STRUCTURE_FAILURES",
-    "REFERENCE_STRUCTURE_RETRY_SUFFIX",
-    "generation_failure_history",
-    "reference_retry_suffix",
-    "require_reference_retry_allowed",
     "run_generation",
     "select_generation_model",
     "validate_necklace_reference_selection",

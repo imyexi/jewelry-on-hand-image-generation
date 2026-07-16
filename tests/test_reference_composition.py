@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from jewelry_on_hand import reference_composition as reference_composition_module
 from jewelry_on_hand.models import (
     ProductAnalysis,
     ProductDimensions,
@@ -168,94 +167,6 @@ def test_参考构图快照可完整往返并绑定真实文件(
     assert restored.pose.body == "身体未入镜"
     assert restored.pose.arm == "前臂斜向右上"
     assert restored.pose.hand == "掌心朝上"
-
-
-def test_背景与光线只提取备注中的画面片段而排除分类元数据(
-    手链产品: ProductAnalysis,
-    已评分参考图: ScoredReference,
-) -> None:
-    row = replace(
-        已评分参考图.row,
-        purpose_category="生活场景图",
-        style_category="户外自然光",
-        scene_keywords=(
-            "户外行走，手腕完整露出，细手链，适合戒指构图，"
-            "深色沥青路面为背景"
-        ),
-        notes=(
-            "素材编号：RP000081；图片类型：手部佩戴图；"
-            "正面视角；主体位于画面左中部；"
-            "深色沥青路面为背景；柔和侧光；"
-            "包袋有小面积文字，可移除文字"
-        ),
-    )
-
-    snapshot = build_candidate_snapshot(
-        手链产品,
-        replace(已评分参考图, row=row),
-        OutputRole.LIFESTYLE,
-    )
-
-    assert "深色沥青路面为背景" in snapshot.background
-    assert "柔和侧光" in snapshot.lighting
-    assert "细手链" not in snapshot.background
-    assert "戒指" not in snapshot.background
-    for metadata in ("素材编号", "图片类型", "适用品类", "小面积文字"):
-        assert metadata not in snapshot.background
-        assert metadata not in snapshot.lighting
-
-
-def test_候选快照就绪检查复用构建器并保留结构化排除原因(
-    手链产品: ProductAnalysis,
-    已评分参考图: ScoredReference,
-) -> None:
-    source_row = 已评分参考图.row
-    incomplete_row = replace(source_row, collar_type="")
-
-    readiness = reference_composition_module.assess_candidate_snapshot_readiness(
-        手链产品,
-        incomplete_row,
-        OutputRole.HAND_WORN,
-    )
-
-    assert readiness.ready is False
-    assert readiness.field_name == "clothing"
-    assert "同步字段为空" in readiness.reason
-    assert incomplete_row.collar_type == ""
-    assert source_row.collar_type == "无可见服装"
-
-
-def test_候选快照就绪检查不吞掉非候选数据错误(
-    手链产品: ProductAnalysis,
-    已评分参考图: ScoredReference,
-) -> None:
-    with pytest.raises(ValueError, match="hero"):
-        reference_composition_module.assess_candidate_snapshot_readiness(
-            手链产品,
-            已评分参考图.row,
-            OutputRole.HERO,
-        )
-
-
-def test_候选草稿接受明确否定的文字界面风险(
-    手链产品: ProductAnalysis,
-    已评分参考图: ScoredReference,
-) -> None:
-    row = replace(
-        已评分参考图.row,
-        notes=(
-            "正面视角；主体位于画面中下部；"
-            "无大面积文字，不含 blocking 风险；无文字或平台界面"
-        ),
-    )
-
-    snapshot = build_candidate_snapshot(
-        手链产品,
-        replace(已评分参考图, row=row),
-        OutputRole.HAND_WORN,
-    )
-
-    assert snapshot.text_or_ui_risk == "none"
 
 
 def test_参考构图快照及其嵌套对象均不可修改(

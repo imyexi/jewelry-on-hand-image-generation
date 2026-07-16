@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-import hashlib
-from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+import re
+from collections.abc import Iterable, Sequence
 
-from jewelry_on_hand import reference_composition as _reference_composition
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.category_policies.base import (
     ControlledLevel,
     contains_any as _contains_any,
     contains_unnegated_any as _contains_unnegated_any,
-    is_role_appropriate_priority_strategy,
     parse_confidence_level,
 )
 from jewelry_on_hand.models import ProductAnalysis, ReferenceRow, ScoredReference
-from jewelry_on_hand.output_roles import OutputRole, require_scene_replacement_role
+from jewelry_on_hand.output_roles import OutputRole, normalize_output_role
+from jewelry_on_hand.product_analysis import (
+    validate_analysis_ready_for_reference_selection,
+)
 from jewelry_on_hand.product_types import ProductType
 
 
@@ -32,356 +31,135 @@ CLOSE_UP_POINTS = 8
 NON_PRIORITY_POINTS = -30
 STILL_OBJECT_EARRING_PURPOSE_POINTS = -50
 CROP_RISK_POINTS = -15
-DIVERSITY_SCORE_WINDOW = 10
-DEFAULT_AUDIT_SEED = "reference-replacement-v1"
+DIVERSITY_SCORE_WINDOW = 40
+SAME_SHOOT_GROUP_PENALTY = 35
+SAME_STYLE_CLUSTER_PENALTY = 25
+SAME_SCENE_CLUSTER_PENALTY = 12
+SAME_POSE_CLUSTER_PENALTY = 12
+BATCH_SAME_FILE_PENALTY = 1000
+BATCH_SAME_SHOOT_GROUP_PENALTY = 45
+BATCH_SAME_STYLE_CLUSTER_PENALTY = 10
+SAME_FRAMING_PENALTY = 10
+SAME_COLLAR_PENALTY = 8
+SAME_HAIR_POSITION_PENALTY = 8
+SAME_BODY_ORIENTATION_PENALTY = 10
+SAME_HOLDING_METHOD_PENALTY = 10
 DARK_BACKGROUND_TEXT_TERMS = (
     "深色背景",
     "黑色背景",
     "暗色背景",
     "低调暗色背景",
-    "暗黑背景",
     "黑背景",
     "深色布景",
-    "深色布面",
     "黑色布景",
     "黑色托盘",
     "黑色石材",
     "黑色岩石",
     "黑色石板",
     "黑色底座",
-    "深色沥青",
-    "深色路面",
-    "黑色路面",
     "黑绒",
     "黑色绒布",
 )
+USER_APPROVED_DARK_HERO_REFERENCE_IDS = frozenset({"RP000137", "RP000144"})
 USER_APPROVED_DARK_LIFESTYLE_REFERENCE_IDS = frozenset({"RP000298"})
-
-
-@dataclass(frozen=True)
-class ReferenceReadinessExclusion:
-    row_index: int
-    file_name: str
-    field_name: str
-    reason: str
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "row_index": self.row_index,
-            "file_name": self.file_name,
-            "field_name": self.field_name,
-            "reason": self.reason,
-        }
-
-
-@dataclass(frozen=True)
-class ReferenceSelectionResult:
-    output_role: OutputRole
-    source_count: int
-    existing_count: int
-    role_count: int
-    category_eligible_count: int
-    selected: tuple[ScoredReference, ...]
-    candidates: tuple[ScoredReference, ...]
-    readiness_exclusions: tuple[ReferenceReadinessExclusion, ...]
-
-    def readiness_audit(self) -> dict[str, object]:
-        return {
-            "output_role": self.output_role.value,
-            "source_count": self.source_count,
-            "existing_count": self.existing_count,
-            "role_count": self.role_count,
-            "category_eligible_count": self.category_eligible_count,
-            "eligible_count": len(self.candidates),
-            "selected_count": len(self.selected),
-            "exclusions": [
-                exclusion.to_dict() for exclusion in self.readiness_exclusions
-            ],
-        }
+OUTPUT_ROLE_IMAGE_TYPE_MARKERS = {
+    OutputRole.HERO: "主图",
+    OutputRole.HAND_WORN: "手部佩戴图",
+    OutputRole.LIFESTYLE: "生活场景图",
+}
 
 
 def select_top_references(
     product: ProductAnalysis,
     rows: Iterable[ReferenceRow],
-    output_role: OutputRole | str,
-    *,
-    signature_usage: Mapping[str, int] | None = None,
-    audit_seed: str = DEFAULT_AUDIT_SEED,
+    output_role: OutputRole | str | None = None,
 ) -> tuple[list[ScoredReference], list[ScoredReference]]:
-    result = select_reference_candidates(
+    validate_analysis_ready_for_reference_selection(product)
+    existing_rows = [row for row in rows if row.file_exists]
+    role = normalize_output_role(output_role)
+    filtered_rows = _filter_reference_rows(
         product,
-        rows,
-        output_role,
-        signature_usage=signature_usage,
-        audit_seed=audit_seed,
+        existing_rows,
+        output_role=role,
     )
-    if (
-        product.confirmed_product_type is ProductType.RING
-        and len(result.candidates) < 3
-    ):
-        exclusion_text = _readiness_exclusion_summary(
-            result.readiness_exclusions
-        )
+    if role is not None:
+        filtered_rows = _filter_output_role_rows(filtered_rows, product, role)
+        if not filtered_rows:
+            raise ValueError(f"{role.display_name}没有符合深色背景与构图用途的参考图")
+    if product.confirmed_product_type is ProductType.RING and len(filtered_rows) < 3:
         raise ValueError(
             "戒指参考图至少 3 张合格候选，"
-            f"当前 {len(result.candidates)} 张"
-            f"（存在文件 {result.existing_count} 张）"
-            f"{exclusion_text}"
+            f"当前 {len(filtered_rows)} 张（存在文件 {len(existing_rows)} 张）"
         )
-    return list(result.selected), list(result.candidates)
-
-
-def select_reference_candidates(
-    product: ProductAnalysis,
-    rows: Iterable[ReferenceRow],
-    output_role: OutputRole | str,
-    *,
-    signature_usage: Mapping[str, int] | None = None,
-    audit_seed: str = DEFAULT_AUDIT_SEED,
-) -> ReferenceSelectionResult:
-    role = require_scene_replacement_role(output_role, stage="参考图选择")
-    source_rows = list(rows)
-    existing_rows = [row for row in source_rows if row.file_exists]
-    role_rows = [
-        row for row in existing_rows if row.purpose_category.strip() == role.display_name
-    ]
-    if not role_rows:
-        raise ValueError(f"没有飞书用途分类为{role.display_name}的参考图")
-    dark_role_rows = [row for row in role_rows if _has_dark_background_signal(row)]
-    if not dark_role_rows:
-        raise ValueError(f"{role.display_name}没有符合深色背景要求的参考图")
-    filtered_rows = _filter_reference_rows(product, dark_role_rows)
-    ready_rows: list[ReferenceRow] = []
-    readiness_exclusions: list[ReferenceReadinessExclusion] = []
-    for row in filtered_rows:
-        readiness = _reference_composition.assess_candidate_snapshot_readiness(
-            product,
-            row,
-            role,
-        )
-        if readiness.ready:
-            ready_rows.append(row)
-            continue
-        readiness_exclusions.append(
-            ReferenceReadinessExclusion(
-                row_index=row.index,
-                file_name=row.file_name,
-                field_name=readiness.field_name or "unknown",
-                reason=readiness.reason or "无法确认快照完整性",
-            )
-        )
-    scored = [score_reference(product, row) for row in ready_rows]
+    scored = [score_reference(product, row) for row in filtered_rows]
     ordered = sorted(scored, key=lambda item: (-item.score, item.row.index))
     candidates = _rerank(ordered)
-    selected = select_diverse_eligible_references(
-        candidates,
-        role,
-        signature_usage=signature_usage,
-        audit_seed=audit_seed,
-    )
-    return ReferenceSelectionResult(
-        output_role=role,
-        source_count=len(source_rows),
-        existing_count=len(existing_rows),
-        role_count=len(role_rows),
-        category_eligible_count=len(filtered_rows),
-        selected=tuple(selected),
-        candidates=tuple(candidates),
-        readiness_exclusions=tuple(readiness_exclusions),
-    )
+    selected = _select_diverse_top_references(candidates, limit=3)
+    return selected, candidates
 
 
-def require_three_review_candidates(result: ReferenceSelectionResult) -> None:
-    if len(result.selected) == 3:
-        return
-    details = [
-        f"{result.output_role.display_name}可审核候选不足 3 张",
-        f"合格候选 {len(result.selected)} 张",
-        f"快照完整且通过硬门 {len(result.candidates)} 张",
-    ]
-    if len(result.selected) < len(result.candidates):
-        details.append(f"十分质量窗口内 {len(result.selected)} 张")
-    summary = _readiness_exclusion_summary(result.readiness_exclusions)
-    if summary:
-        details.append(summary.lstrip("；"))
-    raise ValueError("：".join((details[0], "；".join(details[1:]))))
+def _filter_output_role_rows(
+    rows: Iterable[ReferenceRow],
+    _product: ProductAnalysis,
+    output_role: OutputRole,
+) -> list[ReferenceRow]:
+    dark_rows = [row for row in rows if _has_dark_background_signal(row)]
+    marker = OUTPUT_ROLE_IMAGE_TYPE_MARKERS[output_role]
+    return [row for row in dark_rows if marker in row.purpose_category]
 
 
-def _readiness_exclusion_summary(
-    exclusions: Sequence[ReferenceReadinessExclusion],
-) -> str:
-    if not exclusions:
-        return ""
-    counts = Counter(exclusion.field_name for exclusion in exclusions)
-    fields = "、".join(
-        f"{field_name} {count} 张"
-        for field_name, count in sorted(counts.items())
-    )
-    return f"；快照完整性排除 {len(exclusions)} 张（{fields}）"
-
-
-def composition_signature_for_row(
-    row: ReferenceRow, output_role: OutputRole | str
-) -> str:
-    role = require_scene_replacement_role(output_role, stage="构图签名")
-    background_markers = (
-        "背景",
-        "布景",
-        "布面",
-        "路面",
-        "托盘",
-        "石材",
-        "岩石",
-        "石板",
-        "底座",
-        "绒布",
-    )
-    visible_body_regions = _signature_review_values(row.visible_body_regions)
-    pose = _reference_composition.ReferencePose(
-        body=_signature_pose_segment(
-            row.pose_keywords,
-            ("身体", "躯干", "上半身", "全身", "半身", "未入镜"),
-        ),
-        arm=_signature_pose_segment(
-            row.pose_keywords,
-            ("手臂", "前臂", "臂", "胳膊"),
-        ),
-        hand=_signature_value(row.hand_orientation),
-        hand_side=_signature_value(row.hand_side),
-    )
-    source_jewelry = _signature_value(row.existing_jewelry)
-    replacement_target = _reference_composition.ReplacementTarget(
-        body_region=_reference_composition._replacement_body_region(
-            pose.hand_side,
-            visible_body_regions,
-            _reference_composition._unique_target_selector(source_jewelry),
-        ),
-        source_jewelry=source_jewelry,
-        target_product_count=1,
-    )
-    return _reference_composition._composition_signature(
-        output_role=role,
-        framing=_signature_value(row.framing),
-        pose=pose,
-        background=_reference_composition._required_review_value(
-            _reference_composition._join_unique_review_values(
-                *_reference_composition._extract_matching_review_segments(
-                    row.scene_keywords,
-                    background_markers,
-                ),
-                *_reference_composition._extract_matching_review_segments(
-                    row.notes,
-                    background_markers,
-                ),
-            ),
-            "background",
-        ),
-        lighting=_reference_composition._join_review_values(
-            _signature_value(row.style_category),
-            *_reference_composition._extract_matching_review_segments(
-                row.notes,
-                (
-                    "光线",
-                    "光影",
-                    "自然光",
-                    "侧光",
-                    "逆光",
-                    "柔光",
-                    "闪光",
-                    "照明",
-                    "曝光",
-                    "阴影",
-                ),
-            ),
-        ),
-        replacement_target=replacement_target,
+def _has_dark_background_signal(row: ReferenceRow) -> bool:
+    return _contains_any(row.combined_text(), DARK_BACKGROUND_TEXT_TERMS) or (
+        _is_user_approved_dark_reference(row)
     )
 
 
-def _signature_value(value: str) -> str:
-    return value.strip() or "未标注"
-
-
-def _signature_review_values(value: str) -> tuple[str, ...]:
-    if not value.strip():
-        return ("未标注",)
-    return _reference_composition._split_review_values(
-        value,
-        "visible_body_regions",
+def _is_user_approved_dark_reference(row: ReferenceRow) -> bool:
+    """人工视觉批准仅针对对应角色的明确编号，不把“背景干净”泛化为深色。"""
+    approved_reference_ids = (
+        USER_APPROVED_DARK_HERO_REFERENCE_IDS
+        if "主图" in row.purpose_category
+        else USER_APPROVED_DARK_LIFESTYLE_REFERENCE_IDS
+        if "生活场景图" in row.purpose_category
+        else frozenset()
     )
-
-
-def _signature_pose_segment(value: str, markers: Sequence[str]) -> str:
-    if not value.strip():
-        return "未标注"
-    try:
-        return _reference_composition._extract_review_segment(
-            value,
-            markers,
-            "构图签名姿势",
-        )
-    except ValueError:
-        return "未标注"
-
-
-def _audit_tie_break(seed: str, signature: str, file_name: str) -> str:
-    payload = f"{seed}\0{signature}\0{file_name}".encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
-def select_diverse_eligible_references(
-    candidates: Sequence[ScoredReference],
-    output_role: OutputRole | str,
-    *,
-    signature_usage: Mapping[str, int] | None = None,
-    audit_seed: str = DEFAULT_AUDIT_SEED,
-    limit: int = 3,
-) -> list[ScoredReference]:
-    role = require_scene_replacement_role(output_role, stage="低重复参考图选择")
-    if not candidates or limit <= 0:
-        return []
-    usage = signature_usage or {}
-    floor = max(item.score for item in candidates) - DIVERSITY_SCORE_WINDOW
-    pool = [item for item in candidates if item.score >= floor]
-
-    def ordering_key(item: ScoredReference) -> tuple[int, int, str]:
-        signature = composition_signature_for_row(item.row, role)
-        return (
-            usage.get(signature, 0),
-            -item.score,
-            _audit_tie_break(audit_seed, signature, item.row.file_name),
-        )
-
-    return _rerank(sorted(pool, key=ordering_key)[: min(limit, 3)])
+    return any(
+        f"素材编号：{reference_id}" in row.notes
+        for reference_id in approved_reference_ids
+    )
 
 
 def select_batch_diverse_references(
-    candidate_sets: Sequence[Sequence[ScoredReference]],
-    output_roles: Sequence[OutputRole | str],
-    *,
+    candidate_sets: Iterable[Sequence[ScoredReference]],
     limit: int = 3,
-    initial_signature_usage: Mapping[str, int] | None = None,
-    audit_seed: str = DEFAULT_AUDIT_SEED,
+    initial_usage: dict[str, dict[str, int]] | None = None,
 ) -> list[list[ScoredReference]]:
-    if len(candidate_sets) != len(output_roles):
-        raise ValueError("候选集合与输出角色数量必须一致")
-    usage = dict(initial_signature_usage or {})
+    batch_usage = _copy_batch_usage(initial_usage)
     selections: list[list[ScoredReference]] = []
-    for index, (candidates, role) in enumerate(
-        zip(candidate_sets, output_roles, strict=True)
-    ):
-        selected = select_diverse_eligible_references(
+    for candidates in candidate_sets:
+        selected = _select_diverse_top_references(
             candidates,
-            role,
-            signature_usage=usage,
-            audit_seed=f"{audit_seed}:{index}",
             limit=limit,
+            batch_usage=batch_usage,
         )
         selections.append(selected)
-        for item in selected:
-            signature = composition_signature_for_row(item.row, role)
-            usage[signature] = usage.get(signature, 0) + 1
+        _record_batch_usage(batch_usage, selected)
     return selections
+
+
+def _copy_batch_usage(
+    initial_usage: dict[str, dict[str, int]] | None = None,
+) -> dict[str, dict[str, int]]:
+    batch_usage: dict[str, dict[str, int]] = {
+        "file": {},
+        "shoot_group": {},
+        "style_cluster": {},
+    }
+    if not initial_usage:
+        return batch_usage
+    for key in batch_usage:
+        batch_usage[key].update(initial_usage.get(key, {}))
+    return batch_usage
 
 
 def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredReference:
@@ -401,12 +179,9 @@ def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredRefere
         score += WEARING_DISPLAY_POINTS
         reason.append("适合佩戴展示")
 
-    if is_role_appropriate_priority_strategy(row):
+    if _is_priority_strategy(row.default_strategy):
         score += PRIORITY_STRATEGY_POINTS
-        if _is_lifestyle_non_wrist_strategy(row):
-            reason.append("生活场景角色匹配非手腕构图策略")
-        else:
-            reason.append("默认策略为优先使用")
+        reason.append("默认策略为优先使用")
 
     if parse_confidence_level(row.confidence) is ControlledLevel.HIGH:
         score += HIGH_CONFIDENCE_POINTS
@@ -443,9 +218,7 @@ def score_reference(product: ProductAnalysis, row: ReferenceRow) -> ScoredRefere
         score += CLOSE_UP_POINTS
         reason.append("近景构图匹配")
 
-    if _is_non_priority(
-        row.default_strategy
-    ) and not _is_lifestyle_non_wrist_strategy(row):
+    if _is_non_priority(row.default_strategy):
         score += NON_PRIORITY_POINTS
         risk.append("默认策略提示不优先使用")
 
@@ -480,6 +253,255 @@ def _rerank(items: Sequence[ScoredReference]) -> list[ScoredReference]:
     ]
 
 
+def _select_diverse_top_references(
+    candidates: Sequence[ScoredReference],
+    limit: int,
+    batch_usage: dict[str, dict[str, int]] | None = None,
+) -> list[ScoredReference]:
+    if len(candidates) <= limit:
+        return list(candidates)
+
+    max_score = candidates[0].score
+    quality_floor = max_score - DIVERSITY_SCORE_WINDOW
+    quality_pool = [item for item in candidates if item.score >= quality_floor] or list(candidates)
+    safe_quality_pool = [
+        item
+        for item in quality_pool
+        if not item.risk and not item.ignored_reference_jewelry
+    ]
+    # Single-run review keeps the safer pool first. Batch reranking instead
+    # balances reuse across all eligible candidates once files are overused.
+    if safe_quality_pool and batch_usage is None:
+        quality_pool = safe_quality_pool
+    quality_pool = _prefer_unused_files(quality_pool, candidates, batch_usage)
+    first_item = max(
+        quality_pool,
+        key=lambda item: (
+            _batch_adjusted_score(item, batch_usage),
+            item.score,
+            -item.row.index,
+        ),
+    )
+    selected: list[ScoredReference] = [first_item]
+    remaining = [item for item in candidates if item is not first_item]
+
+    while remaining and len(selected) < limit:
+        eligible = [item for item in remaining if item.score >= quality_floor] or remaining
+        eligible = _prefer_unused_files(eligible, remaining, batch_usage)
+        next_item = max(
+            eligible,
+            key=lambda item: (
+                _diversity_adjusted_score(item, selected, batch_usage),
+                item.score,
+                -item.row.index,
+            ),
+        )
+        selected.append(next_item)
+        remaining.remove(next_item)
+
+    return _rerank(selected)
+
+
+def _prefer_unused_files(
+    primary_pool: Sequence[ScoredReference],
+    fallback_pool: Sequence[ScoredReference],
+    batch_usage: dict[str, dict[str, int]] | None,
+) -> Sequence[ScoredReference]:
+    if not batch_usage:
+        return primary_pool
+    unused_in_primary = [
+        item for item in primary_pool if batch_usage["file"].get(item.row.file_name, 0) == 0
+    ]
+    if unused_in_primary:
+        return unused_in_primary
+    unused_in_fallback = [
+        item for item in fallback_pool if batch_usage["file"].get(item.row.file_name, 0) == 0
+    ]
+    return unused_in_fallback or primary_pool
+
+
+def _diversity_adjusted_score(
+    item: ScoredReference,
+    selected: Sequence[ScoredReference],
+    batch_usage: dict[str, dict[str, int]] | None = None,
+) -> int:
+    penalty = 0
+    item_profile = _diversity_profile(item.row)
+    for selected_item in selected:
+        selected_profile = _diversity_profile(selected_item.row)
+        if item_profile["shoot_group"] == selected_profile["shoot_group"]:
+            penalty += SAME_SHOOT_GROUP_PENALTY
+        if item_profile["style_cluster"] == selected_profile["style_cluster"]:
+            penalty += SAME_STYLE_CLUSTER_PENALTY
+        if item_profile["scene_cluster"] == selected_profile["scene_cluster"]:
+            penalty += SAME_SCENE_CLUSTER_PENALTY
+        if item_profile["pose_cluster"] == selected_profile["pose_cluster"]:
+            penalty += SAME_POSE_CLUSTER_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "framing"):
+            penalty += SAME_FRAMING_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "collar"):
+            penalty += SAME_COLLAR_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "hair_position"):
+            penalty += SAME_HAIR_POSITION_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "body_orientation"):
+            penalty += SAME_BODY_ORIENTATION_PENALTY
+        if _same_labeled_profile(item_profile, selected_profile, "holding_method"):
+            penalty += SAME_HOLDING_METHOD_PENALTY
+    return item.score - penalty - _batch_penalty(item_profile, item.row.file_name, batch_usage)
+
+
+def _batch_adjusted_score(
+    item: ScoredReference,
+    batch_usage: dict[str, dict[str, int]] | None,
+) -> int:
+    profile = _diversity_profile(item.row)
+    return item.score - _batch_penalty(profile, item.row.file_name, batch_usage)
+
+
+def _batch_penalty(
+    profile: dict[str, str],
+    file_name: str,
+    batch_usage: dict[str, dict[str, int]] | None,
+) -> int:
+    if not batch_usage:
+        return 0
+    return (
+        batch_usage["file"].get(file_name, 0) * BATCH_SAME_FILE_PENALTY
+        + batch_usage["shoot_group"].get(profile["shoot_group"], 0)
+        * BATCH_SAME_SHOOT_GROUP_PENALTY
+        + batch_usage["style_cluster"].get(profile["style_cluster"], 0)
+        * BATCH_SAME_STYLE_CLUSTER_PENALTY
+    )
+
+
+def _record_batch_usage(
+    batch_usage: dict[str, dict[str, int]], selected: Sequence[ScoredReference]
+) -> None:
+    for item in selected:
+        profile = _diversity_profile(item.row)
+        _increment(batch_usage["file"], item.row.file_name)
+        _increment(batch_usage["shoot_group"], profile["shoot_group"])
+        _increment(batch_usage["style_cluster"], profile["style_cluster"])
+
+
+def _increment(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _diversity_profile(row: ReferenceRow) -> dict[str, str]:
+    return {
+        "style_cluster": _style_cluster(row),
+        "scene_cluster": _scene_cluster(row),
+        "pose_cluster": _pose_cluster(row),
+        "shoot_group": _shoot_group(row.file_name),
+        "framing": row.framing.strip() or "未标注",
+        "collar": row.collar_type.strip() or "未标注",
+        "hair_position": _hair_position_cluster(row),
+        "body_orientation": _body_orientation_cluster(row),
+        "holding_method": _holding_method_cluster(row),
+    }
+
+
+def _same_labeled_profile(
+    first: dict[str, str], second: dict[str, str], key: str
+) -> bool:
+    return first[key] != "未标注" and first[key] == second[key]
+
+
+def _hair_position_cluster(row: ReferenceRow) -> str:
+    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
+    for label, terms in (
+        ("左侧", ("头发左侧", "左侧头发", "头发向左")),
+        ("右侧", ("头发右侧", "右侧头发", "头发向右")),
+        ("后置", ("头发后置", "头发在后", "盘发", "扎发")),
+        ("双侧披发", ("披发", "散发", "头发披肩")),
+    ):
+        if _contains_any(text, terms):
+            return label
+    return "未标注"
+
+
+def _body_orientation_cluster(row: ReferenceRow) -> str:
+    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
+    for label, terms in (
+        ("左侧身", ("左侧身", "身体向左", "左转身")),
+        ("右侧身", ("右侧身", "身体向右", "右转身")),
+        ("侧身", ("侧身", "侧面")),
+        ("背身", ("背身", "背面")),
+        ("正面", ("正面", "面向镜头", "身体朝前")),
+    ):
+        if _contains_any(text, terms):
+            return label
+    return "未标注"
+
+
+def _holding_method_cluster(row: ReferenceRow) -> str:
+    text = f"{row.pose_keywords} {row.notes} {row.recommended_usage}"
+    for label, terms in (
+        ("双手", ("双手持", "双手展示", "双手悬挂")),
+        ("捏持", ("捏持", "指尖夹持", "两指夹持")),
+        ("掌托", ("掌心托住", "手掌托住", "托在掌心")),
+        ("握持", ("握持", "虎口持", "虎口握")),
+        ("悬挂", ("悬挂", "提起链条")),
+    ):
+        if _contains_any(text, terms):
+            return label
+    return "未标注"
+
+
+def _style_cluster(row: ReferenceRow) -> str:
+    style = row.style_category.strip()
+    if style:
+        return style
+    return _keyword_cluster(row.combined_text())
+
+
+def _scene_cluster(row: ReferenceRow) -> str:
+    return _keyword_cluster(f"{row.scene_keywords} {row.notes} {row.recommended_usage}")
+
+
+def _pose_cluster(row: ReferenceRow) -> str:
+    text = f"{row.purpose_category} {row.recommended_usage} {row.notes} {row.pose_keywords}"
+    if _contains_any(text, ("对镜", "镜子", "镜面", "镜中")):
+        return "对镜"
+    if _contains_any(text, ("双手", "交叠")):
+        return "双手"
+    if _contains_any(text, ("掌心", "手掌", "托物")):
+        return "掌心/托物"
+    if _contains_any(text, ("手背", "指背")):
+        return "手背"
+    if _contains_any(text, ("前臂", "手臂")):
+        return "前臂"
+    if _contains_any(text, ("近景", "特写", "close-up", "特近")):
+        return "近景"
+    return "其他姿势"
+
+
+def _keyword_cluster(text: str) -> str:
+    if _contains_any(text, ("对镜", "镜子", "镜面", "镜中", "mirror")):
+        return "对镜"
+    if _contains_any(text, ("车内", "车里", "驾驶")):
+        return "车内"
+    if _contains_any(text, ("户外", "阳光", "室外")):
+        return "户外"
+    if _contains_any(text, ("白衬衫", "白衣", "奶油", "浅色")):
+        return "清透白衣"
+    if _contains_any(text, ("暗调", "暗光", "黑衣", "黑底", "闪光")):
+        return "暗调"
+    if _contains_any(text, ("床", "床品", "被子", "布料")):
+        return "床品"
+    return "其他场景"
+
+
+def _shoot_group(file_name: str) -> str:
+    stem = re.sub(r"\.[^.]+$", "", file_name.strip())
+    grouped = re.sub(r"\s*[（(]\d+[）)]\s*$", "", stem)
+    if grouped != stem:
+        return grouped
+    grouped = re.sub(r"[-_]\d+$", "", stem)
+    return grouped or stem
+
+
 def _make_scored(
     row: ReferenceRow,
     score: int,
@@ -499,11 +521,46 @@ def _make_scored(
 
 
 def _filter_reference_rows(
-    product: ProductAnalysis, rows: Sequence[ReferenceRow]
+    product: ProductAnalysis,
+    rows: Sequence[ReferenceRow],
+    output_role: OutputRole | None = None,
 ) -> list[ReferenceRow]:
+    if output_role is not None:
+        marker = OUTPUT_ROLE_IMAGE_TYPE_MARKERS[output_role]
+        rows = [row for row in rows if marker in row.purpose_category]
+    if output_role is OutputRole.HERO:
+        return [
+            row
+            for row in rows
+            if _has_dark_background_signal(row)
+        ]
     policy = get_category_policy(product.confirmed_product_type)
     evaluated = [(row, policy.evaluate_reference(product, row)) for row in rows]
-    return [row for row, adaptation in evaluated if adaptation.eligible]
+    primary = [
+        (row, adaptation)
+        for row, adaptation in evaluated
+        if adaptation.eligible and not adaptation.diversity_candidate
+    ]
+    if primary:
+        best_tier = min(adaptation.selection_tier for _, adaptation in primary)
+        primary_rows = [
+            row for row, adaptation in primary if adaptation.selection_tier == best_tier
+        ]
+    else:
+        primary_rows = []
+    diversity_rows = [
+        row
+        for row, adaptation in evaluated
+        if adaptation.eligible and adaptation.diversity_candidate
+    ]
+    if not primary_rows:
+        return diversity_rows
+
+    primary_indexes = {row.index for row in primary_rows}
+    return [
+        *primary_rows,
+        *(row for row in diversity_rows if row.index not in primary_indexes),
+    ]
 
 
 def _product_text(product: ProductAnalysis) -> str:
@@ -534,27 +591,6 @@ def _has_wearing_display_signal(row: ReferenceRow) -> bool:
 
 def _is_priority_strategy(text: str) -> bool:
     return _contains_any(text, ("优先使用", "可优先", "优先")) and not _is_non_priority(text)
-
-
-def _is_lifestyle_non_wrist_strategy(row: ReferenceRow) -> bool:
-    return (
-        row.purpose_category.strip() == OutputRole.LIFESTYLE.display_name
-        and _contains_any(
-            row.default_strategy,
-            ("非手腕构图，默认不优先", "非手腕构图"),
-        )
-    )
-
-
-def _has_dark_background_signal(row: ReferenceRow) -> bool:
-    if _contains_any(row.combined_text(), DARK_BACKGROUND_TEXT_TERMS):
-        return True
-    if row.purpose_category.strip() != OutputRole.LIFESTYLE.display_name:
-        return False
-    return any(
-        f"素材编号：{reference_id}" in row.notes
-        for reference_id in USER_APPROVED_DARK_LIFESTYLE_REFERENCE_IDS
-    )
 
 
 def _is_non_priority(text: str) -> bool:

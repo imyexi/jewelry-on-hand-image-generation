@@ -5,6 +5,8 @@ import json
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from dataclasses import fields, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -138,18 +140,9 @@ def build_product_fidelity_constraints(
         "product_image": product_image,
         "product_analysis": product_analysis,
         "product_analysis_sha256": product_analysis_sha256(product),
-        "product_type": product.normalized_product_type.value,
     }
     if product_id:
         source["product_id"] = product_id
-    constraints = _build_product_fidelity_constraints_unvalidated(product, source)
-    return validate_product_fidelity_constraints(product, constraints)
-
-
-def _build_product_fidelity_constraints_unvalidated(
-    product: ProductAnalysis,
-    source: dict[str, Any],
-) -> ProductFidelityConstraints:
     if product.normalized_product_type is ProductType.RING:
         return _build_ring_fidelity_constraints(product, source)
     if product.normalized_product_type in {
@@ -182,7 +175,7 @@ def _build_product_fidelity_constraints_unvalidated(
         )
 
     review_status = "pending" if must_keep else "not_applicable"
-    return ProductFidelityConstraints(
+    constraints = ProductFidelityConstraints(
         schema_version=1,
         source=source,
         detected_keywords=tuple(detected_keywords),
@@ -192,6 +185,7 @@ def _build_product_fidelity_constraints_unvalidated(
         detail_crop_recommended=bool(must_keep),
         review_status=review_status,  # type: ignore[arg-type]
     )
+    return validate_product_fidelity_constraints(product, constraints)
 
 
 def _build_necklace_v2_fidelity_constraints(
@@ -210,31 +204,17 @@ def _build_necklace_v2_fidelity_constraints(
         count=1 if has_structured_pendant else 0,
         layer=product.pendant_layer if has_structured_pendant else None,
         creation_policy="forbid",
-        position=product.pendant_position if has_structured_pendant else None,
-        orientation=(
-            product.pendant_orientation if has_structured_pendant else None
-        ),
-        connection=(
-            product.connection_structure if has_structured_pendant else None
-        ),
     )
     must_keep, detected_keywords = _extract_non_pendant_necklace_items(product)
     if has_structured_pendant:
         assert product.pendant_layer is not None
-        assert semantics.position is not None
-        assert semantics.orientation is not None
-        assert semantics.connection is not None
         must_keep.append(
             MustKeepConstraint(
                 name="主吊坠可见结构",
                 source_text=product.visible_appearance,
                 normalized_keyword="吊坠",
                 location=product.pendant_position or "产品图中肉眼可见位置",
-                visual_shape=(
-                    f"位置：{semantics.position}；"
-                    f"朝向：{semantics.orientation}；"
-                    f"连接：{semantics.connection}"
-                ),
+                visual_shape=product.visible_appearance,
                 relationship=(
                     f"保持第 {product.pendant_layer} 层、原朝向和肉眼可见连接关系："
                     f"{product.connection_structure or '只按产品图可见连接'}"
@@ -248,7 +228,7 @@ def _build_necklace_v2_fidelity_constraints(
         )
         detected_keywords.append("吊坠")
 
-    return ProductFidelityConstraints(
+    constraints = ProductFidelityConstraints(
         schema_version=2,
         source=source,
         detected_keywords=tuple(detected_keywords),
@@ -259,6 +239,7 @@ def _build_necklace_v2_fidelity_constraints(
         review_status="pending" if must_keep else "not_applicable",
         pendant_semantics=semantics,
     )
+    return validate_product_fidelity_constraints(product, constraints)
 
 
 def _contains_pendant_term(text: str) -> bool:
@@ -384,7 +365,7 @@ def _build_ring_fidelity_constraints(
         for detail in product.uncertain_details
     )
 
-    return ProductFidelityConstraints(
+    constraints = ProductFidelityConstraints(
         schema_version=1,
         source=source,
         detected_keywords=(),
@@ -394,6 +375,7 @@ def _build_ring_fidelity_constraints(
         detail_crop_recommended=True,
         review_status="pending",
     )
+    return validate_product_fidelity_constraints(product, constraints)
 
 
 def validate_product_fidelity_constraints(
@@ -405,37 +387,21 @@ def validate_product_fidelity_constraints(
         raise ValueError("product 必须是 ProductAnalysis")
     if not isinstance(constraints, ProductFidelityConstraints):
         raise ValueError("constraints 必须是 ProductFidelityConstraints")
-    _validate_constraint_runtime_types(constraints)
-    product_analysis_path = constraints.source.get("product_analysis")
-    if type(product_analysis_path) is not str or not product_analysis_path.strip():
-        raise ValueError("产品保真约束 source.product_analysis 必须是非空字符串")
+    if constraints.source.get("product_analysis") != "analysis/product_analysis.json":
+        raise ValueError(
+            "产品保真约束 source.product_analysis 必须为 analysis/product_analysis.json"
+        )
     actual_digest = constraints.source.get("product_analysis_sha256")
     expected_digest = product_analysis_sha256(product)
-    if type(actual_digest) is not str or actual_digest != expected_digest:
+    if not isinstance(actual_digest, str) or actual_digest != expected_digest:
         raise ValueError(
             "产品保真约束 source.product_analysis_sha256 与最终 ProductAnalysis 不一致"
-        )
-    actual_product_type = constraints.source.get("product_type")
-    expected_product_type = product.normalized_product_type.value
-    if (
-        type(actual_product_type) is not str
-        or actual_product_type != expected_product_type
-    ):
-        raise ValueError(
-            "产品保真约束 source.product_type 与最终 ProductAnalysis 品类不一致"
         )
     if product.normalized_product_type in {
         ProductType.NECKLACE,
         ProductType.PENDANT_NECKLACE,
     }:
         _validate_v2_pendant_semantics(product, constraints)
-
-    expected = _build_product_fidelity_constraints_unvalidated(
-        product,
-        dict(constraints.source),
-    )
-    _validate_canonical_projection(constraints, expected)
-
     if product.normalized_product_type is not ProductType.RING:
         if product.normalized_product_type in {
             ProductType.NECKLACE,
@@ -548,130 +514,6 @@ def validate_product_fidelity_constraints(
     return constraints
 
 
-def _validate_constraint_runtime_types(
-    constraints: ProductFidelityConstraints,
-) -> None:
-    if type(constraints.schema_version) is not int:
-        raise ValueError("canonical schema_version 必须是整数")
-    if type(constraints.source) is not dict:
-        raise ValueError("canonical source 必须是对象")
-    for field_name in ("detected_keywords", "must_keep", "must_not_change"):
-        if type(getattr(constraints, field_name)) is not tuple:
-            raise ValueError(f"canonical {field_name} 必须是 tuple")
-    if any(type(item) is not str for item in constraints.detected_keywords):
-        raise ValueError("canonical detected_keywords 必须只含字符串")
-    if any(
-        not isinstance(item, MustKeepConstraint) for item in constraints.must_keep
-    ):
-        raise ValueError("canonical must_keep 必须只含 MustKeepConstraint")
-    if any(type(item) is not str for item in constraints.must_not_change):
-        raise ValueError("canonical must_not_change 必须只含字符串")
-    for field_name in ("needs_user_review", "detail_crop_recommended"):
-        if type(getattr(constraints, field_name)) is not bool:
-            raise ValueError(f"canonical {field_name} 必须是布尔值")
-    if type(constraints.review_status) is not str:
-        raise ValueError("canonical review_status 必须是字符串")
-    if constraints.review_status not in {
-        "pending",
-        "confirmed",
-        "corrected",
-        "not_applicable",
-    }:
-        raise ValueError(
-            "canonical review_status 必须是 pending/confirmed/corrected/not_applicable"
-        )
-    if constraints.schema_version == 1:
-        if constraints.pendant_semantics is not None:
-            raise ValueError("canonical v1 pendant_semantics 必须为空")
-    elif constraints.schema_version == 2:
-        if not isinstance(constraints.pendant_semantics, PendantSemantics):
-            raise ValueError("canonical v2 pendant_semantics 必须是 PendantSemantics")
-        _validate_pendant_semantics_runtime(constraints.pendant_semantics)
-
-
-def _validate_pendant_semantics_runtime(semantics: PendantSemantics) -> None:
-    if type(semantics.presence) is not str or semantics.presence not in {
-        "present",
-        "absent",
-    }:
-        raise ValueError(
-            "pendant_semantics.presence 必须是 present/absent 字符串"
-        )
-    if type(semantics.count) is not int or semantics.count not in {0, 1}:
-        raise ValueError("pendant_semantics.count 必须是整数 0 或 1")
-    if semantics.layer is not None and (
-        type(semantics.layer) is not int or not 1 <= semantics.layer <= 3
-    ):
-        raise ValueError("pendant_semantics.layer 必须是 null 或整数 1 至 3")
-    if type(semantics.creation_policy) is not str or (
-        semantics.creation_policy != "forbid"
-    ):
-        raise ValueError("pendant_semantics.creation_policy 必须是 forbid 字符串")
-
-    if semantics.presence == "absent":
-        if semantics.count != 0:
-            raise ValueError("presence=absent 时 pendant_semantics.count 必须为 0")
-        if semantics.layer is not None:
-            raise ValueError("presence=absent 时 pendant_semantics.layer 必须为 null")
-    else:
-        if semantics.count != 1:
-            raise ValueError("presence=present 时 pendant_semantics.count 必须为 1")
-        if semantics.layer is None:
-            raise ValueError(
-                "presence=present 时 pendant_semantics.layer 必须为整数 1 至 3"
-            )
-
-    for field_name in ("position", "orientation", "connection"):
-        value = getattr(semantics, field_name)
-        field_path = f"pendant_semantics.{field_name}"
-        if semantics.presence == "present":
-            if type(value) is not str or not value.strip() or value != value.strip():
-                raise ValueError(f"{field_path} 必须是无首尾空白的非空字符串")
-        elif value is not None:
-            raise ValueError(f"presence=absent 时 {field_path} 必须为 null")
-
-
-def _validate_canonical_projection(
-    constraints: ProductFidelityConstraints,
-    expected: ProductFidelityConstraints,
-) -> None:
-    for field_name in (
-        "schema_version",
-        "detected_keywords",
-        "must_keep",
-        "needs_user_review",
-        "detail_crop_recommended",
-        "pendant_semantics",
-    ):
-        if getattr(constraints, field_name) != getattr(expected, field_name):
-            raise ValueError(
-                f"产品保真约束 canonical.{field_name} 与最终 ProductAnalysis 不一致"
-            )
-
-    allowed_additions = (
-        ("禁止新增第二颗吊坠",)
-        if expected.pendant_semantics is not None
-        and expected.pendant_semantics.presence == "present"
-        else ()
-    )
-    if constraints.must_not_change not in {
-        expected.must_not_change,
-        (*expected.must_not_change, *allowed_additions),
-    }:
-        raise ValueError(
-            "产品保真约束 canonical.must_not_change 与最终 ProductAnalysis 不一致"
-        )
-
-    if expected.review_status == "not_applicable":
-        allowed_statuses = {"not_applicable"}
-    else:
-        allowed_statuses = {"pending", "confirmed", "corrected"}
-    if constraints.review_status not in allowed_statuses:
-        raise ValueError(
-            "产品保真约束 canonical.review_status 与 must_keep 确认边界不一致"
-        )
-
-
 def _validate_v2_pendant_semantics(
     product: ProductAnalysis,
     constraints: ProductFidelityConstraints,
@@ -693,39 +535,10 @@ def _validate_v2_pendant_semantics(
             f"canonical={constraints.pendant_semantics.to_dict()}；"
             "请新建 run 并重新执行 prepare-review"
         )
-    if constraints.pendant_semantics.presence == "absent":
-        for field_path, text in _iter_constraint_semantic_fields(constraints):
-            for term in ("吊坠", "主吊坠", "链坠", "流苏", "坠子"):
-                if term in text:
-                    raise ValueError(
-                        f"v2 无吊坠 canonical 的 {field_path} "
-                        f"不得包含敏感词：{term}"
-                    )
-    else:
-        for field_path, text in _iter_constraint_semantic_fields(constraints):
-            for phrase in _PRESENT_PENDANT_CONFLICT_PHRASES:
-                if phrase in text:
-                    raise ValueError(
-                        f"{field_path} 与 present canonical 冲突：{phrase}"
-                    )
-
     expected = (
-        PendantSemantics(
-            presence="present",
-            count=1,
-            layer=product.pendant_layer,
-            creation_policy="forbid",
-            position=product.pendant_position,
-            orientation=product.pendant_orientation,
-            connection=product.connection_structure,
-        )
+        PendantSemantics("present", 1, product.pendant_layer, "forbid")
         if product.normalized_product_type is ProductType.PENDANT_NECKLACE
-        else PendantSemantics(
-            presence="absent",
-            count=0,
-            layer=None,
-            creation_policy="forbid",
-        )
+        else PendantSemantics("absent", 0, None, "forbid")
     )
     if constraints.pendant_semantics != expected:
         raise ValueError(
@@ -736,8 +549,23 @@ def _validate_v2_pendant_semantics(
             f"canonical={constraints.pendant_semantics.to_dict()}；"
             "请新建 run 并重新执行 prepare-review"
         )
+
     if constraints.pendant_semantics.presence == "absent":
+        for field_path, text in _iter_constraint_semantic_fields(constraints):
+            for term in ("吊坠", "主吊坠", "链坠", "流苏", "坠子"):
+                if term in text:
+                    raise ValueError(
+                        f"v2 无吊坠 canonical 的 {field_path} "
+                        f"不得包含敏感词：{term}"
+                    )
         return
+
+    for field_path, text in _iter_constraint_semantic_fields(constraints):
+        for phrase in _PRESENT_PENDANT_CONFLICT_PHRASES:
+            if phrase in text:
+                raise ValueError(
+                    f"{field_path} 与 present canonical 冲突：{phrase}"
+                )
 
     pendant_items = [
         item
@@ -765,11 +593,6 @@ def _constraints_semantic_text(
 def _iter_constraint_semantic_fields(
     constraints: ProductFidelityConstraints,
 ) -> Iterator[tuple[str, str]]:
-    if constraints.pendant_semantics is not None:
-        for field_name in ("position", "orientation", "connection"):
-            text = getattr(constraints.pendant_semantics, field_name)
-            if type(text) is str and text:
-                yield f"pendant_semantics.{field_name}", text
     for index, keyword in enumerate(constraints.detected_keywords):
         yield f"detected_keywords[{index}]", keyword
     for index, text in enumerate(constraints.must_not_change):
@@ -790,16 +613,31 @@ def _iter_constraint_semantic_fields(
 def product_analysis_sha256(product: ProductAnalysis) -> str:
     if not isinstance(product, ProductAnalysis):
         raise ValueError("product 必须是 ProductAnalysis")
-    # 局部导入避免 product_analysis -> product_fidelity 的模块初始化环。
-    from jewelry_on_hand.product_analysis import product_analysis_to_dict
-
     payload = json.dumps(
-        product_analysis_to_dict(product),
+        _normalized_json_value(product),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _normalized_json_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if is_dataclass(value):
+        return {
+            item.name: _normalized_json_value(getattr(value, item.name))
+            for item in fields(value)
+        }
+    if isinstance(value, (tuple, list)):
+        return [_normalized_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _normalized_json_value(item)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _non_ring_must_not_change(product: ProductAnalysis) -> tuple[str, ...]:

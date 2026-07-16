@@ -72,6 +72,18 @@ class RunPaths:
         shutil.copy2(source_path, destination)
         return destination
 
+    def copy_product_detail_image(self, source: str | Path) -> Path:
+        source_path = Path(source)
+        if not source_path.is_file():
+            raise FileNotFoundError(source_path)
+        suffix = source_path.suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+            raise ValueError("产品细节图只支持 jpg/jpeg/png/webp")
+        destination = self.input_dir / f"product-detail{suffix}"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination)
+        return destination
+
 
 def _is_safe_run_id(run_id: str) -> bool:
     if not run_id:
