@@ -3,13 +3,31 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from jewelry_on_hand.models import ProductAnalysis, ScoredReference
-from jewelry_on_hand.output_roles import OutputRole, require_scene_replacement_role
+from jewelry_on_hand.models import (
+    ProductAnalysis,
+    ProductConfirmationSnapshot,
+    ProductFidelityConstraints,
+    ReviewDecision,
+    ScoredReference,
+)
+from jewelry_on_hand.output_roles import (
+    OutputRole,
+    normalize_output_role,
+    require_scene_replacement_role,
+)
+from jewelry_on_hand.product_analysis import (
+    validate_analysis_ready_for_reference_selection,
+)
+from jewelry_on_hand.product_fidelity import (
+    validate_product_fidelity_constraints,
+)
+from jewelry_on_hand.run_paths import RunPaths
 
 
 REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME = (
@@ -18,7 +36,114 @@ REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME = (
 REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME = "reference_composition_snapshot.json"
 
 TextOrUiRisk = Literal["none", "small_removable", "blocking"]
+ReferenceRunState = Literal["modern_snapshot", "legacy_read_only", "damaged"]
 _TEXT_OR_UI_RISKS = frozenset({"none", "small_removable", "blocking"})
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+_LEGACY_GENERATION_FILES = frozenset(
+    {"model.txt", "prompt.txt", "submit.json", "result.json", "result.png", "qc.json"}
+)
+_MODERN_GENERATION_MARKERS = frozenset(
+    {
+        "input-manifest.json",
+        "reference-composition-snapshot.json",
+        "product-analysis.json",
+        "product-fidelity-constraints.json",
+        "reference-rank.txt",
+        "qc-review.html",
+    }
+)
+_LEGACY_ALLOWED_CRITICAL_FAILURES = frozenset(
+    {
+        "must_keep_failed",
+        "category_mismatch",
+        "core_structure_missing",
+        "layer_count_mismatch",
+        "length_category_mismatch",
+        "pendant_layer_changed",
+        "multi_layer_restructured",
+        "auto_chain_added",
+        "source_person_region_migrated",
+        "severe_intersection",
+        "ring_count_mismatch",
+        "hand_side_mismatch",
+        "finger_position_mismatch",
+        "ring_structure_mismatch",
+        "centerpiece_mismatch",
+        "ring_contact_error",
+        "finger_deformation",
+        "source_hand_leakage",
+    }
+)
+_LEGACY_REJECT_CRITICAL_FAILURES = frozenset(
+    {
+        "category_mismatch",
+        "core_structure_missing",
+        "multi_layer_restructured",
+        "auto_chain_added",
+        "severe_intersection",
+        "ring_count_mismatch",
+        "finger_position_mismatch",
+        "ring_structure_mismatch",
+        "centerpiece_mismatch",
+        "source_hand_leakage",
+    }
+)
+_LEGACY_SOURCE_WRIST_TERMS = (
+    "原图手腕",
+    "源图手腕",
+    "source wrist",
+    "source-wrist",
+    "粗手腕",
+)
+_LEGACY_SOURCE_ARM_TERMS = (
+    "原图手臂",
+    "源图手臂",
+    "source-arm",
+    "source arm",
+    "局部手臂",
+)
+_LEGACY_SOURCE_SKIN_TERMS = ("皮肤块", "局部贴片", "肤色", "皮肤纹理")
+_LEGACY_SOURCE_PERSON_TERMS = (
+    "产品图中的人物",
+    "产品图人物局部",
+    "产品原图的人物",
+    "产品图中的颈部",
+    "产品图中的胸部",
+    "产品图中的衣服",
+    "产品图中的头发",
+    "产品图中的皮肤块",
+)
+_LEGACY_NEGATED_CHECK_TERMS = (
+    "没有检查",
+    "未检查",
+    "没检查",
+    "未做检查",
+    "没有做检查",
+    "未明确检查",
+)
+_LEGACY_PASS_CHECK_TERMS = (
+    "检查通过",
+    "迁移检查通过",
+    "来源一致性通过",
+    "未发现",
+    "未见",
+    "无迁移",
+    "没有迁移",
+    "未迁移",
+    "无源图手臂局部贴片",
+)
+_LEGACY_REJECT_FAILURE_TERMS = (
+    "品类错误",
+    "品类不一致",
+    "核心结构缺失",
+    "核心配件缺失",
+    "多层关系重组",
+    "层间关系重组",
+    "自动补链",
+    "凭空补链",
+    "严重穿模",
+    "严重穿透",
+)
 
 
 @dataclass(frozen=True)
@@ -35,7 +160,11 @@ class ReferencePose:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "ReferencePose":
         source = _require_mapping(data, "pose")
-        _require_fields(source, ("body", "arm", "hand", "hand_side"), "pose")
+        _require_exact_fields(
+            source,
+            ("body", "arm", "hand", "hand_side"),
+            "pose",
+        )
         return cls(
             body=source["body"],
             arm=source["arm"],
@@ -71,7 +200,7 @@ class ReplacementTarget:
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> "ReplacementTarget":
         source = _require_mapping(data, "replacement_target")
-        _require_fields(
+        _require_exact_fields(
             source,
             ("body_region", "source_jewelry", "target_product_count"),
             "replacement_target",
@@ -183,7 +312,7 @@ class ReferenceCompositionSnapshot:
             "product_visibility_sufficient",
             "composition_signature",
         )
-        _require_fields(source, fields, "参考构图快照")
+        _require_exact_fields(source, fields, "参考构图快照")
         return cls(
             rank=source["rank"],
             reference_file=source["reference_file"],
@@ -490,6 +619,845 @@ def reference_composition_sha256(
     return hashlib.sha256(payload).hexdigest()
 
 
+def classify_reference_run(paths: RunPaths) -> ReferenceRunState:
+    if not isinstance(paths, RunPaths):
+        raise ValueError("paths 必须是 RunPaths")
+    generation_dirs = _generation_directories(paths)
+    root_has_modern_marker = _root_has_modern_marker(paths)
+    generation_has_modern_marker = any(
+        _generation_has_modern_marker(directory)
+        for directory in generation_dirs
+    )
+    if root_has_modern_marker or generation_has_modern_marker:
+        snapshot = _load_complete_modern_root(paths)
+        if snapshot is None:
+            return "damaged"
+        if any(
+            not _is_complete_modern_generation(directory, paths, snapshot)
+            for directory in generation_dirs
+        ):
+            return "damaged"
+        return "modern_snapshot"
+    if not generation_dirs or not _is_complete_legacy_root(paths):
+        return "damaged"
+    if any(not _is_complete_legacy_generation(directory) for directory in generation_dirs):
+        return "damaged"
+    return "legacy_read_only"
+
+
+def require_modern_reference_run(
+    paths: RunPaths,
+) -> ReferenceCompositionSnapshot:
+    state = classify_reference_run(paths)
+    if state == "legacy_read_only":
+        raise ValueError("历史 run 只读，请重新执行 prepare-review")
+    if state == "damaged":
+        try:
+            _load_prepared_artifacts(paths)
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"run 产物不完整/损坏，请重新执行 prepare-review；{exc}"
+            ) from exc
+        raise ValueError("run 产物不完整/损坏，请重新执行 prepare-review")
+    try:
+        return load_reference_composition_snapshot(
+            paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "run 产物不完整/损坏，请重新执行 prepare-review"
+        ) from exc
+
+
+def require_reference_review_ready(paths: RunPaths) -> None:
+    """在任何 Review 写入前确认 run 为现代可写态。"""
+    state = classify_reference_run(paths)
+    if state == "modern_snapshot":
+        return
+    if state == "legacy_read_only":
+        raise ValueError("历史 run 只读，请重新执行 prepare-review")
+    candidates_path = paths.analysis_dir / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME
+    confirmed_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+    if candidates_path.is_file() and not confirmed_path.exists() and not _generation_directories(paths):
+        try:
+            prepared = _load_prepare_review_root(paths)
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            if "composition_signature" in str(exc):
+                raise ValueError(
+                    "候选参考构图快照不可直接编辑；"
+                    "请修订语义源并重新执行 prepare-review"
+                ) from exc
+            raise ValueError(
+                f"run 产物不完整/损坏，请重新执行 prepare-review；{exc}"
+            ) from exc
+        if prepared is not None:
+            return
+    raise ValueError("run 产物不完整/损坏，请重新执行 prepare-review")
+
+
+def _generation_directories(paths: RunPaths) -> list[Path]:
+    if not paths.generation_dir.is_dir():
+        return []
+    return sorted(
+        path
+        for path in paths.generation_dir.iterdir()
+        if path.is_dir()
+    )
+
+
+def _root_has_modern_marker(paths: RunPaths) -> bool:
+    if (
+        paths.analysis_dir / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME
+    ).exists() or (
+        paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+    ).exists():
+        return True
+    decision_path = paths.review_dir / "review_decision.json"
+    if not decision_path.is_file():
+        return False
+    try:
+        decision = _read_json_artifact(decision_path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(decision, Mapping) and "reference_snapshot_sha256" in decision
+
+
+def _generation_has_modern_marker(directory: Path) -> bool:
+    try:
+        names = {path.name for path in directory.iterdir() if path.is_file()}
+    except OSError:
+        return True
+    return bool(names.intersection(_MODERN_GENERATION_MARKERS)) or any(
+        name.startswith(("scene-reference.", "product-reference."))
+        for name in names
+    )
+
+
+def _load_prepare_review_root(
+    paths: RunPaths,
+) -> tuple[ProductAnalysis, list[ReferenceCompositionSnapshot]] | None:
+    """读取尚未固化人工决定的现代 prepare-review 根产物。"""
+    if _generation_directories(paths):
+        return None
+    confirmed_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+    if confirmed_path.exists():
+        return None
+    decision_path = paths.review_dir / "review_decision.json"
+    if decision_path.is_file():
+        decision_data = _read_json_artifact(decision_path)
+        decision = ReviewDecision.from_dict(decision_data)
+        if (
+            decision.action in {
+                "generate_rank_1",
+                "generate_selected",
+                "generate_multiple",
+            }
+            or decision.reference_snapshot_sha256 is not None
+        ):
+            return None
+    analysis, candidates = _load_prepared_artifacts(paths)
+    return analysis, candidates
+
+
+def _load_prepared_artifacts(
+    paths: RunPaths,
+) -> tuple[ProductAnalysis, list[ReferenceCompositionSnapshot]]:
+    product_path = paths.input_dir / "product-on-hand.jpg"
+    analysis_path = paths.analysis_dir / "product_analysis.json"
+    constraints_path = paths.analysis_dir / "product_fidelity_constraints.json"
+    candidates_path = paths.analysis_dir / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME
+    selected_path = paths.analysis_dir / "selected_references.json"
+    role_path = paths.analysis_dir / "output_role.json"
+    required = (
+        product_path,
+        analysis_path,
+        constraints_path,
+        candidates_path,
+        selected_path,
+        role_path,
+    )
+    missing = [path.relative_to(paths.root).as_posix() for path in required if not path.is_file()]
+    if missing:
+        raise ValueError("prepare-review 根产物缺少：" + "、".join(missing))
+
+    analysis_data = _read_json_artifact(analysis_path)
+    analysis = ProductAnalysis.from_dict(analysis_data)
+    validate_analysis_ready_for_reference_selection(analysis)
+    constraints_data = _read_json_artifact(constraints_path)
+    constraints = ProductFidelityConstraints.from_dict(constraints_data)
+    validate_product_fidelity_constraints(analysis, constraints)
+
+    role_data = _read_json_artifact(role_path)
+    if not isinstance(role_data, Mapping) or set(role_data) != {"output_role"}:
+        raise ValueError("analysis/output_role.json 必须只包含 output_role")
+    role = require_scene_replacement_role(
+        normalize_output_role(role_data.get("output_role")),
+        stage="prepare-review run",
+    )
+
+    candidate_data = _read_json_artifact(candidates_path)
+    if not isinstance(candidate_data, list) or not candidate_data:
+        raise ValueError("候选参考构图快照必须是非空列表")
+    candidates = [
+        ReferenceCompositionSnapshot.from_dict(item)
+        for item in candidate_data
+    ]
+    ranks = [item.rank for item in candidates]
+    if len(ranks) != len(set(ranks)):
+        raise ValueError("候选参考构图快照 rank 不得重复")
+    if any(item.output_role is not role for item in candidates):
+        raise ValueError("候选参考构图快照 output_role 角色与当前 run 不一致")
+    _validate_selected_candidate_closure(paths, candidates, role)
+    return analysis, candidates
+
+
+def _validate_selected_candidate_closure(
+    paths: RunPaths,
+    candidates: Sequence[ReferenceCompositionSnapshot],
+    role: OutputRole,
+) -> None:
+    selected_path = paths.analysis_dir / "selected_references.json"
+    selected_data = _read_json_artifact(selected_path)
+    if not isinstance(selected_data, list) or not selected_data:
+        raise ValueError("analysis/selected_references.json 必须是非空列表")
+    candidates_by_rank = {item.rank: item for item in candidates}
+    selected_ranks: set[int] = set()
+    review_root = paths.review_dir.resolve()
+    for index, selected in enumerate(selected_data, start=1):
+        if not isinstance(selected, Mapping):
+            raise ValueError(f"selected_references[{index}] 必须是 JSON 对象")
+        rank = selected.get("rank")
+        if type(rank) is not int or not 1 <= rank <= 3 or rank in selected_ranks:
+            raise ValueError(f"selected_references[{index}].rank 无效或重复")
+        selected_ranks.add(rank)
+        if type(selected.get("score")) is not int:
+            raise ValueError(f"selected_references[{index}].score 必须是整数")
+        metadata = selected.get("metadata")
+        if not isinstance(metadata, Mapping):
+            raise ValueError(f"selected rank {rank} 的 metadata 必须是 JSON 对象")
+        review_path = _resolve_recorded_path(
+            selected.get("selected_reference"),
+            paths,
+            selected_path.parent,
+        )
+        source_value = (
+            metadata.get("source_reference")
+            or metadata.get("source_absolute_path")
+            or metadata.get("absolute_path")
+        )
+        source_path = _resolve_recorded_path(source_value, paths, selected_path.parent)
+        try:
+            review_path.relative_to(review_root)
+        except ValueError as exc:
+            raise ValueError(f"selected rank {rank} 的 review 副本必须位于当前 run") from exc
+        if not review_path.is_file() or not source_path.is_file():
+            raise ValueError(f"selected rank {rank} 的参考图源图或 review 副本不存在")
+        source_digest = _file_sha256(source_path)
+        review_digest = _file_sha256(review_path)
+        for field_name, expected in (
+            ("source_sha256", source_digest),
+            ("review_sha256", review_digest),
+        ):
+            top_value = selected.get(field_name, metadata.get(field_name))
+            metadata_value = metadata.get(field_name)
+            if (
+                not _is_sha256(top_value)
+                or top_value != metadata_value
+                or top_value != expected
+            ):
+                raise ValueError(f"selected rank {rank} 的参考图 {field_name} 绑定无效")
+        if source_digest != review_digest:
+            raise ValueError(f"selected rank {rank} 的源图与 review 副本不一致")
+        snapshot = candidates_by_rank.get(rank)
+        if snapshot is None:
+            raise ValueError(f"selected rank {rank} 缺少候选参考构图快照")
+        validate_snapshot_binding(
+            snapshot,
+            reference_file=source_path,
+            output_role=role,
+            expected_rank=rank,
+        )
+    if selected_ranks != set(candidates_by_rank):
+        raise ValueError("候选参考构图快照 rank 集合必须与 selected 完全一致")
+
+
+def _resolve_recorded_path(
+    value: Any,
+    paths: RunPaths,
+    base_dir: Path,
+) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("产物路径必须是非空字符串")
+    recorded = Path(value.strip())
+    if recorded.is_absolute():
+        return recorded.resolve()
+    run_relative = (paths.root / recorded).resolve()
+    if run_relative.is_file():
+        return run_relative
+    return (base_dir / recorded).resolve()
+
+
+def _load_complete_modern_root(
+    paths: RunPaths,
+) -> ReferenceCompositionSnapshot | None:
+    snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+    decision_path = paths.review_dir / "review_decision.json"
+    if not snapshot_path.is_file() or not decision_path.is_file():
+        return None
+    try:
+        analysis, candidates = _load_prepared_artifacts(paths)
+        snapshot = load_reference_composition_snapshot(snapshot_path)
+        decision_data = _read_json_artifact(decision_path)
+        decision = ReviewDecision.from_dict(
+            decision_data,
+            require_reference_snapshot_sha256=True,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not _is_sha256(snapshot.reference_sha256):
+        return None
+    if any(not _is_sha256(item.reference_sha256) for item in candidates):
+        return None
+    if sum(item == snapshot for item in candidates) != 1:
+        return None
+    digest = decision.reference_snapshot_sha256
+    if digest != reference_composition_sha256(snapshot):
+        return None
+    if list(decision.selected_ranks) != [snapshot.rank]:
+        return None
+    if decision.action not in {"generate_rank_1", "generate_selected"}:
+        return None
+    if decision.output_role is not snapshot.output_role:
+        return None
+    if decision.fidelity_constraints_path != "analysis/product_fidelity_constraints.json":
+        return None
+    expected_confirmation = ProductConfirmationSnapshot.from_analysis(analysis)
+    requires_confirmation = analysis.confirmed_product_type.value in {
+        "necklace",
+        "pendant_necklace",
+        "ring",
+    }
+    if requires_confirmation and decision.confirmation_snapshot is None:
+        return None
+    if (
+        decision.confirmation_snapshot is not None
+        and decision.confirmation_snapshot != expected_confirmation
+    ):
+        return None
+    return snapshot
+
+
+def _is_complete_modern_generation(
+    directory: Path,
+    paths: RunPaths,
+    snapshot: ReferenceCompositionSnapshot,
+) -> bool:
+    if any(directory.glob("hand-reference.*")):
+        return False
+    manifest_path = directory / "input-manifest.json"
+    try:
+        manifest = _read_json_artifact(manifest_path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(manifest, Mapping) or set(manifest) != {
+        "schema_version",
+        "output_role",
+        "reference_snapshot",
+        "product_analysis",
+        "fidelity_constraints",
+        "inputs",
+    }:
+        return False
+    if type(manifest.get("schema_version")) is not int or manifest.get("schema_version") != 1:
+        return False
+    if manifest.get("output_role") != snapshot.output_role.value:
+        return False
+    fixed_sources = {
+        "reference_snapshot": (
+            "reference-composition-snapshot.json",
+            paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
+        ),
+        "product_analysis": (
+            "product-analysis.json",
+            paths.analysis_dir / "product_analysis.json",
+        ),
+        "fidelity_constraints": (
+            "product-fidelity-constraints.json",
+            paths.analysis_dir / "product_fidelity_constraints.json",
+        ),
+    }
+    for key, (copied_name, source_path) in fixed_sources.items():
+        if not _valid_manifest_file(
+            directory,
+            manifest.get(key),
+            copied_name=copied_name,
+            source_path=source_path,
+        ):
+            return False
+    inputs = manifest.get("inputs")
+    if not isinstance(inputs, list) or len(inputs) != 2:
+        return False
+    expected_inputs = (
+        (
+            1,
+            "scene_reference",
+            "scene-reference.",
+            _selected_review_path(paths, snapshot.rank),
+            snapshot.reference_sha256,
+        ),
+        (
+            2,
+            "product_identity",
+            "product-reference.",
+            paths.input_dir / "product-on-hand.jpg",
+            None,
+        ),
+    )
+    for item, (order, role, prefix, expected_source, expected_digest) in zip(
+        inputs,
+        expected_inputs,
+    ):
+        if not _valid_manifest_input(
+            directory,
+            item,
+            order,
+            role,
+            prefix,
+            expected_source,
+            expected_digest,
+        ):
+            return False
+    for name in ("model.txt", "prompt.txt", "reference-rank.txt", "submit.json"):
+        if not (directory / name).is_file():
+            return False
+    try:
+        rank = int((directory / "reference-rank.txt").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return rank == snapshot.rank
+
+
+def _valid_manifest_file(
+    directory: Path,
+    value: Any,
+    *,
+    copied_name: str,
+    source_path: Path,
+) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {"copied_file", "sha256"}:
+        return False
+    if value.get("copied_file") != copied_name or not _is_sha256(value.get("sha256")):
+        return False
+    copied_path = directory / copied_name
+    if not copied_path.is_file() or not source_path.is_file():
+        return False
+    digest = value["sha256"]
+    return _file_sha256(copied_path) == digest == _file_sha256(source_path)
+
+
+def _valid_manifest_input(
+    directory: Path,
+    value: Any,
+    order: int,
+    role: str,
+    prefix: str,
+    expected_source: Path | None,
+    expected_digest: str | None,
+) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {
+        "order",
+        "role",
+        "source_path",
+        "copied_file",
+        "sha256",
+    }:
+        return False
+    copied_name = value.get("copied_file")
+    source_value = value.get("source_path")
+    digest = value.get("sha256")
+    if (
+        type(value.get("order")) is not int
+        or value.get("order") != order
+        or value.get("role") != role
+        or not isinstance(copied_name, str)
+        or Path(copied_name).name != copied_name
+        or not copied_name.startswith(prefix)
+        or not isinstance(source_value, str)
+        or not source_value.strip()
+        or not _is_sha256(digest)
+    ):
+        return False
+    copied_path = directory / copied_name
+    source_path = Path(source_value)
+    if (
+        expected_source is None
+        or not copied_path.is_file()
+        or not source_path.is_file()
+        or not expected_source.is_file()
+    ):
+        return False
+    try:
+        if source_path.resolve() != expected_source.resolve():
+            return False
+    except OSError:
+        return False
+    if expected_digest is not None and digest != expected_digest:
+        return False
+    return _file_sha256(copied_path) == digest == _file_sha256(source_path)
+
+
+def _selected_review_path(paths: RunPaths, rank: int) -> Path | None:
+    selected_path = paths.analysis_dir / "selected_references.json"
+    try:
+        selected = _read_json_artifact(selected_path)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(selected, list):
+        return None
+    matches = [
+        item
+        for item in selected
+        if isinstance(item, Mapping)
+        and type(item.get("rank")) is int
+        and item.get("rank") == rank
+    ]
+    if len(matches) != 1:
+        return None
+    value = matches[0].get("selected_reference")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return Path(value)
+
+
+def _is_complete_legacy_root(paths: RunPaths) -> bool:
+    required = (
+        paths.input_dir / "product-on-hand.jpg",
+        paths.analysis_dir / "product_analysis.json",
+        paths.analysis_dir / "selected_references.json",
+        paths.review_dir / "review_decision.json",
+    )
+    if not all(path.is_file() for path in required):
+        return False
+    try:
+        analysis_data = _read_json_artifact(required[1])
+        selected = _read_json_artifact(required[2])
+        decision_data = _read_json_artifact(required[3])
+        analysis = ProductAnalysis.from_dict(analysis_data)
+        validate_analysis_ready_for_reference_selection(analysis)
+        selected_ranks = _validate_legacy_selected(paths, selected)
+        decision_ranks = _validate_legacy_decision(decision_data, analysis)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return set(decision_ranks).issubset(selected_ranks)
+
+
+def _validate_legacy_decision(data: Any, analysis: ProductAnalysis) -> list[int]:
+    if not isinstance(data, Mapping) or "reference_snapshot_sha256" in data:
+        raise ValueError("历史 ReviewDecision 必须是无快照摘要的 JSON 对象")
+    action = data.get("action")
+    if action not in {"generate_rank_1", "generate_selected", "generate_multiple"}:
+        raise ValueError("历史 ReviewDecision action 无效")
+    ranks = data.get("selected_ranks")
+    if action == "generate_rank_1" and ranks in (None, []):
+        ranks = [1]
+    if (
+        not isinstance(ranks, list)
+        or not ranks
+        or any(type(rank) is not int or not 1 <= rank <= 3 for rank in ranks)
+        or len(ranks) != len(set(ranks))
+    ):
+        raise ValueError("历史 ReviewDecision selected_ranks 无效")
+    if action == "generate_rank_1" and ranks != [1]:
+        raise ValueError("generate_rank_1 只能选择 rank 1")
+    if action == "generate_selected" and len(ranks) != 1:
+        raise ValueError("generate_selected 必须只选择一个 rank")
+    if action == "generate_multiple" and len(ranks) < 2:
+        raise ValueError("generate_multiple 至少选择两个 rank")
+    if analysis.classification_source != "legacy_inferred":
+        decision = ReviewDecision.from_dict(data)
+        expected = ProductConfirmationSnapshot.from_analysis(analysis)
+        requires_confirmation = analysis.confirmed_product_type.value in {
+            "necklace",
+            "pendant_necklace",
+            "ring",
+        }
+        if requires_confirmation and decision.confirmation_snapshot is None:
+            raise ValueError("现代分析的历史决策缺少产品确认快照")
+        if (
+            decision.confirmation_snapshot is not None
+            and decision.confirmation_snapshot != expected
+        ):
+            raise ValueError("现代分析的历史决策确认快照与 analysis 不一致")
+    return list(ranks)
+
+
+def _validate_legacy_selected(paths: RunPaths, data: Any) -> set[int]:
+    if not isinstance(data, list) or len(data) != 3:
+        raise ValueError("历史 selected_references 必须包含 Top 3")
+    ranks: set[int] = set()
+    selected_path = paths.analysis_dir / "selected_references.json"
+    for index, item in enumerate(data, start=1):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"selected_references[{index}] 必须是 JSON 对象")
+        rank = item.get("rank")
+        if type(rank) is not int or not 1 <= rank <= 3 or rank in ranks:
+            raise ValueError(f"selected_references[{index}].rank 无效或重复")
+        if type(item.get("score")) is not int:
+            raise ValueError(f"selected_references[{index}].score 必须是整数")
+        ranks.add(rank)
+        review_path = _resolve_recorded_path(
+            item.get("selected_reference"),
+            paths,
+            selected_path.parent,
+        )
+        if not review_path.is_file():
+            raise ValueError(f"selected rank {rank} 的参考图不存在")
+        metadata = item.get("metadata")
+        metadata_integrity_fields = (
+            isinstance(metadata, Mapping)
+            and any(
+                field_name in metadata
+                for field_name in ("source_sha256", "review_sha256")
+            )
+        )
+        has_integrity_fields = metadata_integrity_fields or any(
+            field_name in item for field_name in ("source_sha256", "review_sha256")
+        )
+        if not has_integrity_fields:
+            continue
+        if not isinstance(metadata, Mapping):
+            raise ValueError(f"selected rank {rank} 完整性字段不完整")
+        source_path = _resolve_recorded_path(
+            metadata.get("source_reference"),
+            paths,
+            selected_path.parent,
+        )
+        if not source_path.is_file():
+            raise ValueError(f"selected rank {rank} 的源参考图不存在")
+        source_digest = _file_sha256(source_path)
+        review_digest = _file_sha256(review_path)
+        if source_digest != review_digest:
+            raise ValueError(f"selected rank {rank} 的源图与审核图不一致")
+        for field_name, expected in (
+            ("source_sha256", source_digest),
+            ("review_sha256", review_digest),
+        ):
+            if (
+                item.get(field_name) != expected
+                or metadata.get(field_name) != expected
+            ):
+                raise ValueError(f"selected rank {rank} 的 {field_name} 绑定无效")
+    if ranks != {1, 2, 3}:
+        raise ValueError("历史 selected_references 必须包含 rank 1、2、3")
+    return ranks
+
+
+def _is_complete_legacy_generation(directory: Path) -> bool:
+    try:
+        names = {path.name for path in directory.iterdir() if path.is_file()}
+    except OSError:
+        return False
+    if not _LEGACY_GENERATION_FILES.issubset(names):
+        return False
+    hand_references = [
+        name for name in names if name.startswith("hand-reference.")
+    ]
+    if len(hand_references) != 1 or _generation_has_modern_marker(directory):
+        return False
+    try:
+        model = (directory / "model.txt").read_text(encoding="utf-8").strip()
+        (directory / "prompt.txt").read_text(encoding="utf-8")
+        _read_json_artifact(directory / "submit.json")
+        result = _read_json_artifact(directory / "result.json")
+        qc = _read_json_artifact(directory / "qc.json")
+        expected_must_keep = _legacy_expected_must_keep(directory)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return False
+    if model not in {"gpt_image_2", "nano_banana_v2"}:
+        return False
+    if (
+        not isinstance(result, Mapping)
+        or not isinstance(result.get("data"), Mapping)
+        or result["data"].get("status") != "completed"
+    ):
+        return False
+    return _is_valid_legacy_qc(qc, expected_must_keep)
+
+
+def _is_valid_legacy_qc(
+    data: Any,
+    expected_must_keep: list[tuple[str, str]] | None = None,
+) -> bool:
+    if not isinstance(data, Mapping):
+        return False
+    status = data.get("status")
+    passed = data.get("passed")
+    failed = data.get("failed")
+    notes = data.get("notes")
+    if not isinstance(status, str) or status not in {"pass", "rerun", "reject"}:
+        return False
+    if not _is_non_empty_string_list(passed):
+        return False
+    if not _is_non_empty_string_list(failed):
+        return False
+    if not isinstance(notes, str):
+        return False
+    if not passed and not failed:
+        return False
+
+    critical_failures = data.get("critical_failures", None)
+    if "critical_failures" in data:
+        if not _is_non_empty_string_list(critical_failures) or not critical_failures:
+            return False
+        normalized_critical = [item.strip() for item in critical_failures]
+        if len(set(normalized_critical)) != len(normalized_critical):
+            return False
+        if any(
+            item not in _LEGACY_ALLOWED_CRITICAL_FAILURES
+            for item in normalized_critical
+        ):
+            return False
+    else:
+        normalized_critical = []
+
+    combined = " ".join(
+        [item.strip() for item in passed + failed] + [notes]
+    )
+    has_person_check = _contains_any(combined, _LEGACY_SOURCE_PERSON_TERMS)
+    if not has_person_check and not all(
+        _contains_any(combined, terms)
+        for terms in (
+            _LEGACY_SOURCE_WRIST_TERMS,
+            _LEGACY_SOURCE_ARM_TERMS,
+            _LEGACY_SOURCE_SKIN_TERMS,
+        )
+    ):
+        return False
+    if _contains_any(combined, _LEGACY_NEGATED_CHECK_TERMS):
+        return False
+
+    if status == "pass" and (
+        failed
+        or normalized_critical
+        or not _contains_any(combined, _LEGACY_PASS_CHECK_TERMS)
+    ):
+        return False
+    if status != "reject" and (
+        any(
+            item in _LEGACY_REJECT_CRITICAL_FAILURES
+            for item in normalized_critical
+        )
+        or _contains_any(" ".join(failed), _LEGACY_REJECT_FAILURE_TERMS)
+    ):
+        return False
+    return _is_valid_legacy_fidelity_checks(
+        data,
+        status,
+        expected_must_keep,
+    )
+
+
+def _legacy_expected_must_keep(
+    generation_directory: Path,
+) -> list[tuple[str, str]] | None:
+    constraints_path = (
+        generation_directory.parent.parent
+        / "analysis"
+        / "product_fidelity_constraints.json"
+    )
+    if not constraints_path.is_file():
+        return None
+    constraints = _read_json_artifact(constraints_path)
+    if not isinstance(constraints, Mapping):
+        raise ValueError("产品保真约束必须是 JSON 对象")
+    must_keep = constraints.get("must_keep")
+    if not isinstance(must_keep, list):
+        raise ValueError("产品保真约束 must_keep 必须是列表")
+    expected: list[tuple[str, str]] = []
+    for item in must_keep:
+        if not isinstance(item, Mapping):
+            raise ValueError("must_keep 项必须是 JSON 对象")
+        name = item.get("name")
+        question = item.get("qc_question")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("must_keep.name 必须是非空字符串")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("must_keep.qc_question 必须是非空字符串")
+        expected.append((name.strip(), question.strip()))
+    if len(set(expected)) != len(expected):
+        raise ValueError("must_keep 的 name/qc_question 组合必须唯一")
+    return expected
+
+
+def _is_valid_legacy_fidelity_checks(
+    data: Mapping[str, Any],
+    status: str,
+    expected_must_keep: list[tuple[str, str]] | None,
+) -> bool:
+    if "fidelity_checks" not in data:
+        return not expected_must_keep
+    checks = data.get("fidelity_checks")
+    if not isinstance(checks, list):
+        return False
+    valid_checks: list[Mapping[str, Any]] = []
+    for check in checks:
+        if not isinstance(check, Mapping):
+            return False
+        for field_name in ("name", "question", "result", "notes"):
+            value = check.get(field_name)
+            if not isinstance(value, str):
+                return False
+            if field_name != "notes" and not value.strip():
+                return False
+        result = check.get("result")
+        if result not in {"pass", "rerun", "fail"}:
+            return False
+        if status == "pass" and result != "pass":
+            return False
+        valid_checks.append(check)
+    if expected_must_keep is None:
+        return True
+
+    actual_pairs = [
+        (check["name"].strip(), check["question"].strip())
+        for check in valid_checks
+    ]
+    if len(set(actual_pairs)) != len(actual_pairs):
+        return False
+    if len(actual_pairs) != len(expected_must_keep):
+        return False
+    actual_names = Counter(name for name, _question in actual_pairs)
+    expected_names = Counter(name for name, _question in expected_must_keep)
+    if actual_names != expected_names:
+        return False
+    actual_questions = Counter(question for _name, question in actual_pairs)
+    expected_questions = Counter(
+        question for _name, question in expected_must_keep
+    )
+    if actual_questions != expected_questions:
+        return False
+    return set(actual_pairs) == set(expected_must_keep)
+
+
+def _is_non_empty_string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(item, str) and bool(item.strip()) for item in value
+    )
+
+
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(term.lower() in lowered for term in terms)
+
+
+def _read_json_artifact(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and _SHA256_PATTERN.fullmatch(value) is not None
+
+
 def _require_mapping(
     data: Mapping[str, Any] | None,
     label: str,
@@ -509,6 +1477,18 @@ def _require_fields(
         raise ValueError(f"{label} 缺少字段：{'、'.join(missing)}")
 
 
+def _require_exact_fields(
+    source: Mapping[str, Any],
+    fields: Sequence[str],
+    label: str,
+) -> None:
+    _require_fields(source, fields, label)
+    expected = set(fields)
+    unknown = [str(field_name) for field_name in source if field_name not in expected]
+    if unknown:
+        raise ValueError(f"{label} 包含未知字段：{'、'.join(unknown)}")
+
+
 def _require_string(value: Any, field_name: str) -> None:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} 必须是字符串")
@@ -517,8 +1497,8 @@ def _require_string(value: Any, field_name: str) -> None:
 def _string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise ValueError(f"{field_name} 必须是字符串列表")
-    if any(not isinstance(item, str) for item in value):
-        raise ValueError(f"{field_name} 只能包含字符串")
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ValueError(f"{field_name} 只能包含非空字符串")
     return tuple(value)
 
 
@@ -760,9 +1740,12 @@ __all__ = [
     "REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME",
     "ReferenceCompositionSnapshot",
     "ReferencePose",
+    "ReferenceRunState",
     "ReplacementTarget",
     "build_candidate_snapshot",
+    "classify_reference_run",
     "load_reference_composition_snapshot",
     "reference_composition_sha256",
+    "require_modern_reference_run",
     "validate_snapshot_binding",
 ]

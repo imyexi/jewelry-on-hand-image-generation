@@ -909,6 +909,7 @@ def test_generation_rejects_existing_non_empty_generation_dir(tmp_path):
     paths, product, _ref = _ready_run(tmp_path)
     generation_dir = paths.generation_dir / "01"
     generation_dir.mkdir()
+    _write_modern_history_artifacts(generation_dir)
     (generation_dir / "existing.txt").write_text("old", encoding="utf-8")
 
     with pytest.raises(GenerationError) as exc_info:
@@ -968,7 +969,7 @@ def test_generation_copies_reference_with_source_extension(tmp_path, monkeypatch
     assert not (paths.generation_dir / "01" / "scene-reference.jpg").exists()
 
 
-def test_generation_uses_review_copy_when_original_reference_is_missing(tmp_path, monkeypatch):
+def test_generation_rejects_missing_original_even_when_review_copy_exists(tmp_path, monkeypatch):
     paths, product, review_copy = _ready_run(tmp_path)
     selected = read_json(paths.analysis_dir / "selected_references.json")
     original_ref = Path(selected[0]["metadata"]["source_reference"])
@@ -985,13 +986,12 @@ def test_generation_uses_review_copy_when_original_reference_is_missing(tmp_path
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    run_generation(paths, product, {1: "prompt text"}, HELPER, wait=False)
+    with pytest.raises(ReviewGateError, match="参考图源图.*不存在"):
+        run_generation(paths, product, {1: "prompt text"}, HELPER, wait=False)
 
-    command = calls[0]
-    reference_index = command.index("--image") + 1
-    scene_copy = paths.generation_dir / "01" / "scene-reference.jpg"
-    assert command[reference_index] == str(scene_copy)
-    assert scene_copy.read_bytes() == review_copy.read_bytes()
+    assert calls == []
+    assert review_copy.is_file()
+    assert not any(paths.generation_dir.iterdir())
 
 
 def test_generation_rejects_missing_reference_file(tmp_path):
@@ -1002,7 +1002,7 @@ def test_generation_rejects_missing_reference_file(tmp_path):
         [_selected_reference(1, missing_ref)],
     )
 
-    with pytest.raises(FileNotFoundError, match="参考图不存在"):
+    with pytest.raises(ReviewGateError, match="产物路径|参考图"):
         run_generation(paths, product, {1: "prompt text"}, HELPER, wait=False)
 
 
@@ -1430,7 +1430,9 @@ def test_generation_preflight_rejects_invalid_second_rank_without_submit(
     calls = []
     monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args))
 
-    with pytest.raises((FileNotFoundError, KeyError, GenerationError)):
+    with pytest.raises(
+        (FileNotFoundError, KeyError, GenerationError, ReviewGateError)
+    ):
         run_generation(paths, product, prompts, HELPER, wait=False)
 
     assert calls == []
@@ -2167,6 +2169,7 @@ def _write_constraints_for_analysis(paths, analysis):
 
 def _write_qc(generation_dir, status):
     generation_dir.mkdir(parents=True)
+    _write_modern_history_artifacts(generation_dir)
     write_json(
         generation_dir / "qc.json",
         {
@@ -2181,6 +2184,7 @@ def _write_qc(generation_dir, status):
 
 def _write_qc_with_failures(generation_dir, status, critical_failures):
     generation_dir.mkdir(parents=True)
+    _write_modern_history_artifacts(generation_dir)
     write_json(
         generation_dir / "qc.json",
         {
@@ -2367,6 +2371,10 @@ def _ready_audited_run(tmp_path, *, role="hand_worn", reference_suffix=".jpg"):
         paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
         snapshot.to_dict(),
     )
+    write_json(
+        paths.analysis_dir / "reference_composition_snapshots.json",
+        [snapshot.to_dict()],
+    )
     write_json(paths.analysis_dir / "output_role.json", {"output_role": role})
     write_json(
         paths.review_dir / "review_decision.json",
@@ -2381,20 +2389,167 @@ def _ready_audited_run(tmp_path, *, role="hand_worn", reference_suffix=".jpg"):
     return paths, product, review_copy, snapshot, analysis_path, canonical_path
 
 
-def _refresh_reference_snapshot(paths, analysis, selected, *, role="hand_worn"):
-    row = ReferenceRow.from_dict(selected["metadata"])
-    scored = ScoredReference(
-        row=row,
-        score=selected["score"],
-        rank=selected["rank"],
-        reason=tuple(selected["reason"]),
-        risk=tuple(selected["risk"]),
-        ignored_reference_jewelry=tuple(selected["ignored_reference_jewelry"]),
+def _ready_legacy_read_only_run(tmp_path):
+    paths = RunPaths.create(tmp_path, "legacy-read-only")
+    product = paths.input_dir / "product-on-hand.jpg"
+    product.write_bytes(b"legacy-product")
+    source = tmp_path / "legacy-scene-1.jpg"
+    source.write_bytes(b"legacy-scene-1")
+    selected_items = []
+    for rank in (1, 2, 3):
+        ranked_source = source if rank == 1 else tmp_path / f"legacy-scene-{rank}.jpg"
+        if rank != 1:
+            ranked_source.write_bytes(f"legacy-scene-{rank}".encode())
+        review_copy = paths.review_dir / f"rank-{rank}-legacy-scene.jpg"
+        review_copy.write_bytes(ranked_source.read_bytes())
+        digest = hashlib.sha256(ranked_source.read_bytes()).hexdigest()
+        selected_items.append(
+            {
+                "rank": rank,
+                "score": 100 - rank,
+                "selected_reference": str(review_copy.resolve()),
+                "source_sha256": digest,
+                "review_sha256": digest,
+                "metadata": {
+                    "source_reference": str(ranked_source.resolve()),
+                    "source_sha256": digest,
+                    "review_sha256": digest,
+                },
+            }
+        )
+    write_json(paths.analysis_dir / "product_analysis.json", _legacy_bracelet_analysis())
+    _write_confirmed_constraints(paths)
+    write_json(
+        paths.analysis_dir / "selected_references.json",
+        selected_items,
     )
-    snapshot = build_candidate_snapshot(ProductAnalysis.from_dict(analysis), scored, role)
+    write_json(
+        paths.review_dir / "review_decision.json",
+        {
+            "action": "generate_rank_1",
+            "selected_ranks": [1],
+            "fidelity_confirmed": True,
+        },
+    )
+    generation = paths.generation_dir / "01"
+    generation.mkdir()
+    (generation / "hand-reference.jpg").write_bytes(source.read_bytes())
+    (generation / "model.txt").write_text("gpt_image_2", encoding="utf-8")
+    (generation / "prompt.txt").write_text("历史提示词", encoding="utf-8")
+    write_json(generation / "submit.json", {"ok": True})
+    write_json(generation / "result.json", {"data": {"status": "completed"}})
+    (generation / "result.png").write_bytes(b"legacy-result")
+    write_json(
+        generation / "qc.json",
+        {
+            "status": "pass",
+            "passed": [
+                "原图手腕检查通过",
+                "原图手臂检查通过",
+                "皮肤块迁移检查通过",
+            ],
+            "failed": [],
+            "notes": "未发现人物局部迁移",
+        },
+    )
+    return paths, product
+
+
+def _write_modern_history_artifacts(generation_dir):
+    root = generation_dir.parent.parent
+    selected = read_json(root / "analysis" / "selected_references.json")[0]
+    scene_source = Path(selected["selected_reference"])
+    product_source = root / "input" / "product-on-hand.jpg"
+    fixed_sources = {
+        "reference_snapshot": (
+            root / "review" / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
+            "reference-composition-snapshot.json",
+        ),
+        "product_analysis": (
+            root / "analysis" / "product_analysis.json",
+            "product-analysis.json",
+        ),
+        "fidelity_constraints": (
+            root / "analysis" / "product_fidelity_constraints.json",
+            "product-fidelity-constraints.json",
+        ),
+    }
+    manifest = {
+        "schema_version": 1,
+        "output_role": "hand_worn",
+        "inputs": [],
+    }
+    for key, (source, copied_name) in fixed_sources.items():
+        copied = generation_dir / copied_name
+        copied.write_bytes(source.read_bytes())
+        manifest[key] = {
+            "copied_file": copied_name,
+            "sha256": hashlib.sha256(copied.read_bytes()).hexdigest(),
+        }
+    for order, role, source, copied_name in (
+        (1, "scene_reference", scene_source, "scene-reference.jpg"),
+        (2, "product_identity", product_source, "product-reference.jpg"),
+    ):
+        copied = generation_dir / copied_name
+        copied.write_bytes(source.read_bytes())
+        manifest["inputs"].append(
+            {
+                "order": order,
+                "role": role,
+                "source_path": str(source.resolve()),
+                "copied_file": copied_name,
+                "sha256": hashlib.sha256(copied.read_bytes()).hexdigest(),
+            }
+        )
+    (generation_dir / "model.txt").write_text("gpt_image_2", encoding="utf-8")
+    (generation_dir / "prompt.txt").write_text("历史现代 prompt", encoding="utf-8")
+    (generation_dir / "reference-rank.txt").write_text("1", encoding="utf-8")
+    write_json(generation_dir / "submit.json", {"ok": True})
+    write_json(generation_dir / "input-manifest.json", manifest)
+
+
+def _run_文件树快照(root):
+    directories = {
+        path.relative_to(root)
+        for path in root.rglob("*")
+        if path.is_dir()
+    }
+    files = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    return directories, files
+
+
+def _refresh_reference_snapshot(paths, analysis, selected, *, role="hand_worn"):
+    selected_items = read_json(paths.analysis_dir / "selected_references.json")
+    snapshots = []
+    for item in selected_items:
+        row = ReferenceRow.from_dict(item["metadata"])
+        scored = ScoredReference(
+            row=row,
+            score=item["score"],
+            rank=item["rank"],
+            reason=tuple(item["reason"]),
+            risk=tuple(item["risk"]),
+            ignored_reference_jewelry=tuple(item["ignored_reference_jewelry"]),
+        )
+        snapshots.append(
+            build_candidate_snapshot(
+                ProductAnalysis.from_dict(analysis),
+                scored,
+                role,
+            )
+        )
+    snapshot = next(item for item in snapshots if item.rank == selected["rank"])
     write_json(
         paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME,
         snapshot.to_dict(),
+    )
+    write_json(
+        paths.analysis_dir / "reference_composition_snapshots.json",
+        [item.to_dict() for item in snapshots],
     )
     write_json(paths.analysis_dir / "output_role.json", {"output_role": role})
     decision = read_json(paths.review_dir / "review_decision.json")
@@ -2461,8 +2616,8 @@ def test_generation_input_manifest_copies_five_trusted_inputs_and_uses_scene_ref
     ("tamper", "message"),
     [
         ("scene", "参考图"),
-        ("snapshot_digest", "快照摘要"),
-        ("role", "角色"),
+        ("snapshot_digest", "run 产物不完整/损坏"),
+        ("role", "run 产物不完整/损坏"),
         ("run_role", "角色"),
         ("product_missing", "产品图"),
     ],
@@ -2626,3 +2781,62 @@ def test_ring_retry_rejects_unconfirmed_rank_before_helper(tmp_path, monkeypatch
         )
     assert calls == []
     assert not (paths.generation_dir / "02").exists()
+
+
+def test_legacy_read_only_生成入口在_helper_和新目录前拒绝且只读(
+    tmp_path,
+    monkeypatch,
+):
+    paths, product = _ready_legacy_read_only_run(tmp_path)
+    calls = []
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: calls.append(args))
+    before = _run_文件树快照(paths.root)
+
+    with pytest.raises(
+        ReviewGateError,
+        match="历史 run 只读.*重新执行 prepare-review",
+    ):
+        run_generation(paths, product, {1: "历史 prompt"}, HELPER, wait=False)
+
+    assert calls == []
+    assert _run_文件树快照(paths.root) == before
+    assert not (paths.generation_dir / "02").exists()
+
+
+def test_damaged_生成入口在_helper_和新目录前拒绝且只读(
+    tmp_path,
+    monkeypatch,
+):
+    paths, product, _review_copy, snapshot, analysis_path, canonical_path = (
+        _ready_audited_run(tmp_path)
+    )
+    (paths.analysis_dir / "reference_composition_snapshots.json").unlink()
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        return Completed(
+            json.dumps({"ok": True, "data": {"out_task_id": "不应提交"}})
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    before = _run_文件树快照(paths.root)
+
+    with pytest.raises(
+        (ReviewGateError, GenerationError),
+        match="run 产物不完整/损坏.*重新执行 prepare-review",
+    ):
+        run_generation(
+            paths,
+            product,
+            {1: "prompt text"},
+            HELPER,
+            wait=False,
+            reference_snapshot=snapshot,
+            product_analysis_path=analysis_path,
+            fidelity_constraints_path=canonical_path,
+        )
+
+    assert calls == []
+    assert _run_文件树快照(paths.root) == before
+    assert not (paths.generation_dir / "01").exists()

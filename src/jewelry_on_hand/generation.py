@@ -25,6 +25,7 @@ from jewelry_on_hand.reference_composition import (
     ReferenceCompositionSnapshot,
     load_reference_composition_snapshot,
     reference_composition_sha256,
+    require_modern_reference_run,
 )
 from jewelry_on_hand.review_decision import require_generation_decision
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
@@ -103,7 +104,12 @@ def run_generation(
     product_analysis_path: str | Path | None = None,
     fidelity_constraints_path: str | Path | None = None,
 ) -> list[Path]:
+    _reject_known_unsupported_decision(paths)
     decision = require_generation_decision(paths)
+    try:
+        modern_snapshot = require_modern_reference_run(paths)
+    except ValueError as exc:
+        raise GenerationError(str(exc)) from exc
     if decision.action == "generate_multiple":
         raise GenerationError(
             "历史 generate_multiple run 不允许继续生成，请回到 prepare-review 重新确认。"
@@ -142,12 +148,9 @@ def run_generation(
     _ensure_file(snapshot_path, "确认快照不存在，请回到 prepare-review 重新确认")
     supplied_snapshot = reference_snapshot
     if supplied_snapshot is None:
-        try:
-            supplied_snapshot = load_reference_composition_snapshot(snapshot_path)
-        except ValueError as exc:
-            raise GenerationError(
-                "历史 run 缺少可用确认快照，请回到 prepare-review 重新确认。"
-            ) from exc
+        supplied_snapshot = modern_snapshot
+    elif supplied_snapshot != modern_snapshot:
+        raise GenerationError("传入快照与现代 run gate 的确认快照不一致，请重新确认。")
     confirmed_snapshot = _validate_confirmed_snapshot(
         decision,
         supplied_snapshot,
@@ -275,6 +278,71 @@ def run_generation(
         generation_dirs.append(generation_dir)
 
     return generation_dirs
+
+
+def _reject_known_unsupported_decision(paths: RunPaths) -> None:
+    """在完整性 gate 前保留已知决策的精确业务错误。"""
+    decision_path = paths.review_dir / "review_decision.json"
+    snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+    if not decision_path.is_file():
+        return
+    try:
+        data = read_json(decision_path)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, Mapping):
+        return
+    if snapshot_path.is_file():
+        product_path = paths.input_dir / "product-on-hand.jpg"
+        selected_path = paths.analysis_dir / SELECTED_REFERENCES_FILE
+        _ensure_file(product_path, "产品图不存在，请回到 prepare-review 重新确认")
+        _ensure_file(selected_path, "缺少 selected_references.json")
+        references_by_rank = _load_references_by_rank(selected_path)
+        try:
+            analysis = ProductAnalysis.from_dict(
+                read_json(paths.analysis_dir / "product_analysis.json")
+            )
+            decision = ReviewDecision.from_dict(
+                data,
+                require_reference_snapshot_sha256=True,
+            )
+        except (OSError, TypeError, ValueError):
+            analysis = None
+            decision = None
+        if (
+            analysis is not None
+            and decision is not None
+            and analysis.confirmed_product_type is ProductType.RING
+        ):
+            _require_ring_reference_top_three(
+                paths,
+                decision,
+                references_by_rank,
+            )
+    action = data.get("action")
+    ranks = data.get("selected_ranks")
+    ranks_are_valid = (
+        isinstance(ranks, list)
+        and bool(ranks)
+        and all(type(rank) is int and 1 <= rank <= 3 for rank in ranks)
+        and len(ranks) == len(set(ranks))
+    )
+    if action == "generate_multiple" and ranks_are_valid:
+        raise GenerationError(
+            "历史 generate_multiple run 不允许继续生成，"
+            "请回到 prepare-review 重新确认。"
+        )
+    if not ranks_are_valid or len(ranks) != 1 or not snapshot_path.is_file():
+        return
+    try:
+        snapshot = load_reference_composition_snapshot(snapshot_path)
+    except ValueError:
+        return
+    if ranks != [snapshot.rank]:
+        raise GenerationError(
+            "ReviewDecision 与确认快照的唯一 selected rank 不一致，"
+            "请重新确认。"
+        )
 
 
 def _validate_confirmed_snapshot(

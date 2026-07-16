@@ -6,16 +6,19 @@ import inspect
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+import jewelry_on_hand.reference_composition as reference_composition
 from jewelry_on_hand.qc import build_qc_checklist, write_qc_result
-from jewelry_on_hand.cli import _build_parser
+from jewelry_on_hand.cli import _build_parser, main as cli_main
 from jewelry_on_hand.models import (
     ProductAnalysis,
+    ProductConfirmationSnapshot,
     ProductFidelityConstraints,
     ReferenceRow,
     ScoredReference,
@@ -30,6 +33,8 @@ from jewelry_on_hand.reference_composition import (
     ReferencePose,
     ReplacementTarget,
 )
+from jewelry_on_hand.run_paths import RunPaths
+from jewelry_on_hand.review_decision import ReviewGateError, require_generation_decision
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -838,11 +843,19 @@ def _artifact_contract_run(
     for rank in (1, 2, 3):
         reference = root / f"reference-{rank}.jpg"
         reference.write_bytes(f"reference-{rank}".encode())
+        digest = hashlib.sha256(reference.read_bytes()).hexdigest()
         selected.append(
             {
                 "rank": rank,
                 "selected_reference": str(reference),
                 "score": 100 - rank,
+                "source_sha256": digest,
+                "review_sha256": digest,
+                "metadata": {
+                    "source_reference": str(reference),
+                    "source_sha256": digest,
+                    "review_sha256": digest,
+                },
             }
         )
     _write_json(root / "analysis" / "selected_references.json", selected)
@@ -1096,6 +1109,10 @@ def _task9_modern_run(root: Path, *, completed: bool = True) -> tuple[Path, Path
 
     _write_json(root / "analysis" / "product_analysis.json", analysis_data)
     _write_json(root / "analysis" / "product_fidelity_constraints.json", canonical_data)
+    _write_json(
+        root / "analysis" / "reference_composition_snapshots.json",
+        [snapshot_data],
+    )
     _write_json(root / "review" / "reference_composition_snapshot.json", snapshot_data)
     selected = []
     for rank in (1, 2, 3):
@@ -1129,6 +1146,18 @@ def _task9_modern_run(root: Path, *, completed: bool = True) -> tuple[Path, Path
             }
         )
     _write_json(root / "analysis" / "selected_references.json", selected)
+    candidate_snapshots = []
+    for item in selected:
+        candidate = dict(snapshot_data)
+        candidate["rank"] = item["rank"]
+        candidate["reference_file"] = item["metadata"]["source_file_name"]
+        candidate["reference_sha256"] = item["source_sha256"]
+        candidate["composition_signature"] = _task9_signature(candidate)
+        candidate_snapshots.append(candidate)
+    _write_json(
+        root / "analysis" / "reference_composition_snapshots.json",
+        candidate_snapshots,
+    )
     _write_json(root / "analysis" / "output_role.json", {"output_role": "hand_worn"})
     decision = _modern_decision(analysis_data)
     decision["output_role"] = "hand_worn"
@@ -1813,6 +1842,241 @@ def _task9_legacy_run(root: Path) -> tuple[Path, Path]:
     return run_root, generation
 
 
+def _task10_modern_identity_run(
+    root: Path,
+    product_type: str,
+) -> Path:
+    run_root, _generation = _task9_modern_run(root)
+    shutil.rmtree(run_root / "generation")
+    data = _modern_analysis()
+    if product_type == "pendant_necklace":
+        data.update(
+            {
+                "product_type": "带链吊坠",
+                "detected_product_type": "pendant_necklace",
+                "confirmed_product_type": "pendant_necklace",
+                "classification_evidence": ["完整链条与中央主吊坠清晰可见"],
+                "visible_appearance": "完整链条，中央有一枚主吊坠",
+                "has_pendant": True,
+                "pendant_count": 1,
+                "pendant_layer": 1,
+                "pendant_position": "front_center",
+                "pendant_orientation": "front_facing",
+                "connection_structure": "metal_bail",
+            }
+        )
+    elif product_type == "ring":
+        data.update(
+            {
+                "product_type": "戒指",
+                "detected_product_type": "ring",
+                "confirmed_product_type": "ring",
+                "classification_evidence": ["左手无名指根部可见单枚戒指"],
+                "wear_position": "左手无名指根部",
+                "visible_appearance": "单枚银色戒指",
+                "length_category": None,
+                "chain_or_strand_type": None,
+                "ring_count": 1,
+                "hand_side": "left",
+                "finger_position": "ring",
+                "ring_wear_style": "finger_base",
+            }
+        )
+    product = ProductAnalysis.from_dict(data)
+    analysis_data = product_analysis_to_dict(product)
+    canonical = build_product_fidelity_constraints(product).to_dict()
+    if canonical["review_status"] == "pending":
+        canonical["review_status"] = "confirmed"
+    _write_json(run_root / "analysis" / "product_analysis.json", analysis_data)
+    _write_json(
+        run_root / "analysis" / "product_fidelity_constraints.json",
+        canonical,
+    )
+    snapshot = json.loads(
+        (run_root / "review" / "reference_composition_snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    decision = {
+        "action": "generate_rank_1",
+        "selected_ranks": [1],
+        "fidelity_confirmed": True,
+        "fidelity_constraints_path": "analysis/product_fidelity_constraints.json",
+        "confirmation_snapshot": ProductConfirmationSnapshot.from_analysis(
+            product
+        ).to_dict(),
+        "output_role": "hand_worn",
+        "reference_snapshot_sha256": _task9_snapshot_digest(snapshot),
+    }
+    _write_json(run_root / "review" / "review_decision.json", decision)
+    return run_root
+
+
+def _modern_legacy_analysis(product_type: str) -> dict[str, object]:
+    data = _modern_analysis()
+    if product_type == "bracelet":
+        data.update(
+            {
+                "product_type": "手链/手串",
+                "detected_product_type": "bracelet",
+                "confirmed_product_type": "bracelet",
+                "classification_evidence": ["佩戴在左手腕的单条手链"],
+                "wear_position": "左手腕",
+                "visible_appearance": "单条红色圆珠手链",
+                "length_category": None,
+                "chain_or_strand_type": None,
+            }
+        )
+    elif product_type == "pendant_necklace":
+        data.update(
+            {
+                "product_type": "带链吊坠",
+                "detected_product_type": "pendant_necklace",
+                "confirmed_product_type": "pendant_necklace",
+                "classification_evidence": ["完整链条与中央主吊坠清晰可见"],
+                "visible_appearance": "完整链条，中央有一枚主吊坠",
+                "has_pendant": True,
+                "pendant_count": 1,
+                "pendant_layer": 1,
+                "pendant_position": "front_center",
+                "pendant_orientation": "front_facing",
+                "connection_structure": "metal_bail",
+            }
+        )
+    elif product_type == "ring":
+        data.update(
+            {
+                "product_type": "戒指",
+                "detected_product_type": "ring",
+                "confirmed_product_type": "ring",
+                "classification_evidence": ["左手无名指根部可见单枚戒指"],
+                "wear_position": "左手无名指根部",
+                "visible_appearance": "单枚银色戒指",
+                "length_category": None,
+                "chain_or_strand_type": None,
+                "ring_count": 1,
+                "hand_side": "left",
+                "finger_position": "ring",
+                "ring_wear_style": "finger_base",
+            }
+        )
+    return data
+
+
+def test_legacy_read_only_modern_bracelet_生成决策无确认快照时库与_inspector_cli_通过(
+    tmp_path: Path,
+) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / "bracelet")
+    _write_json(
+        run_root / "analysis" / "product_analysis.json",
+        _modern_legacy_analysis("bracelet"),
+    )
+    decision_path = run_root / "review" / "review_decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    decision["fidelity_confirmed"] = True
+    decision.pop("confirmation_snapshot", None)
+    _write_json(decision_path, decision)
+    before = _run_字节与目录快照(run_root)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "legacy_read_only"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(ARTIFACT_INSPECTOR), str(run_root)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 0
+    assert "legacy_read_only=true" in completed.stdout
+    assert "Traceback" not in completed.stderr
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    "product_type",
+    ("necklace", "pendant_necklace", "ring"),
+)
+def test_damaged_legacy_三类现代分析生成决策仍必须包含确认快照(
+    tmp_path: Path,
+    product_type: str,
+) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / product_type)
+    _write_json(
+        run_root / "analysis" / "product_analysis.json",
+        _modern_legacy_analysis(product_type),
+    )
+    decision_path = run_root / "review" / "review_decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    decision["fidelity_confirmed"] = True
+    decision.pop("confirmation_snapshot", None)
+    _write_json(decision_path, decision)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert any("确认快照" in error for error in state["errors"]), state
+
+
+@pytest.mark.parametrize("product_type", ("necklace", "pendant_necklace", "ring"))
+def test_damaged_modern_三品类生成决策缺确认快照时库与_inspector_同态(
+    tmp_path: Path,
+    product_type: str,
+) -> None:
+    run_root = _task10_modern_identity_run(tmp_path / product_type, product_type)
+    paths = RunPaths(run_root)
+    inspector = runpy.run_path(str(ARTIFACT_INSPECTOR))
+    assert reference_composition.classify_reference_run(paths) == "modern_snapshot"
+    assert inspector["inspect_run_state"](run_root)["errors"] == []
+    decision_path = run_root / "review" / "review_decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    decision.pop("confirmation_snapshot")
+    _write_json(decision_path, decision)
+
+    assert reference_composition.classify_reference_run(paths) == "damaged"
+    state = inspector["inspect_run_state"](run_root)
+    assert state["legacy_read_only"] is False
+    assert any("确认快照" in error for error in state["errors"]), state
+    with pytest.raises(ReviewGateError, match="确认快照|run 产物不完整/损坏"):
+        require_generation_decision(paths)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("non_object", "missing_field", "analysis_drift"),
+)
+def test_damaged_modern_确认快照非对象缺字段或与_analysis_漂移时同态(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root = _task10_modern_identity_run(tmp_path / mutation, "necklace")
+    paths = RunPaths(run_root)
+    decision_path = run_root / "review" / "review_decision.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    if mutation == "non_object":
+        decision["confirmation_snapshot"] = []
+    elif mutation == "missing_field":
+        decision["confirmation_snapshot"].pop("layer_count")
+    else:
+        decision["confirmation_snapshot"]["display_mode"] = "hand_held"
+    _write_json(decision_path, decision)
+
+    assert reference_composition.classify_reference_run(paths) == "damaged"
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](run_root)
+    assert state["legacy_read_only"] is False
+    assert any("确认快照" in error for error in state["errors"]), state
+    with pytest.raises(ReviewGateError, match="确认快照|run 产物不完整/损坏"):
+        require_generation_decision(paths)
+
+
 def test_input_manifest_inspector_完整现代run通过且完整历史run只读(tmp_path: Path) -> None:
     modern_root, _generation = _task9_modern_run(tmp_path / "modern")
     namespace = runpy.run_path(str(ARTIFACT_INSPECTOR))
@@ -1845,5 +2109,951 @@ def test_input_manifest_inspector_损坏历史run只读拒绝且不改磁盘(
     result = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](legacy)
     after = {path.relative_to(legacy): path.read_bytes() for path in legacy.rglob("*") if path.is_file()}
     assert result["errors"]
+    assert result["legacy_read_only"] is False
     assert any("damaged" in error or "submit.json" in error for error in result["errors"])
     assert after == before
+
+
+def test_legacy_read_only_历史_selected_无现代摘要字段仍保持可读(
+    tmp_path: Path,
+) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / "legacy-original")
+    selected_path = run_root / "analysis" / "selected_references.json"
+    selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    for item in selected:
+        item.pop("source_sha256", None)
+        item.pop("review_sha256", None)
+        item.pop("metadata", None)
+    _write_json(selected_path, selected)
+    before = _run_字节与目录快照(run_root)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "legacy_read_only"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+
+    assert state == {
+        "classified": True,
+        "legacy_read_only": True,
+        "errors": [],
+    }
+    assert _run_字节与目录快照(run_root) == before
+
+
+def test_legacy_read_only_历史_selected_保留普通_metadata_仍允许库与_inspector_cli_通过(
+    tmp_path: Path,
+) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / "legacy-metadata")
+    selected_path = run_root / "analysis" / "selected_references.json"
+    selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    for item in selected:
+        source_reference = item["metadata"]["source_reference"]
+        item.pop("source_sha256", None)
+        item.pop("review_sha256", None)
+        item["metadata"] = {
+            "file_name": Path(source_reference).name,
+            "label": "历史参考图",
+            "width": 100,
+            "source_reference": source_reference,
+        }
+    _write_json(selected_path, selected)
+    before = _run_字节与目录快照(run_root)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "legacy_read_only"
+    )
+    completed = subprocess.run(
+        [sys.executable, str(ARTIFACT_INSPECTOR), str(run_root)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "legacy_read_only=true" in completed.stdout
+    assert "Traceback" not in completed.stderr
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    "partial_field",
+    ("top_source", "metadata_source", "top_review", "metadata_review"),
+)
+def test_damaged_legacy_selected_任一现代摘要字段单独出现就启动成组校验(
+    tmp_path: Path,
+    partial_field: str,
+) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / partial_field)
+    selected_path = run_root / "analysis" / "selected_references.json"
+    selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    for item in selected:
+        item.pop("source_sha256", None)
+        item.pop("review_sha256", None)
+        item["metadata"] = {"label": "历史参考图"}
+    target = selected[0]
+    if partial_field == "top_source":
+        target["source_sha256"] = "0" * 64
+    elif partial_field == "metadata_source":
+        target["metadata"]["source_sha256"] = "0" * 64
+    elif partial_field == "top_review":
+        target["review_sha256"] = "0" * 64
+    else:
+        target["metadata"]["review_sha256"] = "0" * 64
+    _write_json(selected_path, selected)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert state["errors"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "unsupported_model",
+        "result_not_completed",
+        "invalid_qc",
+        "invalid_analysis",
+        "invalid_selected_rank",
+        "decision_not_bound",
+        "selected_digest",
+    ),
+)
+def test_damaged_历史语义损坏时库与_inspector_等价拒绝且只读(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / mutation)
+    if mutation == "unsupported_model":
+        (generation / "model.txt").write_text("unsupported", encoding="utf-8")
+    elif mutation == "result_not_completed":
+        _write_json(generation / "result.json", {"data": {"status": "failed"}})
+    elif mutation == "invalid_qc":
+        _write_json(
+            generation / "qc.json",
+            {"status": "pass", "passed": [], "failed": ["存在失败项"]},
+        )
+    elif mutation == "invalid_analysis":
+        analysis_path = run_root / "analysis" / "product_analysis.json"
+        analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+        analysis["product_type"] = "未知品类"
+        _write_json(analysis_path, analysis)
+    elif mutation == "invalid_selected_rank":
+        selected_path = run_root / "analysis" / "selected_references.json"
+        selected = json.loads(selected_path.read_text(encoding="utf-8"))
+        selected[0]["rank"] = True
+        _write_json(selected_path, selected)
+    elif mutation == "decision_not_bound":
+        decision_path = run_root / "review" / "review_decision.json"
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        decision["selected_ranks"] = [4]
+        _write_json(decision_path, decision)
+    else:
+        selected_path = run_root / "analysis" / "selected_references.json"
+        selected = json.loads(selected_path.read_text(encoding="utf-8"))
+        selected[0]["source_sha256"] = "0" * 64
+        selected[0]["metadata"]["source_sha256"] = "0" * 64
+        _write_json(selected_path, selected)
+    before = _run_字节与目录快照(run_root)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+
+    assert state["legacy_read_only"] is False
+    assert state["errors"]
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize("mutation", ("empty_prompt", "non_object_submit"))
+def test_legacy_read_only_generation_只要_prompt_submit_文件存在就保持真实历史兼容(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / mutation)
+    if mutation == "empty_prompt":
+        (generation / "prompt.txt").write_text("", encoding="utf-8")
+    else:
+        _write_json(generation / "submit.json", [])
+    before = _run_字节与目录快照(run_root)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "legacy_read_only"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+
+    assert state == {
+        "classified": True,
+        "legacy_read_only": True,
+        "errors": [],
+    }
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    ("case", "invalid_bytes"),
+    (
+        ("single_invalid", b"\xff"),
+        ("bad_continuation", b"\xc3\x28"),
+        ("surrogate", b"\xed\xa0\x80"),
+    ),
+)
+def test_damaged_legacy_prompt_非法_utf8_时库_inspector_cli_同态拒绝且只读(
+    tmp_path: Path,
+    case: str,
+    invalid_bytes: bytes,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / case)
+    (generation / "prompt.txt").write_bytes(invalid_bytes)
+    before = _run_字节与目录快照(run_root)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert any("prompt.txt" in error and "UTF-8" in error for error in state["errors"])
+
+    completed = subprocess.run(
+        [sys.executable, str(ARTIFACT_INSPECTOR), str(run_root)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert "prompt.txt" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing_notes", "empty_results", "missing_migration_checks", "critical_failure"),
+)
+def test_damaged_legacy_qc_与_portable_validator_既有业务语义完全同态(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / mutation)
+    qc_path = generation / "qc.json"
+    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    if mutation == "missing_notes":
+        qc.pop("notes")
+    elif mutation == "empty_results":
+        qc["passed"] = []
+        qc["failed"] = []
+    elif mutation == "missing_migration_checks":
+        qc["passed"] = ["人工复核通过"]
+        qc["failed"] = []
+        qc["notes"] = "已完成普通画面复核"
+    else:
+        qc["critical_failures"] = ["category_mismatch"]
+    _write_json(qc_path, qc)
+    before = _run_字节与目录快照(run_root)
+
+    assert reference_composition.classify_reference_run(RunPaths(run_root)) == "damaged"
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+
+    assert state["legacy_read_only"] is False
+    assert state["errors"]
+    assert _run_字节与目录快照(run_root) == before
+
+
+def _legacy_must_keep_constraints(run_root: Path) -> list[dict[str, str]]:
+    must_keep = [
+        {"name": "主珠形状", "qc_question": "主珠是否保持圆形"},
+        {"name": "珠序", "qc_question": "珠子排列顺序是否保持"},
+    ]
+    _write_json(
+        run_root / "analysis" / "product_fidelity_constraints.json",
+        {"must_keep": must_keep},
+    )
+    return must_keep
+
+
+def _legacy_fidelity_check(item: dict[str, str]) -> dict[str, str]:
+    return {
+        "name": item["name"],
+        "question": item["qc_question"],
+        "result": "pass",
+        "notes": "人工逐项确认通过",
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "fidelity_checks"),
+    (
+        ("container_null", None),
+        ("container_dict", {}),
+        ("container_bool", True),
+        ("container_string", "不是列表"),
+        ("item_null", [None]),
+        ("item_list", [[]]),
+        ("item_bool", [True]),
+        ("item_string", ["不是对象"]),
+        ("item_dict_missing_fields", [{}]),
+        (
+            "result_null",
+            [{"name": "主珠", "question": "是否保持", "result": None, "notes": ""}],
+        ),
+        (
+            "result_list",
+            [{"name": "主珠", "question": "是否保持", "result": [], "notes": ""}],
+        ),
+        (
+            "result_dict",
+            [{"name": "主珠", "question": "是否保持", "result": {}, "notes": ""}],
+        ),
+        (
+            "result_bool",
+            [{"name": "主珠", "question": "是否保持", "result": True, "notes": ""}],
+        ),
+        (
+            "result_string",
+            [{"name": "主珠", "question": "是否保持", "result": "unknown", "notes": ""}],
+        ),
+    ),
+)
+def test_damaged_legacy_qc_fidelity_checks_基础类型字段与_result_必须同态拒绝(
+    tmp_path: Path,
+    case: str,
+    fidelity_checks: object,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / case)
+    qc_path = generation / "qc.json"
+    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    qc["fidelity_checks"] = fidelity_checks
+    _write_json(qc_path, qc)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert state["errors"], case
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("absent", "empty", "partial", "duplicate", "mismatch"),
+)
+def test_damaged_legacy_qc_存在_canonical_must_keep_时必须完整唯一覆盖(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / case)
+    must_keep = _legacy_must_keep_constraints(run_root)
+    checks = [_legacy_fidelity_check(item) for item in must_keep]
+    if case == "empty":
+        checks = []
+    elif case == "partial":
+        checks = checks[:1]
+    elif case == "duplicate":
+        checks = [checks[0], dict(checks[0])]
+    elif case == "mismatch":
+        checks[1]["question"] = "不匹配的问题"
+    qc_path = generation / "qc.json"
+    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    if case != "absent":
+        qc["fidelity_checks"] = checks
+    _write_json(qc_path, qc)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert state["errors"], case
+
+
+def test_legacy_read_only_qc_完整覆盖_canonical_must_keep_时同态通过(
+    tmp_path: Path,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / "complete")
+    must_keep = _legacy_must_keep_constraints(run_root)
+    qc_path = generation / "qc.json"
+    qc = json.loads(qc_path.read_text(encoding="utf-8"))
+    qc["fidelity_checks"] = [
+        _legacy_fidelity_check(item) for item in must_keep
+    ]
+    _write_json(qc_path, qc)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "legacy_read_only"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state == {
+        "classified": True,
+        "legacy_read_only": True,
+        "errors": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("case", "score"),
+    (
+        ("null", None),
+        ("list", []),
+        ("dict", {}),
+        ("bool", True),
+        ("string", "99"),
+        ("float", 99.0),
+    ),
+)
+def test_damaged_legacy_selected_score_必须是排除_bool_的_json_整数且同态(
+    tmp_path: Path,
+    case: str,
+    score: object,
+) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / case)
+    selected_path = run_root / "analysis" / "selected_references.json"
+    selected = json.loads(selected_path.read_text(encoding="utf-8"))
+    selected[0]["score"] = score
+    _write_json(selected_path, selected)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert state["errors"], case
+
+
+def _run_字节与目录快照(root: Path) -> tuple[set[Path], dict[Path, bytes]]:
+    directories = {
+        path.relative_to(root)
+        for path in root.rglob("*")
+        if path.is_dir()
+    }
+    files = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    return directories, files
+
+
+@pytest.mark.parametrize(
+    "missing_artifact",
+    (
+        "candidate",
+        "confirmed",
+        "decision_digest",
+        "manifest",
+        "snapshot_copy",
+        "analysis_copy",
+        "canonical_copy",
+    ),
+)
+def test_damaged_现代链删除任一关键文件不得降级为历史_run(
+    tmp_path: Path,
+    missing_artifact: str,
+) -> None:
+    run_root, generation = _task9_modern_run(tmp_path / missing_artifact)
+    paths = RunPaths(run_root)
+    target = {
+        "candidate": run_root / "analysis" / "reference_composition_snapshots.json",
+        "confirmed": run_root / "review" / "reference_composition_snapshot.json",
+        "manifest": generation / "input-manifest.json",
+        "snapshot_copy": generation / "reference-composition-snapshot.json",
+        "analysis_copy": generation / "product-analysis.json",
+        "canonical_copy": generation / "product-fidelity-constraints.json",
+    }.get(missing_artifact)
+    if target is not None:
+        target.unlink()
+    else:
+        decision_path = run_root / "review" / "review_decision.json"
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        decision.pop("reference_snapshot_sha256")
+        _write_json(decision_path, decision)
+    before = _run_字节与目录快照(run_root)
+
+    assert reference_composition.classify_reference_run(paths) == "damaged"
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](run_root)
+
+    assert state["legacy_read_only"] is False
+    assert state["errors"]
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    "modern_fragment",
+    (
+        "candidate",
+        "confirmed",
+        "decision_digest",
+        "manifest",
+        "snapshot_copy",
+    ),
+)
+def test_damaged_历史_run_混入任一现代残片必须拒绝且只读(
+    tmp_path: Path,
+    modern_fragment: str,
+) -> None:
+    run_root, generation = _task9_legacy_run(tmp_path / modern_fragment)
+    if modern_fragment == "candidate":
+        _write_json(
+            run_root / "analysis" / "reference_composition_snapshots.json",
+            [],
+        )
+    elif modern_fragment == "confirmed":
+        _write_json(
+            run_root / "review" / "reference_composition_snapshot.json",
+            {},
+        )
+    elif modern_fragment == "decision_digest":
+        decision_path = run_root / "review" / "review_decision.json"
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        decision["reference_snapshot_sha256"] = "0" * 64
+        _write_json(decision_path, decision)
+    elif modern_fragment == "manifest":
+        _write_json(generation / "input-manifest.json", {})
+    else:
+        _write_json(generation / "reference-composition-snapshot.json", {})
+    before = _run_字节与目录快照(run_root)
+    namespace = runpy.run_path(str(ARTIFACT_INSPECTOR))
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = namespace["inspect_run_state"](run_root)
+
+    assert state["legacy_read_only"] is False
+    assert state["errors"]
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize("source_kind", ("scene", "product"))
+def test_damaged_现代_manifest_源路径重绑定不能保留现代状态(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    run_root, generation = _task9_modern_run(tmp_path / source_kind)
+    manifest_path = generation / "input-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    index = 0 if source_kind == "scene" else 1
+    alternative = run_root / "sources" / f"alternative-{source_kind}.jpg"
+    alternative.write_bytes(
+        (generation / manifest["inputs"][index]["copied_file"]).read_bytes()
+    )
+    manifest["inputs"][index]["source_path"] = str(alternative.resolve())
+    _write_json(manifest_path, manifest)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+
+
+def test_migration_inspector_完整历史_run_cli_只读通过(tmp_path: Path) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / "legacy-cli")
+    before = _run_字节与目录快照(run_root)
+
+    completed = subprocess.run(
+        [sys.executable, str(ARTIFACT_INSPECTOR), str(run_root)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "legacy_read_only=true" in completed.stdout
+    assert "Traceback" not in completed.stderr
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    ("action", "extra_args"),
+    (
+        ("rerank", []),
+        ("manual_reference", ["--manual-reference", "manual.jpg"]),
+        (
+            "generate_rank_1",
+            ["--fidelity-confirmed", "--selected-ranks", "1"],
+        ),
+    ),
+)
+def test_legacy_read_only_record_decision_cli_在写前业务拒绝且不改磁盘(
+    tmp_path: Path,
+    capsys,
+    action: str,
+    extra_args: list[str],
+) -> None:
+    run_root, _generation = _task9_legacy_run(tmp_path / action)
+    _write_json(
+        run_root / "analysis" / "output_role.json",
+        {"output_role": "hand_worn"},
+    )
+    before = _run_字节与目录快照(run_root)
+
+    exit_code = cli_main(
+        [
+            "record-decision",
+            "--run-root",
+            str(run_root),
+            "--action",
+            action,
+            "--output-role",
+            "hand_worn",
+            *extra_args,
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "历史 run 只读" in captured.err
+    assert "Traceback" not in captured.err
+    assert _run_字节与目录快照(run_root) == before
+
+
+def test_damaged_inspector_非对象_decision_cli_返回业务错误无_traceback(
+    tmp_path: Path,
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / "bad-decision-cli")
+    _write_json(run_root / "review" / "review_decision.json", [])
+    before = _run_字节与目录快照(run_root)
+
+    completed = subprocess.run(
+        [sys.executable, str(ARTIFACT_INSPECTOR), str(run_root)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "review_decision.json 必须是 JSON 对象" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "empty_object",
+        "bad_rank",
+        "bad_sha256",
+        "missing_field",
+        "bad_signature",
+        "source_binding",
+    ),
+)
+def test_damaged_inspector_逐项拒绝损坏候选快照且_cli_无_traceback(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / mutation)
+    candidates_path = (
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+    if mutation == "empty_object":
+        candidates.append({})
+    elif mutation == "bad_rank":
+        candidates[1]["rank"] = True
+    elif mutation == "bad_sha256":
+        candidates[1]["reference_sha256"] = "A" * 64
+    elif mutation == "missing_field":
+        candidates[1].pop("lighting")
+    elif mutation == "bad_signature":
+        candidates[1]["composition_signature"] = "0" * 64
+    else:
+        candidates[1]["reference_file"] = candidates[0]["reference_file"]
+        candidates[1]["reference_sha256"] = candidates[0]["reference_sha256"]
+    _write_json(candidates_path, candidates)
+    before = _run_字节与目录快照(run_root)
+
+    completed = subprocess.run(
+        [sys.executable, str(ARTIFACT_INSPECTOR), str(run_root)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "候选" in completed.stderr or "快照" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "pose_empty_resigned",
+        "target_bad_count_resigned",
+        "visible_regions_string",
+        "visibility_integer",
+        "ui_risk_unknown",
+        "pose_hand_side_list_resigned",
+        "target_body_region_list_resigned",
+        "other_jewelry_string",
+        "framing_empty",
+    ),
+)
+def test_damaged_inspector_重签名也不能绕过候选快照嵌套_schema_校验(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / mutation)
+    candidates_path = (
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidate = candidates[1]
+    if mutation == "pose_empty_resigned":
+        candidate["pose"] = {}
+    elif mutation == "target_bad_count_resigned":
+        candidate["replacement_target"]["target_product_count"] = 2
+    elif mutation == "visible_regions_string":
+        candidate["visible_body_regions"] = "左手腕"
+    elif mutation == "visibility_integer":
+        candidate["product_visibility_sufficient"] = 1
+    elif mutation == "ui_risk_unknown":
+        candidate["text_or_ui_risk"] = "unknown"
+    elif mutation == "pose_hand_side_list_resigned":
+        candidate["pose"]["hand_side"] = []
+    elif mutation == "target_body_region_list_resigned":
+        candidate["replacement_target"]["body_region"] = []
+    elif mutation == "other_jewelry_string":
+        candidate["other_jewelry_to_remove"] = "无"
+    else:
+        candidate["framing"] = ""
+    candidate["composition_signature"] = _task9_signature(candidate)
+    _write_json(candidates_path, candidates)
+    before = _run_字节与目录快照(run_root)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+
+    assert state["legacy_read_only"] is False
+    assert state["errors"], mutation
+    assert _run_字节与目录快照(run_root) == before
+
+
+@pytest.mark.parametrize("scope", ("top", "pose", "target"))
+def test_damaged_参考构图快照三层未知字段必须被库与_inspector_同态拒绝(
+    tmp_path: Path,
+    scope: str,
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / scope)
+    candidates_path = (
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidate = candidates[1]
+    if scope == "top":
+        candidate["未知顶层字段"] = "不允许"
+    elif scope == "pose":
+        candidate["pose"]["未知姿态字段"] = "不允许"
+    else:
+        candidate["replacement_target"]["未知目标字段"] = "不允许"
+    candidate["composition_signature"] = _task9_signature(candidate)
+    _write_json(candidates_path, candidates)
+
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert state["errors"]
+
+    with pytest.raises(ValueError, match="未知字段"):
+        if scope == "top":
+            ReferenceCompositionSnapshot.from_dict(candidate)
+        elif scope == "pose":
+            ReferencePose.from_dict(candidate["pose"])
+        else:
+            ReplacementTarget.from_dict(candidate["replacement_target"])
+    with pytest.raises(ValueError, match="未知字段"):
+        ReferenceCompositionSnapshot.from_dict(candidate)
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "item"),
+    (
+        ("empty_string", ""),
+        ("blank_string", "   "),
+        ("null", None),
+        ("list", []),
+        ("dict", {}),
+        ("bool", True),
+        ("number", 1),
+    ),
+)
+def test_damaged_other_jewelry_to_remove_元素必须是非空字符串且同态拒绝(
+    tmp_path: Path,
+    case: str,
+    item: object,
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / case)
+    candidates_path = (
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidate = candidates[1]
+    candidate["other_jewelry_to_remove"] = [item]
+    candidate["composition_signature"] = _task9_signature(candidate)
+    _write_json(candidates_path, candidates)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert state["errors"], case
+
+
+@pytest.mark.parametrize(
+    "items",
+    ([], ["右手腕原手链"]),
+)
+def test_modern_snapshot_other_jewelry_to_remove_空列表与正常字符串保持合法(
+    tmp_path: Path,
+    items: list[str],
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / str(len(items)))
+    candidates_path = (
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidate = candidates[1]
+    candidate["other_jewelry_to_remove"] = items
+    candidate["composition_signature"] = _task9_signature(candidate)
+    _write_json(candidates_path, candidates)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "modern_snapshot"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["errors"] == []
+
+
+@pytest.mark.parametrize(
+    ("case", "source_jewelry"),
+    (
+        ("ambiguous_string", "两条手链"),
+        ("null", None),
+        ("list", []),
+        ("dict", {}),
+        ("bool", True),
+    ),
+)
+def test_damaged_候选快照多件同类首饰无唯一选择器时库与_inspector_同态拒绝(
+    tmp_path: Path,
+    case: str,
+    source_jewelry: object,
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / case)
+    candidates_path = (
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidate = candidates[1]
+    candidate["replacement_target"]["source_jewelry"] = source_jewelry
+    candidate["replacement_target"]["body_region"] = "左手腕"
+    candidate["composition_signature"] = _task9_signature(candidate)
+    _write_json(candidates_path, candidates)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "damaged"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["legacy_read_only"] is False
+    assert state["errors"], case
+
+
+@pytest.mark.parametrize(
+    ("selector", "source_jewelry", "body_region"),
+    (
+        ("inner", "两条手链中的内侧手链", "左手腕内侧手链位置"),
+        ("outer", "两条手链中的外侧手链", "左手腕外侧手链位置"),
+        ("upper", "两条手链中的上方手链", "左手腕上方手链位置"),
+        ("lower", "两条手链中的下方手链", "左手腕下方手链位置"),
+        ("ordinal", "两条手链中的第2条", "左手腕第2条位置"),
+    ),
+)
+def test_modern_snapshot_多件同类首饰显式唯一选择器保持库与_inspector_同态通过(
+    tmp_path: Path,
+    selector: str,
+    source_jewelry: str,
+    body_region: str,
+) -> None:
+    run_root, _generation = _task9_modern_run(tmp_path / selector)
+    candidates_path = (
+        run_root / "analysis" / "reference_composition_snapshots.json"
+    )
+    candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+    candidate = candidates[1]
+    candidate["replacement_target"]["source_jewelry"] = source_jewelry
+    candidate["replacement_target"]["body_region"] = body_region
+    candidate["composition_signature"] = _task9_signature(candidate)
+    _write_json(candidates_path, candidates)
+
+    assert (
+        reference_composition.classify_reference_run(RunPaths(run_root))
+        == "modern_snapshot"
+    )
+    state = runpy.run_path(str(ARTIFACT_INSPECTOR))["inspect_run_state"](
+        run_root
+    )
+    assert state["errors"] == []

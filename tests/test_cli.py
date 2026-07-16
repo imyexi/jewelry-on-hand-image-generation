@@ -1229,7 +1229,9 @@ def test_record_decision_cli_rolls_back_analysis_and_decision_on_second_replace_
         product_type="戒指",
         detected_product_type="ring",
         confirmed_product_type="ring",
+        classification_confidence="high",
         classification_evidence=["左手无名指根部可见单枚戒指"],
+        classification_source="auto_confirmed",
         wear_position="左手无名指根部",
         visible_appearance="单枚银色戒指",
         length_category=None,
@@ -1238,6 +1240,7 @@ def test_record_decision_cli_rolls_back_analysis_and_decision_on_second_replace_
         finger_position="ring",
         ring_wear_style="finger_base",
     )
+    prepare_snapshot_decision_run(run_root)
     write_json(decision_path, {"action": "rerank", "selected_ranks": []})
     declare_scene_output_role(run_root)
     old_analysis = analysis_path.read_bytes()

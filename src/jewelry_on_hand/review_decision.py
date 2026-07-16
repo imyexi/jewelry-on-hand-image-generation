@@ -33,7 +33,10 @@ from jewelry_on_hand.reference_composition import (
     REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME,
     ReferenceCompositionSnapshot,
     build_candidate_snapshot,
+    classify_reference_run,
     reference_composition_sha256,
+    require_modern_reference_run,
+    require_reference_review_ready,
     validate_snapshot_binding,
 )
 from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
@@ -48,7 +51,36 @@ class ReviewGateError(RuntimeError):
     """Review 决策 Gate 未满足时抛出。"""
 
 
+def _require_writable_review_run(paths: RunPaths) -> None:
+    try:
+        require_reference_review_ready(paths)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ReviewGateError(str(exc)) from exc
+
+
+def _require_writable_review_bundle(
+    paths: RunPaths,
+    decision_data: dict[str, Any],
+) -> None:
+    action = decision_data.get("action") if isinstance(decision_data, dict) else None
+    candidates_path = paths.analysis_dir / REFERENCE_COMPOSITION_SNAPSHOTS_FILE_NAME
+    confirmed_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+    has_generation = paths.generation_dir.is_dir() and any(
+        path.is_dir() for path in paths.generation_dir.iterdir()
+    )
+    if (
+        action in _GENERATION_ACTIONS
+        and not candidates_path.exists()
+        and not confirmed_path.exists()
+        and not has_generation
+    ):
+        # 无候选快照的生成事务最终必然只读失败；先保留约束校验的精确错误。
+        return
+    _require_writable_review_run(paths)
+
+
 def write_review_decision(paths: RunPaths, data: dict[str, Any]) -> Path:
+    _require_writable_review_run(paths)
     try:
         decision = ReviewDecision.from_dict(data)
         _reject_legacy_generation_write(decision)
@@ -72,6 +104,7 @@ def write_analysis_and_review_decision(
     decision_data: dict[str, Any],
 ) -> Path:
     """校验并以失败可回滚的方式同步提交 analysis 与 decision。"""
+    _require_writable_review_run(paths)
     try:
         analysis = ProductAnalysis.from_dict(analysis_data)
         validate_confirmed_analysis(analysis)
@@ -100,6 +133,7 @@ def write_review_bundle(
     analysis_data: dict[str, Any] | None = None,
 ) -> Path:
     """原子提交可选 analysis、decision 与规范保真约束。"""
+    _require_writable_review_bundle(paths, decision_data)
     try:
         normalized_decision_data = dict(decision_data)
         action = normalized_decision_data.get("action")
@@ -237,6 +271,11 @@ def require_generation_decision(paths: RunPaths) -> ReviewDecision:
                 isinstance(decision_data, dict)
                 and decision_data.get("action") in _GENERATION_ACTIONS
             ):
+                if classify_reference_run(paths) == "legacy_read_only":
+                    try:
+                        require_modern_reference_run(paths)
+                    except ValueError as gate_exc:
+                        raise ReviewGateError(str(gate_exc)) from gate_exc
                 raise ReviewGateError(
                     f"无效的 Review 决策文件：{decision_path}；{strict_exc}；"
                     "请重新执行 prepare-review 并确认参考构图快照"
@@ -277,6 +316,10 @@ def require_generation_decision(paths: RunPaths) -> ReviewDecision:
             validate_product_fidelity_constraints(analysis, constraints)
     except (OSError, TypeError, ValueError) as exc:
         raise ReviewGateError(f"无效的产品保真约束文件：{constraints_path}；{exc}") from exc
+    try:
+        require_modern_reference_run(paths)
+    except ValueError as exc:
+        raise ReviewGateError(str(exc)) from exc
     return decision
 
 

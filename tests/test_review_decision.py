@@ -1,7 +1,9 @@
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
+import jewelry_on_hand.reference_composition as reference_composition
 import jewelry_on_hand.review_decision as review_decision
 
 from jewelry_on_hand.review_decision import (
@@ -31,6 +33,20 @@ from jewelry_on_hand.run_paths import RunPaths, read_json, write_json
 
 
 VALID_REFERENCE_SNAPSHOT_SHA256 = "a" * 64
+
+
+def _run_文件树快照(root):
+    directories = {
+        path.relative_to(root)
+        for path in root.rglob("*")
+        if path.is_dir()
+    }
+    files = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    return directories, files
 
 
 def _constraints_data(review_status="confirmed", must_keep=None, analysis_data=None):
@@ -101,6 +117,7 @@ def _write_reference_snapshot_artifacts(
     output_role="hand_worn",
     analysis_data=None,
 ):
+    (paths.input_dir / "product-on-hand.jpg").write_bytes(b"product-on-hand")
     source = source_dir / f"source-{rank}.jpg"
     source.write_bytes(f"reference-{rank}".encode())
     scored = ScoredReference(
@@ -164,6 +181,86 @@ def _write_reference_snapshot_artifacts(
     )
     _write_confirmed_constraints(paths)
     return snapshot
+
+
+def _write_完整现代审核_run(tmp_path, run_id="modern-snapshot"):
+    paths = RunPaths.create(tmp_path, run_id)
+    snapshot = _write_reference_snapshot_artifacts(paths, tmp_path)
+    review_decision.write_review_bundle(
+        paths,
+        {
+            "action": "generate_rank_1",
+            "fidelity_confirmed": True,
+            "output_role": "hand_worn",
+        },
+    )
+    return paths, snapshot
+
+
+def _write_完整历史_run(tmp_path, run_id="legacy-read-only"):
+    paths = RunPaths.create(tmp_path, run_id)
+    product = paths.input_dir / "product-on-hand.jpg"
+    product.write_bytes(b"legacy-product")
+    source = tmp_path / f"{run_id}-source-1.jpg"
+    source.write_bytes(b"legacy-reference-1")
+    selected_items = []
+    for rank in (1, 2, 3):
+        ranked_source = source if rank == 1 else tmp_path / f"{run_id}-source-{rank}.jpg"
+        if rank != 1:
+            ranked_source.write_bytes(f"legacy-reference-{rank}".encode())
+        selected = paths.review_dir / f"rank-{rank}-source.jpg"
+        selected.write_bytes(ranked_source.read_bytes())
+        digest = sha256(ranked_source.read_bytes()).hexdigest()
+        selected_items.append(
+            {
+                "rank": rank,
+                "score": 100 - rank,
+                "selected_reference": str(selected.resolve()),
+                "source_sha256": digest,
+                "review_sha256": digest,
+                "metadata": {
+                    "source_reference": str(ranked_source.resolve()),
+                    "source_sha256": digest,
+                    "review_sha256": digest,
+                },
+            }
+        )
+    write_json(paths.analysis_dir / "product_analysis.json", _bracelet_analysis_data())
+    write_json(
+        paths.analysis_dir / "selected_references.json",
+        selected_items,
+    )
+    _write_confirmed_constraints(paths)
+    write_json(
+        paths.review_dir / "review_decision.json",
+        {
+            "action": "generate_rank_1",
+            "selected_ranks": [1],
+            "fidelity_confirmed": True,
+        },
+    )
+    generation = paths.generation_dir / "01"
+    generation.mkdir()
+    (generation / "hand-reference.jpg").write_bytes(source.read_bytes())
+    (generation / "model.txt").write_text("gpt_image_2", encoding="utf-8")
+    (generation / "prompt.txt").write_text("历史提示词", encoding="utf-8")
+    write_json(generation / "submit.json", {"ok": True})
+    write_json(generation / "result.json", {"data": {"status": "completed"}})
+    (generation / "result.png").write_bytes(b"legacy-result")
+    write_json(
+        generation / "qc.json",
+        {
+            "status": "pass",
+            "passed": [
+                "原图手腕检查通过",
+                "原图手臂检查通过",
+                "皮肤块迁移检查通过",
+            ],
+            "failed": [],
+            "notes": "未发现人物局部迁移",
+        },
+    )
+    return paths
 
 
 def _necklace_analysis_data(**overrides):
@@ -484,6 +581,7 @@ def test_writer_reuses_review_decision_model_serialization_boundary(
     monkeypatch,
 ):
     paths = RunPaths.create(tmp_path, "model-serialization")
+    _write_reference_snapshot_artifacts(paths, tmp_path)
     calls = []
     original_to_dict = ReviewDecision.to_dict
 
@@ -513,6 +611,7 @@ def test_旧公开写接口拒绝创建无确认参考快照的新生成决策(
     ranks,
 ):
     paths = RunPaths.create(tmp_path, f"run-old-writer-{action}")
+    _write_reference_snapshot_artifacts(paths, tmp_path)
     decision_data = {
         "action": action,
         "selected_ranks": ranks,
@@ -552,6 +651,7 @@ def test_历史生成决策仍可读取(tmp_path):
 
 def test_generation_rejects_rerank_decision(tmp_path):
     paths = RunPaths.create(tmp_path, "run-1")
+    _write_reference_snapshot_artifacts(paths, tmp_path)
     write_review_decision(paths, {"action": "rerank"})
 
     with pytest.raises(ReviewGateError, match="rerank"):
@@ -560,6 +660,7 @@ def test_generation_rejects_rerank_decision(tmp_path):
 
 def test_generation_rejects_manual_reference_decision(tmp_path):
     paths = RunPaths.create(tmp_path, "run-1")
+    _write_reference_snapshot_artifacts(paths, tmp_path)
     write_review_decision(paths, {"action": "manual_reference", "manual_reference": "manual.jpg"})
 
     with pytest.raises(ReviewGateError, match="manual_reference"):
@@ -662,17 +763,15 @@ def test_require_generation_decision_rejects_historical_noncanonical_path(tmp_pa
 
 
 def test_require_generation_decision_allows_not_applicable_constraints(tmp_path):
-    paths = RunPaths.create(tmp_path, "run-1")
-    write_json(paths.analysis_dir / "product_fidelity_constraints.json", _constraints_data(review_status="not_applicable", must_keep=[]))
-    write_json(
-        paths.review_dir / "review_decision.json",
-        {
-            "action": "generate_rank_1",
-            "selected_ranks": [1],
-            "fidelity_confirmed": True,
-            "reference_snapshot_sha256": VALID_REFERENCE_SNAPSHOT_SHA256,
-        },
-    )
+    paths, _snapshot = _write_完整现代审核_run(tmp_path, "run-1")
+    analysis_data = _bracelet_analysis_data()
+    analysis_data["visible_appearance"] = "普通同色圆珠手链"
+    write_json(paths.analysis_dir / "product_analysis.json", analysis_data)
+    constraints = build_product_fidelity_constraints(
+        ProductAnalysis.from_dict(analysis_data)
+    ).to_dict()
+    assert constraints["review_status"] == "not_applicable"
+    write_json(paths.analysis_dir / "product_fidelity_constraints.json", constraints)
 
     assert require_generation_decision(paths).selected_ranks == [1]
 
@@ -779,18 +878,20 @@ def test_necklace_snapshot_requires_final_analysis_on_write_and_read(tmp_path):
 def test_necklace_decision_snapshot_roundtrip_and_strict_validation(tmp_path):
     paths = RunPaths.create(tmp_path, "run-1")
     analysis_data = _necklace_analysis_data()
-    write_json(paths.analysis_dir / "product_analysis.json", analysis_data)
-    _write_confirmed_constraints(paths)
+    _write_reference_snapshot_artifacts(
+        paths,
+        tmp_path,
+        analysis_data=analysis_data,
+    )
 
-    decision_path = paths.review_dir / "review_decision.json"
-    write_json(
-        decision_path,
+    decision_path = review_decision.write_review_bundle(
+        paths,
         {
             "action": "generate_rank_1",
             "selected_ranks": [1],
             "fidelity_confirmed": True,
             "confirmation_snapshot": _confirmation_snapshot(),
-            "reference_snapshot_sha256": VALID_REFERENCE_SNAPSHOT_SHA256,
+            "output_role": "hand_worn",
         },
     )
 
@@ -918,6 +1019,7 @@ def test_confirmed_analysis_validation_does_not_depend_on_decision_action():
 
 def test_pair_write_updates_analysis_and_decision_together(tmp_path):
     paths = RunPaths.create(tmp_path, "run-1")
+    _write_reference_snapshot_artifacts(paths, tmp_path)
     analysis_data = _necklace_analysis_data()
     decision_data = {
         "action": "rerank",
@@ -939,12 +1041,12 @@ def test_pair_write_rolls_back_both_files_when_second_replace_fails(tmp_path, mo
     import os
 
     paths = RunPaths.create(tmp_path, "run-1")
+    _write_reference_snapshot_artifacts(paths, tmp_path)
+    write_review_decision(paths, {"action": "rerank"})
     analysis_path = paths.analysis_dir / "product_analysis.json"
     decision_path = paths.review_dir / "review_decision.json"
-    old_analysis = b'{"old_analysis": true}\n'
-    old_decision = b'{"old_decision": true}\n'
-    analysis_path.write_bytes(old_analysis)
-    decision_path.write_bytes(old_decision)
+    old_analysis = analysis_path.read_bytes()
+    old_decision = decision_path.read_bytes()
     original_replace = os.replace
     replace_count = 0
 
@@ -1429,15 +1531,19 @@ def test_review_bundle_validates_constraints_before_any_replace(
     source_kind,
 ):
     paths = RunPaths.create(tmp_path, f"run-{source_kind}")
+    analysis_data = _necklace_analysis_data()
+    _write_reference_snapshot_artifacts(
+        paths,
+        tmp_path,
+        analysis_data=analysis_data,
+    )
+    write_review_decision(paths, {"action": "rerank"})
     analysis_path = paths.analysis_dir / "product_analysis.json"
     decision_path = paths.review_dir / "review_decision.json"
     canonical_path = paths.analysis_dir / "product_fidelity_constraints.json"
-    old_analysis = b'{"old_analysis": true}\n'
-    old_decision = b'{"old_decision": true}\n'
-    old_constraints = b'{"old_constraints": true}\n'
-    analysis_path.write_bytes(old_analysis)
-    decision_path.write_bytes(old_decision)
-    canonical_path.write_bytes(old_constraints)
+    old_analysis = analysis_path.read_bytes()
+    old_decision = decision_path.read_bytes()
+    old_constraints = canonical_path.read_bytes()
     imported_path = paths.review_dir / "imported-constraints.json"
     if source_kind == "malformed":
         write_json(imported_path, {"review_status": "pending"})
@@ -1456,7 +1562,7 @@ def test_review_bundle_validates_constraints_before_any_replace(
                 "fidelity_constraints_path": str(imported_path),
                 "confirmation_snapshot": _confirmation_snapshot(),
             },
-            analysis_data=_necklace_analysis_data(),
+            analysis_data=analysis_data,
         )
 
     assert replace_calls == []
@@ -1635,14 +1741,8 @@ def test_四文件事务第三次替换失败时也回滚全部文件(
     decision_path = paths.review_dir / "review_decision.json"
     canonical_path = paths.analysis_dir / "product_fidelity_constraints.json"
     snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
-    old_analysis = b'{"old_analysis": true}\n'
-    old_decision = b'{"old_decision": true}\n'
-    old_constraints = b'{"old_constraints": true}\n'
-    old_snapshot = b'{"old_snapshot": true}\n'
-    analysis_path.write_bytes(old_analysis)
-    decision_path.write_bytes(old_decision)
-    canonical_path.write_bytes(old_constraints)
-    snapshot_path.write_bytes(old_snapshot)
+    old_analysis = analysis_path.read_bytes()
+    old_constraints = canonical_path.read_bytes()
     imported_path = paths.review_dir / "imported-constraints.json"
     write_json(
         imported_path,
@@ -1677,9 +1777,9 @@ def test_四文件事务第三次替换失败时也回滚全部文件(
         )
 
     assert analysis_path.read_bytes() == old_analysis
-    assert decision_path.read_bytes() == old_decision
     assert canonical_path.read_bytes() == old_constraints
-    assert snapshot_path.read_bytes() == old_snapshot
+    assert not decision_path.exists()
+    assert not snapshot_path.exists()
     assert not list(paths.analysis_dir.glob("*.tmp"))
     assert not list(paths.review_dir.glob("*.tmp"))
 
@@ -1901,13 +2001,9 @@ def test_四文件事务第四次替换失败时逐字节回滚并清理临时�
     canonical_path = paths.analysis_dir / "product_fidelity_constraints.json"
     snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
     old_files = {
-        analysis_path: b'{"old_analysis": true}\n',
-        decision_path: b'{"old_decision": true}\n',
-        canonical_path: b'{"old_constraints": true}\n',
-        snapshot_path: b'{"old_snapshot": true}\n',
+        analysis_path: analysis_path.read_bytes(),
+        canonical_path: canonical_path.read_bytes(),
     }
-    for path, content in old_files.items():
-        path.write_bytes(content)
     imported_path = paths.review_dir / "imported-constraints.json"
     write_json(
         imported_path,
@@ -1944,6 +2040,8 @@ def test_四文件事务第四次替换失败时逐字节回滚并清理临时�
         )
 
     assert {path: path.read_bytes() for path in old_files} == old_files
+    assert not decision_path.exists()
+    assert not snapshot_path.exists()
     assert not list(paths.analysis_dir.glob("*.tmp"))
     assert not list(paths.review_dir.glob("*.tmp"))
 
@@ -1993,3 +2091,196 @@ def test_四文件事务失败时删除本次新建目标并恢复已有文件(
     assert not snapshot_path.exists()
     assert not list(paths.analysis_dir.glob("*.tmp"))
     assert not list(paths.review_dir.glob("*.tmp"))
+
+
+def test_migration_完整现代审核_run_分类并加载确认快照(tmp_path):
+    paths, snapshot = _write_完整现代审核_run(tmp_path)
+
+    assert reference_composition.classify_reference_run(paths) == "modern_snapshot"
+    assert reference_composition.require_modern_reference_run(paths) == snapshot
+    assert require_generation_decision(paths).selected_ranks == [1]
+
+
+def test_legacy_read_only_完整历史_run_拒绝生成决策且只读(tmp_path):
+    paths = _write_完整历史_run(tmp_path)
+    before = _run_文件树快照(paths.root)
+
+    assert reference_composition.classify_reference_run(paths) == "legacy_read_only"
+    with pytest.raises(
+        ReviewGateError,
+        match="历史 run 只读.*重新执行 prepare-review",
+    ):
+        require_generation_decision(paths)
+
+    assert _run_文件树快照(paths.root) == before
+
+
+@pytest.mark.parametrize(
+    ("写入入口", "decision_data"),
+    (
+        (
+            "write_review_decision-rerank",
+            {"action": "rerank"},
+        ),
+        (
+            "write_review_decision-manual_reference",
+            {"action": "manual_reference", "manual_reference": "manual.jpg"},
+        ),
+        (
+            "write_analysis_and_review_decision-rerank",
+            {"action": "rerank"},
+        ),
+        (
+            "write_analysis_and_review_decision-manual_reference",
+            {"action": "manual_reference", "manual_reference": "manual.jpg"},
+        ),
+        (
+            "write_review_bundle-rerank",
+            {"action": "rerank"},
+        ),
+        (
+            "write_review_bundle-manual_reference",
+            {"action": "manual_reference", "manual_reference": "manual.jpg"},
+        ),
+        (
+            "write_review_bundle-generate_rank_1",
+            {
+                "action": "generate_rank_1",
+                "fidelity_confirmed": True,
+                "output_role": "hand_worn",
+            },
+        ),
+    ),
+)
+def test_legacy_read_only_任何_review_写入入口均在写前拒绝且保持字节不变(
+    tmp_path,
+    写入入口,
+    decision_data,
+):
+    paths = _write_完整历史_run(tmp_path, 写入入口)
+    before = _run_文件树快照(paths.root)
+
+    with pytest.raises(
+        ReviewGateError,
+        match="历史 run 只读.*重新执行 prepare-review",
+    ):
+        if 写入入口.startswith("write_analysis_and_review_decision"):
+            write_analysis_and_review_decision(
+                paths,
+                _bracelet_analysis_data(),
+                decision_data,
+            )
+        elif 写入入口.startswith("write_review_bundle"):
+            review_decision.write_review_bundle(paths, decision_data)
+        else:
+            write_review_decision(paths, decision_data)
+
+    assert _run_文件树快照(paths.root) == before
+
+
+@pytest.mark.parametrize(
+    "invalid_digest",
+    [None, 1, "a" * 63, "a" * 65, "A" * 64, "g" * 64, "0" * 64],
+)
+def test_damaged_坏摘要均返回中文迁移错误且不修改_run(
+    tmp_path,
+    invalid_digest,
+):
+    paths, _snapshot = _write_完整现代审核_run(
+        tmp_path,
+        f"damaged-digest-{type(invalid_digest).__name__}-{len(str(invalid_digest))}",
+    )
+    decision_path = paths.review_dir / "review_decision.json"
+    decision = read_json(decision_path)
+    decision["reference_snapshot_sha256"] = invalid_digest
+    write_json(decision_path, decision)
+    before = _run_文件树快照(paths.root)
+
+    assert reference_composition.classify_reference_run(paths) == "damaged"
+    with pytest.raises(
+        ValueError,
+        match="run 产物不完整/损坏.*重新执行 prepare-review",
+    ):
+        reference_composition.require_modern_reference_run(paths)
+
+    assert _run_文件树快照(paths.root) == before
+
+
+@pytest.mark.parametrize("decision_data", [[], "坏决策", None, True, 1])
+def test_damaged_非对象决策返回中文迁移错误且不修改_run(
+    tmp_path,
+    decision_data,
+):
+    paths, _snapshot = _write_完整现代审核_run(
+        tmp_path,
+        f"damaged-decision-{type(decision_data).__name__}",
+    )
+    write_json(paths.review_dir / "review_decision.json", decision_data)
+    before = _run_文件树快照(paths.root)
+
+    assert reference_composition.classify_reference_run(paths) == "damaged"
+    with pytest.raises(
+        ValueError,
+        match="run 产物不完整/损坏.*重新执行 prepare-review",
+    ):
+        reference_composition.require_modern_reference_run(paths)
+
+    assert _run_文件树快照(paths.root) == before
+
+
+def test_damaged_确认快照与候选快照摘要链不一致(tmp_path):
+    paths, _snapshot = _write_完整现代审核_run(tmp_path)
+    snapshot_path = paths.review_dir / REFERENCE_COMPOSITION_SNAPSHOT_FILE_NAME
+    snapshot_data = read_json(snapshot_path)
+    snapshot_data["background"] = "被单独篡改的背景"
+    write_json(snapshot_path, snapshot_data)
+
+    assert reference_composition.classify_reference_run(paths) == "damaged"
+    with pytest.raises(ValueError, match="run 产物不完整/损坏"):
+        reference_composition.require_modern_reference_run(paths)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "product",
+        "analysis",
+        "canonical",
+        "selected",
+        "review_copy",
+        "source",
+        "output_role",
+        "fidelity_unconfirmed",
+        "constraints_path",
+    ),
+)
+def test_damaged_现代根产物与完整决策任一断链均拒绝(
+    tmp_path,
+    mutation,
+):
+    paths, _snapshot = _write_完整现代审核_run(tmp_path, mutation)
+    selected_path = paths.analysis_dir / "selected_references.json"
+    selected = read_json(selected_path)
+    decision_path = paths.review_dir / "review_decision.json"
+    decision = read_json(decision_path)
+    target = {
+        "product": paths.input_dir / "product-on-hand.jpg",
+        "analysis": paths.analysis_dir / "product_analysis.json",
+        "canonical": paths.analysis_dir / "product_fidelity_constraints.json",
+        "selected": selected_path,
+        "review_copy": Path(selected[0]["selected_reference"]),
+        "source": Path(selected[0]["metadata"]["source_reference"]),
+        "output_role": paths.analysis_dir / "output_role.json",
+    }.get(mutation)
+    if target is not None:
+        target.unlink()
+    elif mutation == "fidelity_unconfirmed":
+        decision["fidelity_confirmed"] = False
+        write_json(decision_path, decision)
+    else:
+        decision["fidelity_constraints_path"] = "review/other.json"
+        write_json(decision_path, decision)
+
+    assert reference_composition.classify_reference_run(paths) == "damaged"
+    with pytest.raises(ValueError, match="run 产物不完整/损坏"):
+        reference_composition.require_modern_reference_run(paths)
