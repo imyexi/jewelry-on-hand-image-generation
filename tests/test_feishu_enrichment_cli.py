@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -82,8 +83,18 @@ def test_prepare_review_no_longer_requires_classification_argument(monkeypatch, 
     monkeypatch.setattr("jewelry_on_hand.cli.sync_and_load_reference_rows", lambda config: calls.append(config) or [])
     monkeypatch.setattr("jewelry_on_hand.cli.load_product_analysis", lambda path: object())
     monkeypatch.setattr("jewelry_on_hand.cli.build_product_fidelity_constraints", lambda product, **_kwargs: type("C", (), {"to_dict": lambda self: {}})())
-    monkeypatch.setattr("jewelry_on_hand.cli.select_top_references", lambda product, rows, **_kwargs: ([], []))
-    monkeypatch.setattr("jewelry_on_hand.cli.write_review_package", lambda *args: None)
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.select_top_references_with_audit",
+        lambda product, rows, **_kwargs: SimpleNamespace(
+            selected=(),
+            candidates=(),
+            audit={},
+        ),
+    )
+    monkeypatch.setattr(
+        "jewelry_on_hand.cli.write_review_package",
+        lambda *args, **kwargs: None,
+    )
 
     exit_code = main([
         "prepare-review",
