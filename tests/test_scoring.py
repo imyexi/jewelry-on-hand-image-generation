@@ -5,9 +5,11 @@ import pytest
 from jewelry_on_hand.models import ProductAnalysis, ProductDimensions, ReferenceRow, ScoredReference
 from jewelry_on_hand.output_roles import OutputRole
 from jewelry_on_hand.scoring import (
+    ReferenceSelectionInsufficientError,
     score_reference,
     select_batch_diverse_references,
     select_top_references,
+    select_top_references_with_audit,
 )
 
 
@@ -71,18 +73,60 @@ def test_select_top_references_filters_missing_and_scores_priority():
     assert any("暗调" in reason for reason in selected[0].reason)
 
 
-def test_hero_selection_requires_dark_background_candidates():
+def test_selection_without_prompt_does_not_filter_by_background_brightness():
     selected, candidates = select_top_references(
         product(),
         [
             row(1, purpose_category="主图（静物不带人）", scene_keywords="深色背景 黑色绒布", recommended_usage="产品主图特写"),
-            row(2, scene_keywords="自然光 浅色背景", recommended_usage="产品主图特写"),
+            row(2, purpose_category="主图（静物不带人）", scene_keywords="自然光 浅色背景", recommended_usage="产品主图特写"),
+            row(3, purpose_category="主图（静物不带人）", scene_keywords="户外 绿色背景", recommended_usage="产品主图特写"),
         ],
         output_role=OutputRole.HERO,
     )
 
-    assert [item.row.index for item in selected] == [1]
-    assert [item.row.index for item in candidates] == [1]
+    assert {item.row.index for item in selected} == {1, 2, 3}
+    assert {item.row.index for item in candidates} == {1, 2, 3}
+
+
+def test_selection_prompt_is_an_all_conditions_hard_gate():
+    result = select_top_references_with_audit(
+        product(),
+        [
+            row(1, purpose_category="手部佩戴图", scene_keywords="浅色背景 自然光", recommended_usage="右手 近景"),
+            row(2, purpose_category="手部佩戴图", scene_keywords="浅色背景", recommended_usage="右手 近景"),
+            row(3, purpose_category="手部佩戴图", scene_keywords="浅色背景 自然光", recommended_usage="左手 近景"),
+            row(4, purpose_category="手部佩戴图", scene_keywords="浅色背景 自然光", recommended_usage="右手 近景"),
+            row(5, purpose_category="手部佩戴图", scene_keywords="浅色背景 自然光", recommended_usage="右手 近景"),
+        ],
+        output_role=OutputRole.HAND_WORN,
+        reference_selection_prompt="浅色背景；自然光；右手；近景",
+    )
+
+    assert [item.row.index for item in result.candidates] == [1, 4, 5]
+    assert result.audit["candidate_counts"]["after_prompt_gates"] == 3
+
+
+def test_selection_prompt_shortage_reports_each_condition_count():
+    with pytest.raises(ReferenceSelectionInsufficientError) as exc_info:
+        select_top_references_with_audit(
+            product(),
+            [
+                row(1, purpose_category="手部佩戴图", scene_keywords="浅色背景 自然光", recommended_usage="右手 近景"),
+                row(2, purpose_category="手部佩戴图", scene_keywords="浅色背景 自然光", recommended_usage="右手 近景"),
+                row(3, purpose_category="手部佩戴图", scene_keywords="浅色背景", recommended_usage="左手"),
+            ],
+            output_role=OutputRole.HAND_WORN,
+            reference_selection_prompt="浅色背景；自然光；右手；近景",
+        )
+
+    assert exc_info.value.audit["condition_match_counts"] == {
+        "浅色背景": 3,
+        "自然光": 2,
+        "右手": 2,
+        "近景": 2,
+    }
+    assert "浅色背景=3" in str(exc_info.value)
+    assert "全部条件同时命中=2" in str(exc_info.value)
 
 
 def test_hero_selection_rejects_dark_wearing_candidate_without_main_image_type():
@@ -268,19 +312,21 @@ def test_hero_selection_accepts_each_user_approved_dark_main_image():
     assert [item.row.index for item in selected] == [1]
 
 
-def test_hero_selection_keeps_clean_background_without_dark_signal_rejected():
-    with pytest.raises(ValueError, match="主图"):
-        select_top_references(
-            product(),
-            [
-                row(
-                    1,
-                    purpose_category="主图（静物不带人）",
-                    scene_keywords="背景干净 产品完整展示",
-                )
-            ],
-            output_role=OutputRole.HERO,
-        )
+def test_hero_selection_accepts_clean_background_without_style_prompt():
+    selected, candidates = select_top_references(
+        product(),
+        [
+            row(
+                1,
+                purpose_category="主图（静物不带人）",
+                scene_keywords="背景干净 产品完整展示",
+            )
+        ],
+        output_role=OutputRole.HERO,
+    )
+
+    assert [item.row.index for item in selected] == [1]
+    assert [item.row.index for item in candidates] == [1]
 
 
 def test_select_top_references_keeps_hard_filtered_candidates_and_top_three_ranks():

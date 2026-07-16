@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 from jewelry_on_hand.category_policies import get_category_policy
 from jewelry_on_hand.category_policies.base import (
@@ -16,6 +18,11 @@ from jewelry_on_hand.product_analysis import (
     validate_analysis_ready_for_reference_selection,
 )
 from jewelry_on_hand.product_types import ProductType
+from jewelry_on_hand.reference_selection import (
+    ReferenceSelectionConstraints,
+    build_reference_selection_audit,
+    evaluate_candidate_constraints,
+)
 
 
 POSE_PURPOSE_POINTS = 20
@@ -44,24 +51,6 @@ SAME_COLLAR_PENALTY = 8
 SAME_HAIR_POSITION_PENALTY = 8
 SAME_BODY_ORIENTATION_PENALTY = 10
 SAME_HOLDING_METHOD_PENALTY = 10
-DARK_BACKGROUND_TEXT_TERMS = (
-    "深色背景",
-    "黑色背景",
-    "暗色背景",
-    "低调暗色背景",
-    "黑背景",
-    "深色布景",
-    "黑色布景",
-    "黑色托盘",
-    "黑色石材",
-    "黑色岩石",
-    "黑色石板",
-    "黑色底座",
-    "黑绒",
-    "黑色绒布",
-)
-USER_APPROVED_DARK_HERO_REFERENCE_IDS = frozenset({"RP000137", "RP000144"})
-USER_APPROVED_DARK_LIFESTYLE_REFERENCE_IDS = frozenset({"RP000298"})
 OUTPUT_ROLE_IMAGE_TYPE_MARKERS = {
     OutputRole.HERO: "主图",
     OutputRole.HAND_WORN: "手部佩戴图",
@@ -69,33 +58,130 @@ OUTPUT_ROLE_IMAGE_TYPE_MARKERS = {
 }
 
 
+@dataclass(frozen=True)
+class ReferenceSelectionResult:
+    selected: tuple[ScoredReference, ...]
+    candidates: tuple[ScoredReference, ...]
+    audit: dict[str, Any]
+
+
+class ReferenceSelectionInsufficientError(ValueError):
+    def __init__(self, message: str, audit: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.audit = audit
+
+
 def select_top_references(
     product: ProductAnalysis,
     rows: Iterable[ReferenceRow],
     output_role: OutputRole | str | None = None,
 ) -> tuple[list[ScoredReference], list[ScoredReference]]:
+    result = _select_top_references(
+        product,
+        rows,
+        output_role=output_role,
+        reference_selection_prompt=None,
+        require_top_three=False,
+    )
+    if (
+        product.confirmed_product_type is ProductType.RING
+        and len(result.candidates) < 3
+    ):
+        raise ValueError(
+            "戒指参考图至少 3 张合格候选，"
+            f"当前 {len(result.candidates)} 张"
+        )
+    return list(result.selected), list(result.candidates)
+
+
+def select_top_references_with_audit(
+    product: ProductAnalysis,
+    rows: Iterable[ReferenceRow],
+    output_role: OutputRole | str,
+    reference_selection_prompt: str | None = None,
+) -> ReferenceSelectionResult:
+    return _select_top_references(
+        product,
+        rows,
+        output_role=output_role,
+        reference_selection_prompt=reference_selection_prompt,
+        require_top_three=True,
+    )
+
+
+def _select_top_references(
+    product: ProductAnalysis,
+    rows: Iterable[ReferenceRow],
+    *,
+    output_role: OutputRole | str | None,
+    reference_selection_prompt: str | None,
+    require_top_three: bool,
+) -> ReferenceSelectionResult:
     validate_analysis_ready_for_reference_selection(product)
-    existing_rows = [row for row in rows if row.file_exists]
+    all_rows = list(rows)
+    existing_rows = [row for row in all_rows if row.file_exists]
     role = normalize_output_role(output_role)
-    filtered_rows = _filter_reference_rows(
+    base_filtered_rows = _filter_reference_rows(
         product,
         existing_rows,
         output_role=role,
     )
     if role is not None:
-        filtered_rows = _filter_output_role_rows(filtered_rows, product, role)
-        if not filtered_rows:
-            raise ValueError(f"{role.display_name}没有符合深色背景与构图用途的参考图")
-    if product.confirmed_product_type is ProductType.RING and len(filtered_rows) < 3:
-        raise ValueError(
-            "戒指参考图至少 3 张合格候选，"
-            f"当前 {len(filtered_rows)} 张（存在文件 {len(existing_rows)} 张）"
+        base_filtered_rows = _filter_output_role_rows(
+            base_filtered_rows,
+            product,
+            role,
         )
+    constraints = ReferenceSelectionConstraints.from_prompt(
+        reference_selection_prompt
+    )
+    evaluations = [
+        evaluate_candidate_constraints(row, constraints.normalized_conditions)
+        for row in base_filtered_rows
+    ]
+    filtered_rows = [
+        row
+        for row, evaluation in zip(base_filtered_rows, evaluations, strict=True)
+        if evaluation.matched
+    ]
+    audit = build_reference_selection_audit(
+        constraints,
+        before_base_gates=len(all_rows),
+        after_base_gates=len(base_filtered_rows),
+        evaluations=evaluations,
+    )
+    if require_top_three and len(filtered_rows) < 3:
+        raise ReferenceSelectionInsufficientError(
+            _reference_shortage_message(role, audit),
+            audit,
+        )
+    if role is not None and not filtered_rows:
+        raise ValueError(f"{role.display_name}没有符合图片类型与产品适配要求的参考图")
     scored = [score_reference(product, row) for row in filtered_rows]
     ordered = sorted(scored, key=lambda item: (-item.score, item.row.index))
     candidates = _rerank(ordered)
     selected = _select_diverse_top_references(candidates, limit=3)
-    return selected, candidates
+    return ReferenceSelectionResult(tuple(selected), tuple(candidates), audit)
+
+
+def _reference_shortage_message(
+    role: OutputRole | None,
+    audit: dict[str, Any],
+) -> str:
+    counts = audit["candidate_counts"]
+    condition_counts = audit["condition_match_counts"]
+    condition_text = "、".join(
+        f"{condition}={count}" for condition, count in condition_counts.items()
+    ) or "无选图提示词"
+    role_name = role.display_name if role is not None else "参考图"
+    return (
+        f"{role_name}不足 3 张合格候选："
+        f"基础门禁前={counts['before_base_gates']}，"
+        f"基础门禁后={counts['after_base_gates']}；"
+        f"逐条件命中：{condition_text}；"
+        f"全部条件同时命中={counts['after_prompt_gates']}。"
+        "请调整选图提示词或补充参考素材；系统不会自动放宽条件"
+    )
 
 
 def _filter_output_role_rows(
@@ -103,30 +189,8 @@ def _filter_output_role_rows(
     _product: ProductAnalysis,
     output_role: OutputRole,
 ) -> list[ReferenceRow]:
-    dark_rows = [row for row in rows if _has_dark_background_signal(row)]
     marker = OUTPUT_ROLE_IMAGE_TYPE_MARKERS[output_role]
-    return [row for row in dark_rows if marker in row.purpose_category]
-
-
-def _has_dark_background_signal(row: ReferenceRow) -> bool:
-    return _contains_any(row.combined_text(), DARK_BACKGROUND_TEXT_TERMS) or (
-        _is_user_approved_dark_reference(row)
-    )
-
-
-def _is_user_approved_dark_reference(row: ReferenceRow) -> bool:
-    """人工视觉批准仅针对对应角色的明确编号，不把“背景干净”泛化为深色。"""
-    approved_reference_ids = (
-        USER_APPROVED_DARK_HERO_REFERENCE_IDS
-        if "主图" in row.purpose_category
-        else USER_APPROVED_DARK_LIFESTYLE_REFERENCE_IDS
-        if "生活场景图" in row.purpose_category
-        else frozenset()
-    )
-    return any(
-        f"素材编号：{reference_id}" in row.notes
-        for reference_id in approved_reference_ids
-    )
+    return [row for row in rows if marker in row.purpose_category]
 
 
 def select_batch_diverse_references(
@@ -529,11 +593,7 @@ def _filter_reference_rows(
         marker = OUTPUT_ROLE_IMAGE_TYPE_MARKERS[output_role]
         rows = [row for row in rows if marker in row.purpose_category]
     if output_role is OutputRole.HERO:
-        return [
-            row
-            for row in rows
-            if _has_dark_background_signal(row)
-        ]
+        return list(rows)
     policy = get_category_policy(product.confirmed_product_type)
     evaluated = [(row, policy.evaluate_reference(product, row)) for row in rows]
     primary = [
