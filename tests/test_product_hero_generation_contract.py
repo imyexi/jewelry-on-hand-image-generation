@@ -381,6 +381,9 @@ def test_build_generation_contract_binds_hashes_order_aspect_and_prompt(tmp_path
     assert all(not Path(item["path"]).is_absolute() for item in contract["input_order"])
     assert all(sha(run / item["path"]) == item["sha256"] for item in contract["input_order"])
     assert all(fragment in contract["prompt"] for fragment in PROMPT_FRAGMENTS)
+    assert "QC：" not in contract["prompt"]
+    assert "主石是否保持圆形" not in contract["prompt"]
+    assert "依据 front" not in contract["prompt"]
     assert validate_prompt_contract(contract["prompt"], contract["input_order"]) == []
 
 
@@ -410,6 +413,7 @@ def test_prompt_freezes_exact_component_count_and_isolates_reference_occlusion(t
         "优先保持实体数量",
     )
     assert all(fragment in contract["prompt"] for fragment in required)
+    assert "（只依据目标产品" not in contract["prompt"]
     assert validate_prompt_contract(contract["prompt"], contract["input_order"]) == []
 
 
@@ -1438,7 +1442,7 @@ def test_finalize_rerun_updates_counts_without_final(tmp_path, attempts, expecte
     assert not (run / "final").exists()
 
 
-def test_rerun_prompt_includes_previous_qc_failure_codes_and_notes(tmp_path):
+def test_rerun_prompt_converts_qc_failure_to_curated_visual_instruction(tmp_path):
     run = awaiting_qc_run(tmp_path)
     qc = valid_qc("rerun")
     qc["checklist"][5]["notes"] = "金属颜色偏冷，需要恢复产品图暖金色"
@@ -1446,12 +1450,14 @@ def test_rerun_prompt_includes_previous_qc_failure_codes_and_notes(tmp_path):
 
     contract = build_generation_contract(run)
 
-    assert "上轮 QC 纠偏" in contract["prompt"]
-    assert "material_color_drift" in contract["prompt"]
-    assert "金属颜色偏冷，需要恢复产品图暖金色" in contract["prompt"]
+    assert "【强化要求】" in contract["prompt"]
+    assert "严格保持目标产品的材质、颜色、透明度、纹理和反光" in contract["prompt"]
+    assert "上轮 QC 纠偏" not in contract["prompt"]
+    assert "material_color_drift" not in contract["prompt"]
+    assert "金属颜色偏冷，需要恢复产品图暖金色" not in contract["prompt"]
 
 
-def test_rerun_prompt_includes_component_count_evidence(tmp_path):
+def test_rerun_prompt_reuses_frozen_component_count_without_raw_qc_evidence(tmp_path):
     counts = [
         {
             "name": "圆珠",
@@ -1471,8 +1477,11 @@ def test_rerun_prompt_includes_component_count_evidence(tmp_path):
 
     contract = build_generation_contract(run)
 
-    assert "component_count_mismatch" in contract["prompt"]
-    assert "画面可见16颗，必须减少到13颗" in contract["prompt"]
+    assert "【强化要求】" in contract["prompt"]
+    assert "严格遵守已冻结的部件实体总数" in contract["prompt"]
+    assert "圆珠实体总数固定为且仅为13颗" in contract["prompt"]
+    assert "component_count_mismatch" not in contract["prompt"]
+    assert "画面可见16颗，必须减少到13颗" not in contract["prompt"]
 
 
 def test_finalize_reject_archives_decision_and_allows_remaining_rank(tmp_path):

@@ -20,9 +20,9 @@ description: Use when Codex needs to generate a high-fidelity 珠宝产品主图
 3. 从固定飞书 Wiki 的 `AI生图参考图素材库 / 素材收录池` 读取全部分页记录。把固定 URL、Base、数据表、页数、记录数和 `pagination_complete=true` 写入来源快照；仅接受 `图片类型=主图` 且 `适用品类` 显式包含目标中文品类的记录。禁止使用通用素材补位。必须提供全部产品输入哈希用于排除，并按附件 SHA-256 去重。
 4. 不得把深色背景作为硬 gate。执行四个硬 gate 和六项 100 分评分；任一阶段少于 3 张立即阻断。
 5. 生成并展示 Top 3 评审包后暂停。禁止自动选择，必须等待用户显式选择 rank 1、2 或 3；调用决策脚本时同时提交 `source`、`selected_rank` 和用户原话，作为冻结的用户选择证据。
-6. 固定输入顺序为 `reference → front → side → details`，Prompt 图号必须按实际 1–4 张细节图动态结束。Prompt 必须写明实体总数、参考图原商品的数量不得作为依据，以及“遮挡只改变可见数量，不改变实体总数”；场景冲突时允许调整商品尺寸、位置和旋转，不得增删部件。默认使用 GPT Image 2；累计两次非 pass 后改用 Nano Banana V2。最多 4 个进入 QC 的视觉结果，基础设施失败不计入上限。
+6. 固定输入顺序为 `reference → front → side → details`，Prompt 图号必须按实际 1–4 张细节图动态结束。Prompt 必须写明实体总数、参考图原商品的数量不得作为依据，以及“遮挡只改变可见数量，不改变实体总数”；`must_keep` 的送模投影只包含商品事实 `name`，`component_counts` 只包含名称和实体总数；两者都不得渲染 `source_views` 或 `qc_question`。场景冲突时允许调整商品尺寸、位置和旋转，不得增删部件。默认使用 GPT Image 2；累计两次非 pass 后改用 Nano Banana V2。最多 4 个进入 QC 的视觉结果，基础设施失败不计入上限。
 7. AIReiter 成功结果必须绑定 provider、`out_task_id`、提交 endpoint、模型、Prompt SHA-256、画幅、2K 分辨率、输入 SHA 顺序、completed 查询回执和选中 output URL。由记录脚本直接下载该 HTTPS URL 并冻结 submit/result/PNG 三个摘要；任意本地 PNG 或空回执不得进入 QC。
-8. 对每个结果执行结构化 QC。`component_count_checks` 必须逐项记录预期实体数、可见数、遮挡数和遮挡证据，且 pass 时可见数与遮挡数之和等于实体总数；数量失败使用 `component_count_mismatch` 并 rerun。只有 pass 才能创建 `final/result.png` 并交付；rerun 把上一轮 failure codes 和失败 notes 写入下一轮 Prompt，reject 排除当前 rank 并再次等待用户显式选择 rank。
+8. 对每个结果执行结构化 QC。`component_count_checks` 必须逐项记录预期实体数、可见数、遮挡数和遮挡证据，且 pass 时可见数与遮挡数之和等于实体总数；数量失败使用 `component_count_mismatch` 并 rerun。只有 pass 才能创建 `final/result.png` 并交付；rerun 仅把已知 failure code 经固定白名单映射为直接视觉强化要求。原始 failure code、失败 notes、QC 问题/证据和来源视图只留在约束、QC 与 attempt 元数据，不得写入 Prompt；reject 排除当前 rank 并再次等待用户显式选择 rank。
 
 ## 执行顺序
 
@@ -44,13 +44,13 @@ description: Use when Codex needs to generate a high-fidelity 珠宝产品主图
 | 手串珠数无法从目标产品图确认 | 阻断，请求更清楚的产品图；不得从参考图猜测 |
 | Top 3 已生成但未选 rank | 展示评审包并等待用户 |
 | `component_count_checks` 失败 | 使用 `component_count_mismatch` 收紧 Prompt 后重跑，不自动更换参考图 |
-| QC 为 rerun 且未达 4 个结果 | 按失败码收紧 Prompt 后重跑 |
+| QC 为 rerun 且未达 4 个结果 | 使用失败码白名单映射出的直接视觉强化要求重跑 |
 | QC 为 reject 且仍有候选 | 归档决策，排除当前 rank，等待重选 |
 | QC 为 pass | 只交付 `final/result.png`、manifest 和 QC 结论 |
 
 ## 示例
 
-用户提供戒指正面、侧面和两张细节图后：创建不可覆盖的 run，冻结戒指事实；只读飞书全量筛选“主图 + 戒指”，生成 Top 3 并展示理由与风险；等待用户回复“选 2”，把该原话和 rank 2 一并冻结；再按固定图序调用 AIReiter 并保存同一 `out_task_id` 的提交/完成回执。若首轮材质漂移则把失败码和证据写入 rerun Prompt，若第二轮结构错误则 reject 并等待从剩余 rank 中重选。仅当某轮 QC 为 pass 时交付最终 PNG。
+用户提供戒指正面、侧面和两张细节图后：创建不可覆盖的 run，冻结戒指事实；只读飞书全量筛选“主图 + 戒指”，生成 Top 3 并展示理由与风险；等待用户回复“选 2”，把该原话和 rank 2 一并冻结；再按固定图序调用 AIReiter 并保存同一 `out_task_id` 的提交/完成回执。若首轮材质漂移则把对应失败码映射为“严格保持材质、颜色、透明度、纹理和反光”的直接视觉强化要求，原始失败码与 QC 证据继续留档；若第二轮结构错误则 reject 并等待从剩余 rank 中重选。仅当某轮 QC 为 pass 时交付最终 PNG。
 
 ## 常见错误与红旗
 

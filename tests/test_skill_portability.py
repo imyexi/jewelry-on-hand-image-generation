@@ -113,6 +113,29 @@ def test_skill_documents_reference_selection_prompt_without_default_dark_rule() 
         assert "DARK_BACKGROUND_TEXT_TERMS" not in text
 
 
+def test_prompt_documents_keep_reference_audit_out_of_model_prompt() -> None:
+    documents = (
+        WORKFLOW_SKILL / "SKILL.md",
+        PORTABLE_PROMPT_CONTRACT,
+        PROMPT_TEMPLATE,
+    )
+    for document in documents:
+        text = _document_text(document)
+        assert "送模投影" in text
+        assert "参考图风格" in text
+        assert "参考图场景" in text
+        assert "参考图姿势" in text
+        assert "审核与 generation metadata" in text
+
+    contradictory = (
+        "手串和项链参考区继续保留文件、路径、排名",
+        "戒指送模只保留文件名",
+    )
+    for document in (PORTABLE_PROMPT_CONTRACT, PROMPT_TEMPLATE):
+        text = _document_text(document)
+        assert all(fragment not in text for fragment in contradictory)
+
+
 @pytest.mark.parametrize(
     "document",
     [

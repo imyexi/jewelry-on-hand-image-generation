@@ -11,6 +11,7 @@ SKILL = PROJECT_ROOT / "skills" / "jewelry-product-hero-workflow"
 SKILL_MD = SKILL / "SKILL.md"
 OPENAI_YAML = SKILL / "agents" / "openai.yaml"
 PROJECT_REFERENCE = PROJECT_ROOT / "reference" / "product-hero-workflow.md"
+AIREITER_SKILL_MD = PROJECT_ROOT / "skills" / "aireiter-image-generation" / "SKILL.md"
 INSTALLER = PROJECT_ROOT / "scripts" / "install_codex_skills.py"
 
 
@@ -82,6 +83,36 @@ def test_product_hero_skill_encodes_non_negotiable_gates_and_scripts() -> None:
         "reference/product-hero-workflow.md",
     )
     for fragment in required:
+        assert fragment in text
+
+
+def test_product_hero_docs_keep_raw_qc_audit_out_of_rerun_prompt() -> None:
+    for document in (SKILL_MD, PROJECT_REFERENCE):
+        text = document.read_text(encoding="utf-8")
+        assert "白名单" in text
+        assert "原始 failure code" in text
+        assert "失败 notes" in text
+        assert "不得写入 Prompt" in text
+
+    contradictory = (
+        "rerun 把上一轮 failure codes 和失败 notes 写入下一轮 Prompt",
+        "把失败码和失败 notes 写入下一轮 Prompt",
+        "把失败码和证据写入 rerun Prompt",
+    )
+    for document in (SKILL_MD, PROJECT_REFERENCE):
+        text = document.read_text(encoding="utf-8")
+        assert all(fragment not in text for fragment in contradictory)
+
+
+def test_aireiter_skill_requires_model_ready_prompt_only() -> None:
+    text = AIREITER_SKILL_MD.read_text(encoding="utf-8")
+    for fragment in (
+        "原样写入",
+        "模型可执行 Prompt",
+        "选图审计",
+        "原始 QC",
+        "不得传入",
+    ):
         assert fragment in text
 
 

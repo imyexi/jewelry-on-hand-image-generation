@@ -60,6 +60,19 @@ RERUN_CODES = (
     "source_background_leakage",
     "generation_artifact",
 )
+
+RERUN_PROMPT_GUIDANCE = {
+    "material_color_drift": "严格保持目标产品的材质、颜色、透明度、纹理和反光，不得偏色或改材质",
+    "component_count_mismatch": "严格遵守已冻结的部件实体总数，遮挡只改变可见数量，不得新增、复制、删除、拆分或合并部件",
+    "product_crop": "目标商品必须完整入镜，不得裁切主体或关键结构",
+    "reference_product_residue": "彻底移除图1中的原商品，不得残留、叠加或融合参考商品",
+    "scene_layout_drift": "严格保持图1的构图、机位、视觉高度和主体位置关系",
+    "prop_or_background_drift": "严格保持图1的道具、背景和空间关系，不得替换或新增场景元素",
+    "text_watermark_logo": "画面不得出现文字、水印、logo 或平台标识",
+    "contact_shadow_error": "保持商品与承托面或道具的真实接触，阴影、反射和遮挡必须符合光线与空间关系",
+    "source_background_leakage": "不得迁移产品源图的白色、中性背景、边缘或抠图痕迹",
+    "generation_artifact": "清除多余重影、粘连、破碎边缘和不符合现实的生成痕迹，保持商品结构完整",
+}
 CHECKLIST_CHECK_IDS = (
     "product_category",
     "product_unit",
@@ -436,17 +449,13 @@ def _build_prompt(
     input_order: list[dict[str, Any]],
     retry_guidance: str = "",
 ) -> str:
-    must_keep = "；".join(
-        f"{item['name']}（依据 {', '.join(item['source_views'])}；QC：{item['qc_question']}）"
-        for item in constraints["must_keep"]
-    )
+    must_keep = "；".join(item["name"] for item in constraints["must_keep"])
     must_not_change = "；".join(constraints["must_not_change"]) or "无额外项目"
     uncertain = "；".join(constraints["uncertain_features"]) or "无"
     component_counts = constraints["component_counts"]
     if component_counts:
         count_facts = "；".join(
             f"{item['name']}实体总数固定为且仅为{item['physical_count']}颗"
-            f"（只依据目标产品 {', '.join(item['source_views'])}）"
             for item in component_counts
         )
     else:
@@ -460,7 +469,7 @@ def _build_prompt(
     if not 4 <= last_number <= 7:
         raise GenerationContractError("生成输入总数必须为 4 至 7 张")
     detail_label = "图4" if last_number == 4 else f"图4–{last_number}"
-    retry_line = f"上轮 QC 纠偏：{retry_guidance}。" if retry_guidance else ""
+    retry_line = f"【强化要求】{retry_guidance}。" if retry_guidance else ""
     return (
         "【任务目标】\n"
         f"以图1的场景为唯一场景模板，将图2–{last_number}中的目标珠宝准确置入，生成真实商品主图。\n"
@@ -506,19 +515,14 @@ def _previous_rerun_guidance(root: Path) -> str:
     failure_codes = qc.get("failure_codes")
     if not isinstance(failure_codes, list) or not failure_codes:
         raise GenerationContractError("上一轮 rerun QC 缺少 failure_codes")
-    notes: list[str] = []
-    for field in ("checklist", "component_count_checks", "fidelity_checks"):
-        checks = qc.get(field)
-        if not isinstance(checks, list):
-            raise GenerationContractError(f"上一轮 QC {field} 必须是列表")
-        for item in checks:
-            if isinstance(item, dict) and item.get("result") == "fail":
-                note = item.get("notes")
-                if isinstance(note, str) and note.strip():
-                    notes.append(note.strip())
-    if not notes:
-        raise GenerationContractError("上一轮 rerun QC 缺少失败证据说明")
-    return f"失败码 {', '.join(failure_codes)}；失败证据 {'；'.join(notes)}"
+    guidance: list[str] = []
+    for code in failure_codes:
+        instruction = RERUN_PROMPT_GUIDANCE.get(code)
+        if instruction is None:
+            raise GenerationContractError(f"上一轮 rerun QC 无可用纠偏指令：{code}")
+        if instruction not in guidance:
+            guidance.append(instruction)
+    return "；".join(guidance)
 
 
 def _validated_user_selection_evidence(

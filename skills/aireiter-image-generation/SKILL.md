@@ -8,6 +8,17 @@ metadata:
 
 # AIReiter 鍥剧墖鐢熸垚
 
+## 调用方 Prompt 边界
+
+`scripts/aireiter_image_helper.py submit --prompt` 会把调用方参数原样写入 API 的 `params.prompt`。本 Skill 不会自动拼接、清洗或区分审计上下文，因此调用方必须在进入本 Skill 前完成送模投影，只传模型可执行 Prompt。
+
+不得传入：
+
+- 选图审计：参考图编号/文件名/路径、rank/score、选择理由、风险、审核备注或候选命中证据；
+- 原始 QC：failure code、质检问题、失败 notes、检查证据或“上次错误”等过程叙述；
+- 任务历史：重跑次数、内部状态、日志和只用于追踪的文件地址。
+
+这些信息应保存在 metadata、review、QC 或 attempt 旁路文件。需要重跑时，先把已知失败码映射为简短、直接、可执行的视觉强化要求，再把映射结果放入 `--prompt`；不要把原始审计记录交给图片模型。
 ## 鍓嶇疆鏉′欢
 
 - `python3` 鎴栧綋鍓?agent 鑷甫鐨?Python 杩愯鏃?- 涓嶄娇鐢?helper 鑴氭湰銆佺洿鎺ヨ皟鐢?API 鏃堕渶瑕?`curl`

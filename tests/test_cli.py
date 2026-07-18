@@ -1765,7 +1765,11 @@ def test_generate_cli_accepts_selected_reference_without_metadata(tmp_path, monk
 
     assert len(calls) == 1
     assert list(calls[0][2]) == [2]
-    assert "ref.jpg" in calls[0][2][2]
+    prompt = calls[0][2][2]
+    assert "ref.jpg" not in prompt
+    assert "参考图风格：无" in prompt
+    assert "参考图场景：无" in prompt
+    assert "参考图姿势：无" in prompt
 
 
 def test_generate_cli_only_builds_prompts_for_approved_selected_ranks(tmp_path, monkeypatch):

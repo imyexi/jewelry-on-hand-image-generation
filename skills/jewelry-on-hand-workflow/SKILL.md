@@ -44,8 +44,10 @@ description: "用于编排手串、普通项链、带链吊坠和单枚常规指
 
 1. `prepare-review`：以 correction-only 方式解析产品分析，先合并项链人工纠正并校验最终 analysis，再生成 `schema_version=2` canonical；按可选 `--reference-selection-prompt` 选择 Top 3，写入选图审计和 review 包。戒指细节图只作为 review、结构分析、canonical 约束和人工 QC 对照证据；不得自动创建决策。
 2. `record-decision`：在写任何文件前交叉校验 v2 `pendant_semantics`、analysis、快照、选图审计摘要、Top 3 摘要和 canonical 路径，再记录 rank、完整快照和 `fidelity_confirmed`；冲突时中文报错，必须新建 run 回到第 1 步。
-3. `generate`：在创建 generation 目录、写 prompt/submit 或调用 helper/provider 前重新执行品类、来源、模式、结构、快照、v2 canonical、选图审计、rank 和参考副本 gate 后才提交模型；选图提示词不得写入 AIReiter Prompt。戒指固定以 `input/product-on-hand.jpg` 作为内部图 2，并保存内容一致的 `product-identity.jpg` 审计副本，细节图不提交给 AIReiter；失败后按未尝试 Top 3 切换 Rank，并按 QC 失败码注入纠偏。
+3. `generate`：在创建 generation 目录、写 prompt/submit 或调用 helper/provider 前重新执行品类、来源、模式、结构、快照、v2 canonical、选图审计、rank 和参考副本 gate 后才提交模型；选图提示词不得写入 AIReiter Prompt。戒指固定以 `input/product-on-hand.jpg` 作为内部图 2，并保存内容一致的 `product-identity.jpg` 审计副本，细节图不提交给 AIReiter；失败后按未尝试 Top 3 切换 Rank。原始 QC failure code 和失败 notes 只写入审计文件；生成 Prompt 仅加入由已知失败码白名单映射得到的直接视觉强化要求，不得写入失败码、质检问题、原始 notes 或“上次错误”等过程叙述。
 4. `qc`：写严格 JSON，完整覆盖 runtime checklist 与 `must_keep` 后才能进入最终汇总。
+
+参考图送模投影统一只保留 `输出用途`、`参考图风格`、`参考图场景`、`参考图姿势`、`忽略参考图首饰` 和 `镜面构图`。参考图文件名/编号/路径、rank/score、用途分类、推荐方式、备注、匹配理由和风险只保存在审核与 generation metadata，不得进入 AIReiter Prompt。
 
 ## 三图输出角色
 

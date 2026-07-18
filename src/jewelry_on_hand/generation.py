@@ -349,7 +349,6 @@ def _build_generation_jobs(
                 prompt = _build_ring_retry_prompt(
                     prompt,
                     correction,
-                    reference_path.suffix,
                 )
         generation_dir = paths.generation_dir / f"{output_index:02d}"
         _ensure_generation_dir_available(generation_dir)
@@ -367,15 +366,15 @@ def _build_generation_jobs(
 
 
 _RING_RETRY_CORRECTIONS = {
-    "finger_position_mismatch": "上次指位错误；必须佩戴在确认的目标手指根部，其他手指不得戴戒指。",
-    "hand_side_mismatch": "上次左右手错误；必须使用确认手和目标手指，不得镜像换手。",
-    "centerpiece_mismatch": "上次主石错误；严格保持主石数量、形状、颜色、朝向和相对尺寸。",
-    "ring_structure_mismatch": "上次结构错误；严格保持戒面、戒圈、开口端点和装饰排列，不得重设计。",
-    "ring_count_mismatch": "上次数量错误；只允许一枚目标戒指，禁止任何额外首饰。",
-    "ring_contact_error": "上次接触错误；戒圈必须连续环绕目标手指，背侧真实遮挡，不得悬浮或贴片。",
-    "source_hand_leakage": "上次发生来源迁移；产品图只提供戒指身份，不得继承源手、皮肤、衣服或背景。",
-    "source_person_region_migrated": "上次发生来源迁移；产品图只提供戒指身份，不得继承源手、皮肤、衣服或背景。",
-    "finger_deformation": "上次手部变形；保持五指解剖正常，禁止多指、融指或断指。",
+    "finger_position_mismatch": "必须佩戴在确认的目标手指根部，其他手指不得佩戴戒指。",
+    "hand_side_mismatch": "必须使用确认手和目标手指，不得镜像换手。",
+    "centerpiece_mismatch": "严格保持主石数量、形状、颜色、朝向和相对尺寸。",
+    "ring_structure_mismatch": "严格保持戒面、戒圈、开口端点和装饰排列，不得重设计。",
+    "ring_count_mismatch": "只允许一枚目标戒指，禁止任何额外首饰。",
+    "ring_contact_error": "戒圈必须连续环绕目标手指，背侧真实遮挡，不得悬浮或贴片。",
+    "source_hand_leakage": "产品图只提供戒指身份，不得继承源手、皮肤、衣服或背景。",
+    "source_person_region_migrated": "产品图只提供戒指身份，不得继承源手、皮肤、衣服或背景。",
+    "finger_deformation": "保持五指解剖正常，禁止多指、融指或断指。",
 }
 
 
@@ -389,13 +388,12 @@ def _ring_retry_correction(failures: tuple[str, ...]) -> str:
     )
     if not corrections:
         return ""
-    return "【本轮纠偏】" + "".join(corrections)
+    return "【强化要求】" + "".join(corrections)
 
 
 def _build_ring_retry_prompt(
     prompt: str,
     correction: str,
-    reference_suffix: str,
 ) -> str:
     retry_prompt = f"{prompt}\n\n{correction}"
     if len(retry_prompt) <= 1200:
@@ -409,18 +407,11 @@ def _build_ring_retry_prompt(
     )
     if reference_start >= 0 and occlusion_start >= 0:
         reference_section = retry_prompt[reference_start:occlusion_start]
-        submitted_reference_name = f"hand-reference{reference_suffix or '.jpg'}"
-        compacted_section = re.sub(
-            r"(?m)^参考图文件：[^；\r\n]+；",
-            f"参考图文件：{submitted_reference_name}；",
-            reference_section,
-            count=1,
-        )
         compacted_section = re.sub(
             r"(?m)^输出用途：手部佩戴图[^\r\n]*$",
             "输出用途：手部佩戴图。产品完整清晰；"
             "无文字/水印/logo/平台标识；佩戴在确认手指根部；接触和阴影真实。",
-            compacted_section,
+            reference_section,
             count=1,
         )
         compacted_section = re.sub(

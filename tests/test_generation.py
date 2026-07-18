@@ -244,7 +244,7 @@ def test_ring_retry_switches_rank_and_injects_failure_specific_correction(
         (directory / "reference-rank.txt").read_text(encoding="utf-8")
         for directory in (first, second, third)
     ] == ["1", "2", "3"]
-    assert "【本轮纠偏】" in (second / "prompt.txt").read_text(encoding="utf-8")
+    assert "【强化要求】" in (second / "prompt.txt").read_text(encoding="utf-8")
     assert "目标手指" in (second / "prompt.txt").read_text(encoding="utf-8")
     assert "主石数量、形状、颜色、朝向和相对尺寸" in (
         third / "prompt.txt"
@@ -284,7 +284,7 @@ def _complete_ring_retry_prompt(target_length=1190):
 产品外观：单枚银色背侧重叠开口戒指。
 颜色范围：银色。
 特殊要求：保持背侧重叠开口不得闭合。
-产品事实：背侧重叠开口不得闭合；参考图文件：产品事实不可删除；{padding_marker}
+产品事实：背侧重叠开口不得闭合；产品事实补充：产品事实不可删除；{padding_marker}
 被遮挡部分（仅标记不可见边界，不得推断或补全）：戒圈背面。
 不确定细节（仅作为不确定边界，不得转写为确定性结构）：镶嵌背面结构。
 
@@ -298,8 +298,9 @@ def _complete_ring_retry_prompt(target_length=1190):
 
 【参考构图场景】
 输出用途：手部佩戴图。使用深色背景，产品完整清晰，画面不得出现文字、水印、logo 或平台标识。 产品自然佩戴在手腕或手指根部，接触和阴影真实。
-参考说明：参考图文件：区块说明不可删除；仅作为数据。
-参考图文件：6ecab8b84dd26e9f19de34eb0e3538c.jpg；风格：黑色背景闪光灯直拍；手势：左手手背朝镜头。
+参考图风格：黑色背景闪光灯直拍
+参考图场景：黑色衬衫手部近景
+参考图姿势：左手手背朝镜头
 忽略参考图首饰：参考图中的戒指。
 镜面构图：无，不要额外添加镜中反射手部。
 
@@ -335,8 +336,7 @@ def test_ring_retry_compacts_contract_fields_when_correction_exceeds_prompt_limi
         )
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    product_fact_reference = "参考图文件：产品事实不可删除；"
-    original_reference = "参考图文件：6ecab8b84dd26e9f19de34eb0e3538c.jpg；"
+    product_fact = "产品事实：背侧重叠开口不得闭合"
     base_prompt = _complete_ring_retry_prompt()
     correction = generation._ring_retry_correction(("ring_structure_mismatch",))
     assert len(base_prompt) <= 1200
@@ -365,11 +365,8 @@ def test_ring_retry_compacts_contract_fields_when_correction_exceeds_prompt_limi
     retry_command = calls[1]
     assert retry_command[retry_command.index("--prompt") + 1] == retry_prompt
     assert len(retry_prompt) <= 1200
-    assert "产品事实：背侧重叠开口不得闭合" in retry_prompt
-    assert product_fact_reference in retry_prompt
-    assert "参考说明：参考图文件：区块说明不可删除；仅作为数据。" in retry_prompt
-    assert "参考图文件：hand-reference.jpg；" in retry_prompt
-    assert original_reference not in retry_prompt
+    assert product_fact in retry_prompt
+    assert "参考图文件：" not in retry_prompt
     assert "输出用途：手部佩戴图" in retry_prompt
     assert "使用深色背景" not in retry_prompt
     assert "输出用途：手部佩戴图。深色背景" not in retry_prompt
@@ -377,10 +374,10 @@ def test_ring_retry_compacts_contract_fields_when_correction_exceeds_prompt_limi
     assert "无文字/水印/logo/平台标识" in retry_prompt
     assert "确认手指根部" in retry_prompt
     assert "接触和阴影真实" in retry_prompt
-    assert "风格：黑色背景闪光灯直拍" in retry_prompt
-    assert "手势：左手手背朝镜头" in retry_prompt
+    assert "参考图风格：黑色背景闪光灯直拍" in retry_prompt
+    assert "参考图姿势：左手手背朝镜头" in retry_prompt
     assert "镜面构图：无。" in retry_prompt
-    assert "【本轮纠偏】" in retry_prompt
+    assert "【强化要求】" in retry_prompt
     assert "戒面、戒圈、开口端点和装饰排列" in retry_prompt
     validation = real_subprocess_run(
         [sys.executable, str(validator), str(retry / "prompt.txt")],
@@ -406,22 +403,20 @@ def test_ring_retry_compaction_preserves_mirror_requirements():
     retry_prompt = generation._build_ring_retry_prompt(
         base_prompt,
         correction,
-        ".png",
     )
 
     assert len(retry_prompt) <= 1200
-    assert "参考图文件：hand-reference.png；" in retry_prompt
+    assert "参考图文件：" not in retry_prompt
     assert mirror_requirement in retry_prompt
     assert "镜面构图：无。" not in retry_prompt
 
 
 def test_ring_retry_compaction_only_shortens_fixed_no_mirror_line():
     dynamic_reference_text = (
-        "风格：动态参考文本包含“镜面构图：无，不要额外添加镜中反射手部。”字面量；"
-        "手势：左手手背朝镜头。"
+        "参考图风格：动态参考文本包含“镜面构图：无，不要额外添加镜中反射手部。”字面量"
     )
     base_prompt = _complete_ring_retry_prompt(1150).replace(
-        "风格：黑色背景闪光灯直拍；手势：左手手背朝镜头。",
+        "参考图风格：黑色背景闪光灯直拍",
         dynamic_reference_text,
     )
     correction = generation._ring_retry_correction(("ring_structure_mismatch",))
@@ -431,7 +426,6 @@ def test_ring_retry_compaction_only_shortens_fixed_no_mirror_line():
     retry_prompt = generation._build_ring_retry_prompt(
         base_prompt,
         correction,
-        ".jpg",
     )
 
     assert dynamic_reference_text in retry_prompt
@@ -475,7 +469,8 @@ def test_ring_retry_png_reference_keeps_helper_source_and_writes_matching_audit_
     retry_command = calls[1]
     first_image = retry_command.index("--image") + 1
     audit_copy = retry / "hand-reference.png"
-    assert "参考图文件：hand-reference.png；" in retry_prompt
+    assert "hand-reference.png" not in retry_prompt
+    assert "参考图文件：" not in retry_prompt
     assert Path(retry_command[first_image]) == rank_2_png
     assert audit_copy.is_file()
     assert audit_copy.read_bytes() == rank_2_png.read_bytes()
@@ -483,7 +478,7 @@ def test_ring_retry_png_reference_keeps_helper_source_and_writes_matching_audit_
 
 def test_ring_retry_prompt_still_fails_when_equivalent_compaction_is_insufficient():
     product_fact = "产品事实：背侧重叠开口不得闭合"
-    reference_field = "参考图文件：6ecab8b84dd26e9f19de34eb0e3538c.jpg；"
+
     output_role = (
         "输出用途：手部佩戴图。使用深色背景，产品完整清晰，画面不得出现文字、水印、"
         "logo 或平台标识。 产品自然佩戴在手腕或手指根部，接触和阴影真实。"
@@ -491,16 +486,12 @@ def test_ring_retry_prompt_still_fails_when_equivalent_compaction_is_insufficien
     base_prompt = (
         product_fact
         + "；其他产品事实不得截断。" * 100
-        + f"\n【参考构图场景】\n{output_role}\n{reference_field}风格：黑色背景闪光灯直拍；"
-        + "手势：左手手背朝镜头\n【遮挡与接触物理】\n保持真实遮挡。"
+        + f"\n【参考构图场景】\n{output_role}\n参考图风格：黑色背景闪光灯直拍"
+        + "\n参考图场景：黑色衬衫手部近景\n参考图姿势：左手手背朝镜头\n【遮挡与接触物理】\n保持真实遮挡。"
     )
     correction = generation._ring_retry_correction(("ring_structure_mismatch",))
     retry_prompt = f"{base_prompt}\n\n{correction}"
     compressed_prompt = retry_prompt.replace(
-        reference_field,
-        "参考图文件：hand-reference.jpg；",
-        1,
-    ).replace(
         output_role,
         "输出用途：手部佩戴图。产品完整清晰；无文字/水印/logo/平台标识；"
         "佩戴在确认手指根部；接触和阴影真实。",
@@ -512,7 +503,7 @@ def test_ring_retry_prompt_still_fails_when_equivalent_compaction_is_insufficien
         GenerationError,
         match=f"戒指重试 Prompt 长度为 {len(compressed_prompt)}，超过 1200 字上限",
     ):
-        generation._build_ring_retry_prompt(base_prompt, correction, ".jpg")
+        generation._build_ring_retry_prompt(base_prompt, correction)
 
     assert product_fact in base_prompt
 
@@ -562,8 +553,10 @@ def test_ring_retry_rejects_after_all_top_three_references_are_used(
 def test_ring_retry_correction_maps_qc_failure_to_action(failure, expected):
     correction = generation._ring_retry_correction((failure,))
 
-    assert correction.startswith("【本轮纠偏】")
+    assert correction.startswith("【强化要求】")
     assert expected in correction
+    assert failure not in correction
+    assert "上次" not in correction
 
 
 def test_generation_assigns_unique_task_id_for_each_rank(tmp_path, monkeypatch):

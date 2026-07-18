@@ -95,7 +95,7 @@ jewelry-on-hand generate --run-root .\outputs\auto_reference_runs\demo `
 
 Prompt 必须重新构建并通过 `scripts/validate_prompt_contract.py`。Prompt builder 不接收选图提示词、规范化条件或候选命中证据；选图提示词不得写入 AIReiter Prompt。已选参考图自身的场景、姿势和背景元数据仍可进入参考构图区块。普通项链精确输出 `主吊坠：无。` 与 `禁止新增、补造、复制、悬挂化吊坠，也不得把珠子、跑环或其他元件改成吊坠。`；带链吊坠精确输出 `主吊坠：有；数量：1；所属层：第 N 层。` 与固定保持/禁止句。不得从自由文本极性猜测 presence。内部图 1 只提供人物、姿势、构图、背景和光线；内部图 2 只提供产品身份。禁止迁移内部图 2 中的人物、手腕、手臂、颈部、胸部、衣服、头发、脸、皮肤块或背景。
 
-默认模型为 `gpt_image_2`。戒指首次使用人工决策 Rank；失败后切换到 Top 3 中尚未尝试的下一张，并按最新 `critical_failures` 注入指位、主石、结构、数量、接触、来源迁移或手指变形纠偏。实际 Rank、失败码和产品上手图审计副本分别写入 `reference-rank.txt`、`retry-failures.json` 和 `product-identity.jpg`。Top 3 用尽后停止。累计超过 1 次 `status != "pass"` 的 QC 后，下一次才用 `nano_banana_v2`。每次生成写入后续 `generation/NN/`，不得覆盖旧结果；非空目录缺少 `qc.json` 时必须停止处理。
+默认模型为 `gpt_image_2`。戒指首次使用人工决策 Rank；失败后切换到 Top 3 中尚未尝试的下一张，并把最新 `critical_failures` 经固定白名单映射为指位、主石、结构、数量、接触、来源隔离或手指解剖的直接视觉强化要求。原始失败码和失败 notes 只写入审计文件，不得进入 Prompt。实际 Rank、失败码和产品上手图审计副本分别写入 `reference-rank.txt`、`retry-failures.json` 和 `product-identity.jpg`。Top 3 用尽后停止。累计超过 1 次 `status != "pass"` 的 QC 后，下一次才用 `nano_banana_v2`。每次生成写入后续 `generation/NN/`，不得覆盖旧结果；非空目录缺少 `qc.json` 时必须停止处理。
 
 ### 4. `qc`
 

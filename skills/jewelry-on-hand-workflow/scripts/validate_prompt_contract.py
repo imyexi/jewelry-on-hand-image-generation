@@ -37,7 +37,13 @@ COMMON_LAYER_REQUIREMENTS = {
     "【品类保真】": (
         "产品保真以",
     ),
-    "【参考构图场景】": ("参考图文件：", "忽略参考图首饰："),
+    "【参考构图场景】": (
+        "参考图风格：",
+        "参考图场景：",
+        "参考图姿势：",
+        "忽略参考图首饰：",
+        "镜面构图：",
+    ),
     "【遮挡与接触物理】": ("产品必须清晰可见",),
     "【禁止项】": (
         "不要把内部图1里的原有首饰迁移到新图",
@@ -144,6 +150,16 @@ RING_LAYER_REQUIREMENTS = {
 ALLOWED_PRODUCT_CATEGORIES = {"bracelet", "necklace", "pendant_necklace", "ring"}
 ALLOWED_DISPLAY_MODES = {"worn", "hand_held"}
 FORBIDDEN_FRAGMENTS = ("???", "锟", "�")
+FORBIDDEN_REFERENCE_AUDIT_PREFIXES = (
+    "参考图文件：",
+    "参考图路径：",
+    "参考图排名：",
+    "参考图用途：",
+    "推荐方式：",
+    "参考图备注：",
+    "匹配理由：",
+    "风险提示：",
+)
 
 LAYER_OWNED_PREFIXES = {
     "【基础安全边界】": (
@@ -209,17 +225,10 @@ LAYER_OWNED_PREFIXES = {
     ),
     "【参考构图场景】": (
         "输出用途：",
-        "参考图文件：",
-        "参考图路径：",
-        "参考图排名：",
-        "参考图用途：",
         "参考图风格：",
         "参考图场景：",
-        "推荐方式：",
-        "参考图备注：",
+        "参考图姿势：",
         "忽略参考图首饰：",
-        "匹配理由：",
-        "风险提示：",
         "镜面构图：",
     ),
     "【遮挡与接触物理】": (
@@ -317,6 +326,7 @@ def validate_prompt(path: Path) -> list[str]:
         preamble, sections = parsed
         _validate_preamble(preamble, errors)
         _require_layer_rules(sections, COMMON_LAYER_REQUIREMENTS, errors)
+        _validate_reference_prompt_hygiene(sections, errors)
         _validate_owned_fragment_locations(sections, errors)
 
         analysis = sections["【产品分析与不确定性】"]
@@ -454,6 +464,17 @@ def _validate_category_and_mode(
         else WORN_NECKLACE_LAYER_REQUIREMENTS
     )
     _require_layer_rules(sections, mode_rules, errors)
+
+
+def _validate_reference_prompt_hygiene(
+    sections: dict[str, str],
+    errors: list[str],
+) -> None:
+    for section in sections.values():
+        for line in _section_lines(section):
+            for prefix in FORBIDDEN_REFERENCE_AUDIT_PREFIXES:
+                if line.startswith(prefix):
+                    errors.append(f"Prompt 不得包含参考图审计字段：{prefix}")
 
 
 def _validate_ring_prompt(

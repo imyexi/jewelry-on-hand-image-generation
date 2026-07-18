@@ -54,9 +54,12 @@ def build_generation_prompt(
     mirror_line = _mirror_line(reference)
     ignored_jewelry = _join_items(reference.ignored_reference_jewelry)
     special_requirements = _join_items(product.special_requirements)
-    reason = _join_items(reference.reason)
-    risk = _join_items(reference.risk)
     color_family = _join_items(product.color_family)
+    reference_style = _field(reference.row.style_category)
+    reference_scene = _field(reference.row.scene_keywords)
+    reference_pose = _field(
+        reference.row.pose_keywords or reference.row.scene_keywords
+    )
     fidelity_section = _fidelity_section(fidelity_constraints)
     occluded_parts = _join_items(product.occluded_parts)
     uncertain_details = _join_items(product.uncertain_details)
@@ -104,17 +107,10 @@ def build_generation_prompt(
 
 【参考构图场景】
 {role_instruction}
-参考图文件：{_field(reference.row.file_name, "未提供")}
-参考图路径：{_field(reference.row.relative_path, "未提供")}
-参考图排名：rank {reference.rank}，score {reference.score}
-参考图用途：{_field(reference.row.purpose_category)}
-参考图风格：{_field(reference.row.style_category)}
-参考图场景：{_field(reference.row.scene_keywords)}
-推荐方式：{_field(reference.row.recommended_usage)}
-参考图备注：{_field(reference.row.notes)}
+参考图风格：{reference_style}
+参考图场景：{reference_scene}
+参考图姿势：{reference_pose}
 忽略参考图首饰：{ignored_jewelry}
-匹配理由：{reason}
-风险提示：{risk}
 {mirror_line}
 
 【遮挡与接触物理】
@@ -180,7 +176,9 @@ def _build_ring_generation_prompt(
 {ring_finger_anchor_instruction(product)}
 
 【参考构图场景】
-{role_line}参考图文件：{_field(reference.row.file_name, "未提供")}；风格：{_field(reference.row.style_category)}；手势：{reference_pose}。
+{role_line}参考图风格：{_field(reference.row.style_category)}
+参考图场景：{_field(reference.row.scene_keywords)}
+参考图姿势：{reference_pose}
 忽略参考图首饰：{ignored_jewelry}。
 {_mirror_line(reference)}
 
