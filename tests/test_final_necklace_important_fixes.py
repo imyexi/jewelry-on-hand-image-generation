@@ -20,20 +20,16 @@ from jewelry_on_hand.product_fidelity import (
     build_product_fidelity_constraints,
     validate_product_fidelity_constraints,
 )
+from jewelry_on_hand.product_types import ProductType
 from jewelry_on_hand.run_paths import RunPaths, write_json
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RUN04_ANALYSIS = (
-    PROJECT_ROOT
-    / "output"
-    / "multi-category-validation"
-    / "2026-07-13"
-    / "real-proof"
-    / "necklace-worn-double"
-    / "run-20260713-double-necklace-04"
-    / "analysis"
-    / "product_analysis.json"
+PLAIN_DOUBLE_LOOP_ANALYSIS = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "final_necklace"
+    / "plain_double_loop_necklace_analysis.json"
 )
 ARTIFACT_INSPECTOR = (
     PROJECT_ROOT
@@ -45,19 +41,28 @@ ARTIFACT_INSPECTOR = (
 PENDANT_TERMS = ("吊坠", "主吊坠", "链坠", "流苏", "坠子")
 
 
-def _run04_analysis_data() -> dict[str, object]:
-    return json.loads(RUN04_ANALYSIS.read_text(encoding="utf-8"))
+def _plain_double_loop_analysis_data() -> dict[str, object]:
+    return json.loads(PLAIN_DOUBLE_LOOP_ANALYSIS.read_text(encoding="utf-8"))
+
+
+def test_plain_double_loop_fixture_is_valid_modern_necklace() -> None:
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
+
+    assert product.confirmed_product_type is ProductType.NECKLACE
+    assert product.layer_count == 2
+    assert product.has_pendant is False
+    assert product.pendant_count == 0
 
 
 def _constraints_for_text(text: str) -> ProductFidelityConstraints:
-    data = _run04_analysis_data()
+    data = _plain_double_loop_analysis_data()
     data["visible_appearance"] = text
     data["special_requirements"] = []
     return build_product_fidelity_constraints(ProductAnalysis.from_dict(data))
 
 
-def test_run04_negative_pendant_descriptions_do_not_create_positive_canonical() -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+def test_plain_double_loop_negative_pendant_descriptions_do_not_create_positive_canonical() -> None:
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
 
     constraints = build_product_fidelity_constraints(product)
 
@@ -70,8 +75,8 @@ def test_run04_negative_pendant_descriptions_do_not_create_positive_canonical() 
     validate_product_fidelity_constraints(product, constraints)
 
 
-def test_run04_attachment_remains_one_plain_necklace_in_two_loops() -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+def test_plain_double_loop_attachment_remains_one_necklace() -> None:
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
 
     constraints = build_product_fidelity_constraints(product)
     canonical_text = json.dumps(constraints.to_dict(), ensure_ascii=False)
@@ -120,7 +125,7 @@ def test_positive_and_mixed_pendant_clauses_keep_positive_alias(
     description: str,
     source_alias: str,
 ) -> None:
-    data = _run04_analysis_data()
+    data = _plain_double_loop_analysis_data()
     data.update(
         {
             "product_type": "带链吊坠",
@@ -153,7 +158,7 @@ def test_positive_and_mixed_pendant_clauses_keep_positive_alias(
 def test_necklace_without_pendant_rejects_positive_pendant_canonical(
     tamper_kind: str,
 ) -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
     payload = copy.deepcopy(build_product_fidelity_constraints(product).to_dict())
     if tamper_kind == "normalized_keyword":
         payload["detected_keywords"] = ["吊坠"]
@@ -196,11 +201,11 @@ def test_necklace_without_pendant_rejects_positive_pendant_canonical(
         ("detected_keywords", "流苏"),
     ],
 )
-def test_run04_necklace_without_pendant_rejects_positive_semantics_in_every_canonical_field(
+def test_plain_double_loop_necklace_rejects_positive_pendant_semantics_in_every_canonical_field(
     field_name: str,
     semantic_text: str,
 ) -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
     payload = copy.deepcopy(build_product_fidelity_constraints(product).to_dict())
     if field_name == "detected_keywords":
         payload["detected_keywords"] = [semantic_text]
@@ -243,7 +248,7 @@ def test_run04_necklace_without_pendant_rejects_positive_semantics_in_every_cano
 def test_necklace_without_pendant_rejects_order_independent_preservation_semantics(
     semantic_text: str,
 ) -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
     payload = copy.deepcopy(build_product_fidelity_constraints(product).to_dict())
     payload["must_not_change"].append(semantic_text)
     constraints = ProductFidelityConstraints.from_dict(payload)
@@ -297,7 +302,7 @@ def test_necklace_without_pendant_connector_text_keeps_structured_absent(
 def test_necklace_without_pendant_rejects_explicit_absence_text_in_canonical(
     absence: str,
 ) -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
     payload = copy.deepcopy(build_product_fidelity_constraints(product).to_dict())
     payload["must_not_change"].append(absence)
     constraints = ProductFidelityConstraints.from_dict(payload)
@@ -319,7 +324,7 @@ def test_necklace_without_pendant_rejects_explicit_absence_text_in_canonical(
 def test_necklace_without_pendant_rejects_creation_prohibitions_in_canonical(
     prohibition: str,
 ) -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
     payload = copy.deepcopy(build_product_fidelity_constraints(product).to_dict())
     payload["must_not_change"].append(prohibition)
     constraints = ProductFidelityConstraints.from_dict(payload)
@@ -342,7 +347,7 @@ def test_necklace_without_pendant_rejects_creation_prohibitions_in_canonical(
 def test_necklace_without_pendant_rejects_preservation_rejections_in_canonical(
     prohibition: str,
 ) -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
     payload = copy.deepcopy(build_product_fidelity_constraints(product).to_dict())
     payload["must_not_change"].append(prohibition)
     constraints = ProductFidelityConstraints.from_dict(payload)
@@ -363,7 +368,7 @@ def test_necklace_without_pendant_rejects_preservation_rejections_in_canonical(
 def test_necklace_without_pendant_rejects_prohibited_destruction_of_pendant(
     prohibition: str,
 ) -> None:
-    product = ProductAnalysis.from_dict(_run04_analysis_data())
+    product = ProductAnalysis.from_dict(_plain_double_loop_analysis_data())
     payload = copy.deepcopy(build_product_fidelity_constraints(product).to_dict())
     payload["must_not_change"].append(prohibition)
     constraints = ProductFidelityConstraints.from_dict(payload)
@@ -373,7 +378,7 @@ def test_necklace_without_pendant_rejects_prohibited_destruction_of_pendant(
 
 
 def test_pendant_necklace_allows_positive_pendant_preservation_semantics() -> None:
-    data = _run04_analysis_data()
+    data = _plain_double_loop_analysis_data()
     data.update(
         {
             "product_type": "带链吊坠",
@@ -399,7 +404,7 @@ def test_pendant_necklace_allows_positive_pendant_preservation_semantics() -> No
 
 
 def _analysis_with_length(length_category: str | None) -> dict[str, object]:
-    data = _run04_analysis_data()
+    data = _plain_double_loop_analysis_data()
     data["visible_appearance"] = "同一条连续微珠链绕颈形成上下两圈"
     data["special_requirements"] = []
     data["length_category"] = length_category

@@ -1,0 +1,40 @@
+{
+  "product_type": "项链",
+  "detected_product_type": "necklace",
+  "confirmed_product_type": "necklace",
+  "classification_confidence": "high",
+  "classification_evidence": [
+    "同一条连续微珠链绕颈形成上下两圈，未见悬挂吊坠"
+  ],
+  "classification_source": "auto_confirmed",
+  "display_mode": "worn",
+  "source_image_type": "worn_source",
+  "wear_position": "颈部、锁骨及胸前",
+  "visible_appearance": "同一条连续微珠链绕颈形成上下两圈，链路中的圆珠不是悬挂吊坠",
+  "color_family": [
+    "米白色",
+    "金色"
+  ],
+  "style_mood": "精致",
+  "composition": "颈部至胸前近景",
+  "product_dimensions": {},
+  "needs_full_front_display": true,
+  "special_requirements": [],
+  "layer_count": 2,
+  "length_category": "collarbone",
+  "chain_or_strand_type": "beaded",
+  "has_pendant": false,
+  "pendant_count": 0,
+  "pendant_layer": null,
+  "pendant_position": null,
+  "pendant_orientation": null,
+  "connection_structure": null,
+  "symmetry": "approximately_symmetric",
+  "occluded_parts": [
+    "后颈扣头"
+  ],
+  "uncertain_details": [
+    "扣头具体结构"
+  ],
+  "is_independent_multi_item": false
+}

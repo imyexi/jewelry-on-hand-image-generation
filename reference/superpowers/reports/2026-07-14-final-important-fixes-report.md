@@ -15,9 +15,9 @@
 
 ### RED
 
-- 聚焦测试位于 `tests/test_final_necklace_important_fixes.py`，使用真实历史输入 `output/multi-category-validation/2026-07-13/real-proof/necklace-worn-double/run-20260713-double-necklace-04/analysis/product_analysis.json`；只读取该 analysis，不修改任何历史 proof。
-- 首次 RED 命令：`uv run pytest tests/test_final_necklace_important_fixes.py -k 'run04 or negative_pendant or positive_and_mixed or necklace_without_pendant' -q`
-- 首次 RED 退出码 `1`，结果 `13 failed, 1 passed`：真实 run04 的“不是悬挂吊坠”和八类否定表达仍提取 `detected_keywords=("吊坠",)`；混合转折句错误选择否定分句中的别名；普通项链 canonical 可注入 `normalized_keyword=吊坠` 或“必须保留主吊坠”而不报错。
+- 聚焦测试位于 `tests/test_final_necklace_important_fixes.py`，使用仓库内固化夹具 `tests/fixtures/final_necklace/plain_double_loop_necklace_analysis.json`。该夹具保留历史双圈普通项链场景所需的业务语义，但不依赖被 `.gitignore` 排除、可能被清理的 `output/` 运行产物。
+- 首次 RED 命令：`uv run pytest tests/test_final_necklace_important_fixes.py -k 'plain_double_loop or negative_pendant or positive_and_mixed or necklace_without_pendant' -q`
+- 首次 RED 退出码 `1`，结果 `13 failed, 1 passed`：双圈普通项链夹具中的“不是悬挂吊坠”和八类否定表达仍提取 `detected_keywords=("吊坠",)`；混合转折句错误选择否定分句中的别名；普通项链 canonical 可注入 `normalized_keyword=吊坠` 或“必须保留主吊坠”而不报错。
 - 第二轮复审新增参数化 RED，覆盖 `must_not_change/source_text/visual_shape/relationship/name/location/qc_question` 中的“不得改变主吊坠”“不可改变吊坠连接”“维持主吊坠形状”“继续保有/保有吊坠”“不可删除吊坠”“保全吊坠”。
 - 第二轮 RED 命令：`uv run pytest tests/test_final_necklace_important_fixes.py -k 'synonymous_positive_pendant or pendant_creation_prohibitions or pendant_necklace_allows_positive' -q`
 - 第二轮 RED 退出码 `1`，结果 `7 failed, 5 passed, 35 deselected in 0.20s`：七种同义正向保留语义均错误通过；四种禁止新增/改造语义和带链吊坠正向语义已通过。
